@@ -266,6 +266,9 @@ item(key = "hourly_usage_chart", contentType = "hourly_chart") {
                         Text(if (data.days == 1) "이 시간대에 사용한 앱" else "앱별 시간대 하루 평균", style = MaterialTheme.typography.titleMedium)
                     }
                 }
+                item(key = "today_shortform_hour_$hour") {
+                    ShortformHourPanel(java.time.LocalDate.now().toString(), hour)
+                }
                 val apps = data.hourlyApps.getOrNull(hour).orEmpty().filter { it.minutes >= 1.0 }
                 if (apps.isEmpty()) item { Text("확인된 앱 사용 내역이 없습니다.") }
                 items(count = apps.size, key = { index -> "app_${apps[index].packageName}" }) { index ->

@@ -11,9 +11,10 @@ import androidx.room.RoomDatabase
     DailyUsageGoalEntity::class, BedtimeGoalEntity::class, UsageBreakGoalEntity::class,
     UsageSessionEntity::class, ObservationIntervalEntity::class, DailyUsageSummaryEntity::class,
     ConsentEventEntity::class, BackupStateEntity::class, SyncOutboxEntity::class,
-    ShortformDailyRecordEntity::class, LocalImportReceiptEntity::class, SleepConfirmationEntity::class],
-    version = 4, exportSchema = true)
+    ShortformDailyRecordEntity::class, LocalImportReceiptEntity::class, SleepConfirmationEntity::class, ShortformHourEntity::class],
+    version = 5, exportSchema = true)
 abstract class ItvDatabase : RoomDatabase() {
+    abstract fun shortformHourDao(): ShortformHourDao
     abstract fun sleepConfirmationDao(): SleepConfirmationDao
     abstract fun dao(): ItvDao
     abstract fun shortformDao(): ShortformDao
@@ -34,10 +35,15 @@ abstract class ItvDatabase : RoomDatabase() {
                 db.execSQL("CREATE TABLE IF NOT EXISTS `sleep_confirmations` (`ownerId` TEXT NOT NULL, `recordDate` TEXT NOT NULL, `zoneId` TEXT NOT NULL, `choice` TEXT NOT NULL, `startMs` INTEGER, `endMs` INTEGER, `origin` TEXT NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`ownerId`, `recordDate`))")
             }
         }
+        val MIGRATION_4_5 = object : Migration(4,5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS `shortform_hourly_records` (`ownerId` TEXT NOT NULL, `packageName` TEXT NOT NULL, `localDate` TEXT NOT NULL, `hour` INTEGER NOT NULL, `zoneId` TEXT NOT NULL, `durationMs` INTEGER NOT NULL, PRIMARY KEY(`ownerId`,`packageName`,`localDate`,`hour`,`zoneId`))")
+            }
+        }
         @Volatile private var instance: ItvDatabase? = null
         fun get(context: Context): ItvDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext,
-                ItvDatabase::class.java, "itv.db").addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build().also { instance = it }
+                ItvDatabase::class.java, "itv.db").addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5).build().also { instance = it }
         }
     }
 }

@@ -86,10 +86,21 @@ internal class RoomShortformPersistence(context: Context, private val ownerId: S
             dao.saveRecords(records.map { entity(it) })
         }
     }
+    override suspend fun hours():List<StoredShortformHour> = db.shortformHourDao().all(ownerId).map {
+        StoredShortformHour(it.packageName,it.localDate,it.hour,it.zoneId,it.durationMs)
+    }
+    override suspend fun saveWithHours(records:List<StoredShortformDay>,hours:List<StoredShortformHour>) {
+        db.withTransaction {
+            check(dao.receipt(importKey)?.ownerId==ownerId)
+            dao.saveRecords(records.map { entity(it) })
+            db.shortformHourDao().save(hours.map { ShortformHourEntity(ownerId,it.packageName,it.date,it.hour,it.zone,it.ms) })
+        }
+    }
     override suspend fun clear(): Unit = withContext(Dispatchers.IO) {
         db.withTransaction {
             check(dao.receipt(importKey)?.ownerId == ownerId)
             dao.deleteOwnerRecords(ownerId)
+            db.shortformHourDao().clear(ownerId)
             // Keep receipt: preserved JSON must never resurrect deleted records.
         }
     }

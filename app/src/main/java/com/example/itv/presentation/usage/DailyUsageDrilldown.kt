@@ -96,6 +96,9 @@ internal fun rememberDailyUsageDrilldownItems(period: Report): LazyListScope.() 
                 item(key = "day_hour_detail_title") {
                     Text("${selected}시 ~ ${selected+1}시 · ${hourlyDuration(data.values[selected])}")
                 }
+                item(key = "day_hour_shortform_${dateKey}_${selected}") {
+                    ShortformHourPanel(checkNotNull(dateKey), selected)
+                }
                 val apps = data.hourlyApps[selected].filter { it.minutes >= 1.0 }
                 if(apps.isEmpty()) item(key = "day_hour_apps_empty") { Text("확인된 앱 기록이 없습니다.") }
                 items(apps, key = { "day_hour_app_${it.packageName}" }, contentType = { "app_usage" }) {

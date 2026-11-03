@@ -1,0 +1,1096 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 5,
+    "identityHash": "6d02c857c7796c46f6e62f2c43404355",
+    "entities": [
+      {
+        "tableName": "owners",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`ownerId` TEXT NOT NULL, `ownerType` TEXT NOT NULL, `authUid` TEXT, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`ownerId`))",
+        "fields": [
+          {
+            "fieldPath": "ownerId",
+            "columnName": "ownerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ownerType",
+            "columnName": "ownerType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "authUid",
+            "columnName": "authUid",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "ownerId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_owners_authUid",
+            "unique": true,
+            "columnNames": [
+              "authUid"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_owners_authUid` ON `${TABLE_NAME}` (`authUid`)"
+          }
+        ]
+      },
+      {
+        "tableName": "user_settings",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`ownerId` TEXT NOT NULL, `coachingEnabled` INTEGER NOT NULL, `coachingIntensity` TEXT NOT NULL, `displayMode` TEXT NOT NULL, `snoozeSeconds` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, `localRevision` INTEGER NOT NULL, `goalSetupCompleted` INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(`ownerId`), FOREIGN KEY(`ownerId`) REFERENCES `owners`(`ownerId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "ownerId",
+            "columnName": "ownerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "coachingEnabled",
+            "columnName": "coachingEnabled",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "coachingIntensity",
+            "columnName": "coachingIntensity",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "displayMode",
+            "columnName": "displayMode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "snoozeSeconds",
+            "columnName": "snoozeSeconds",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "localRevision",
+            "columnName": "localRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "goalSetupCompleted",
+            "columnName": "goalSetupCompleted",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "ownerId"
+          ]
+        },
+        "foreignKeys": [
+          {
+            "table": "owners",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "ownerId"
+            ],
+            "referencedColumns": [
+              "ownerId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "user_goals",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`goalId` TEXT NOT NULL, `ownerId` TEXT NOT NULL, `goalType` TEXT NOT NULL, `enabled` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, `localRevision` INTEGER NOT NULL, PRIMARY KEY(`goalId`), FOREIGN KEY(`ownerId`) REFERENCES `owners`(`ownerId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "goalId",
+            "columnName": "goalId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ownerId",
+            "columnName": "ownerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "goalType",
+            "columnName": "goalType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "enabled",
+            "columnName": "enabled",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "localRevision",
+            "columnName": "localRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "goalId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_user_goals_ownerId_goalType",
+            "unique": true,
+            "columnNames": [
+              "ownerId",
+              "goalType"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_user_goals_ownerId_goalType` ON `${TABLE_NAME}` (`ownerId`, `goalType`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "owners",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "ownerId"
+            ],
+            "referencedColumns": [
+              "ownerId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "daily_usage_goal_details",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`goalId` TEXT NOT NULL, `dailyLimitSeconds` INTEGER NOT NULL, PRIMARY KEY(`goalId`), FOREIGN KEY(`goalId`) REFERENCES `user_goals`(`goalId`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "goalId",
+            "columnName": "goalId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "dailyLimitSeconds",
+            "columnName": "dailyLimitSeconds",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "goalId"
+          ]
+        },
+        "foreignKeys": [
+          {
+            "table": "user_goals",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "goalId"
+            ],
+            "referencedColumns": [
+              "goalId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "bedtime_goal_details",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`goalId` TEXT NOT NULL, `localMinuteOfDay` INTEGER NOT NULL, PRIMARY KEY(`goalId`), FOREIGN KEY(`goalId`) REFERENCES `user_goals`(`goalId`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "goalId",
+            "columnName": "goalId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "localMinuteOfDay",
+            "columnName": "localMinuteOfDay",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "goalId"
+          ]
+        },
+        "foreignKeys": [
+          {
+            "table": "user_goals",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "goalId"
+            ],
+            "referencedColumns": [
+              "goalId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "usage_break_goal_details",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`goalId` TEXT NOT NULL, `usageThresholdSeconds` INTEGER NOT NULL, `breakDurationSeconds` INTEGER NOT NULL, `usageMetric` TEXT NOT NULL, `scopePackageName` TEXT, `accumulationPolicy` TEXT NOT NULL, PRIMARY KEY(`goalId`), FOREIGN KEY(`goalId`) REFERENCES `user_goals`(`goalId`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "goalId",
+            "columnName": "goalId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "usageThresholdSeconds",
+            "columnName": "usageThresholdSeconds",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "breakDurationSeconds",
+            "columnName": "breakDurationSeconds",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "usageMetric",
+            "columnName": "usageMetric",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "scopePackageName",
+            "columnName": "scopePackageName",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "accumulationPolicy",
+            "columnName": "accumulationPolicy",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "goalId"
+          ]
+        },
+        "foreignKeys": [
+          {
+            "table": "user_goals",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "goalId"
+            ],
+            "referencedColumns": [
+              "goalId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "usage_sessions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`ownerId` TEXT NOT NULL, `sessionId` TEXT NOT NULL, `packageName` TEXT NOT NULL, `startedAt` INTEGER NOT NULL, `endedAt` INTEGER, `status` TEXT NOT NULL, `quality` TEXT NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`ownerId`, `sessionId`), FOREIGN KEY(`ownerId`) REFERENCES `owners`(`ownerId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "ownerId",
+            "columnName": "ownerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sessionId",
+            "columnName": "sessionId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "packageName",
+            "columnName": "packageName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "startedAt",
+            "columnName": "startedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "endedAt",
+            "columnName": "endedAt",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "quality",
+            "columnName": "quality",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "ownerId",
+            "sessionId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_usage_sessions_ownerId_startedAt",
+            "unique": false,
+            "columnNames": [
+              "ownerId",
+              "startedAt"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_usage_sessions_ownerId_startedAt` ON `${TABLE_NAME}` (`ownerId`, `startedAt`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "owners",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "ownerId"
+            ],
+            "referencedColumns": [
+              "ownerId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "observation_intervals",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`ownerId` TEXT NOT NULL, `observationId` TEXT NOT NULL, `sessionId` TEXT, `packageName` TEXT NOT NULL, `startedAt` INTEGER NOT NULL, `endedAt` INTEGER NOT NULL, `activityType` TEXT NOT NULL, `quality` TEXT NOT NULL, `sourceType` TEXT NOT NULL, `sourceRecordKey` TEXT, `ruleVersion` TEXT NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`ownerId`, `observationId`), FOREIGN KEY(`ownerId`) REFERENCES `owners`(`ownerId`) ON UPDATE NO ACTION ON DELETE RESTRICT , FOREIGN KEY(`ownerId`, `sessionId`) REFERENCES `usage_sessions`(`ownerId`, `sessionId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "ownerId",
+            "columnName": "ownerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "observationId",
+            "columnName": "observationId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sessionId",
+            "columnName": "sessionId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "packageName",
+            "columnName": "packageName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "startedAt",
+            "columnName": "startedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "endedAt",
+            "columnName": "endedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "activityType",
+            "columnName": "activityType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "quality",
+            "columnName": "quality",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceType",
+            "columnName": "sourceType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceRecordKey",
+            "columnName": "sourceRecordKey",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "ruleVersion",
+            "columnName": "ruleVersion",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "ownerId",
+            "observationId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_observation_intervals_ownerId_startedAt",
+            "unique": false,
+            "columnNames": [
+              "ownerId",
+              "startedAt"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_observation_intervals_ownerId_startedAt` ON `${TABLE_NAME}` (`ownerId`, `startedAt`)"
+          },
+          {
+            "name": "index_observation_intervals_ownerId_sessionId",
+            "unique": false,
+            "columnNames": [
+              "ownerId",
+              "sessionId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_observation_intervals_ownerId_sessionId` ON `${TABLE_NAME}` (`ownerId`, `sessionId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "owners",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "ownerId"
+            ],
+            "referencedColumns": [
+              "ownerId"
+            ]
+          },
+          {
+            "table": "usage_sessions",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "ownerId",
+              "sessionId"
+            ],
+            "referencedColumns": [
+              "ownerId",
+              "sessionId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "daily_usage_summaries",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`ownerId` TEXT NOT NULL, `localDate` TEXT NOT NULL, `zoneId` TEXT NOT NULL, `metricType` TEXT NOT NULL, `scopeKey` TEXT NOT NULL, `usageSeconds` INTEGER, `quality` TEXT NOT NULL, `calculationVersion` TEXT NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`ownerId`, `localDate`, `zoneId`, `metricType`, `scopeKey`), FOREIGN KEY(`ownerId`) REFERENCES `owners`(`ownerId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "ownerId",
+            "columnName": "ownerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "localDate",
+            "columnName": "localDate",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "zoneId",
+            "columnName": "zoneId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "metricType",
+            "columnName": "metricType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "scopeKey",
+            "columnName": "scopeKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "usageSeconds",
+            "columnName": "usageSeconds",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "quality",
+            "columnName": "quality",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "calculationVersion",
+            "columnName": "calculationVersion",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "ownerId",
+            "localDate",
+            "zoneId",
+            "metricType",
+            "scopeKey"
+          ]
+        },
+        "foreignKeys": [
+          {
+            "table": "owners",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "ownerId"
+            ],
+            "referencedColumns": [
+              "ownerId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "consent_events",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`eventId` TEXT NOT NULL, `ownerId` TEXT NOT NULL, `consentType` TEXT NOT NULL, `noticeVersion` TEXT NOT NULL, `action` TEXT NOT NULL, `occurredAt` INTEGER NOT NULL, `origin` TEXT NOT NULL, PRIMARY KEY(`eventId`), FOREIGN KEY(`ownerId`) REFERENCES `owners`(`ownerId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "eventId",
+            "columnName": "eventId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ownerId",
+            "columnName": "ownerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "consentType",
+            "columnName": "consentType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "noticeVersion",
+            "columnName": "noticeVersion",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "action",
+            "columnName": "action",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "occurredAt",
+            "columnName": "occurredAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "origin",
+            "columnName": "origin",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "eventId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_consent_events_ownerId_occurredAt",
+            "unique": false,
+            "columnNames": [
+              "ownerId",
+              "occurredAt"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_consent_events_ownerId_occurredAt` ON `${TABLE_NAME}` (`ownerId`, `occurredAt`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "owners",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "ownerId"
+            ],
+            "referencedColumns": [
+              "ownerId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "backup_state",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`ownerId` TEXT NOT NULL, `restoreState` TEXT NOT NULL, `schemaVersion` INTEGER NOT NULL, `lastBackupAt` INTEGER, `lastRestoreAt` INTEGER, PRIMARY KEY(`ownerId`), FOREIGN KEY(`ownerId`) REFERENCES `owners`(`ownerId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "ownerId",
+            "columnName": "ownerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "restoreState",
+            "columnName": "restoreState",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "schemaVersion",
+            "columnName": "schemaVersion",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastBackupAt",
+            "columnName": "lastBackupAt",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lastRestoreAt",
+            "columnName": "lastRestoreAt",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "ownerId"
+          ]
+        },
+        "foreignKeys": [
+          {
+            "table": "owners",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "ownerId"
+            ],
+            "referencedColumns": [
+              "ownerId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "sync_outbox",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`operationId` TEXT NOT NULL, `ownerId` TEXT NOT NULL, `entityType` TEXT NOT NULL, `entityId` TEXT NOT NULL, `operationType` TEXT NOT NULL, `entityRevision` INTEGER NOT NULL, `state` TEXT NOT NULL, `retryCount` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`operationId`), FOREIGN KEY(`ownerId`) REFERENCES `owners`(`ownerId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "operationId",
+            "columnName": "operationId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ownerId",
+            "columnName": "ownerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "entityType",
+            "columnName": "entityType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "entityId",
+            "columnName": "entityId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "operationType",
+            "columnName": "operationType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "entityRevision",
+            "columnName": "entityRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "retryCount",
+            "columnName": "retryCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "operationId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_sync_outbox_ownerId_state",
+            "unique": false,
+            "columnNames": [
+              "ownerId",
+              "state"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_sync_outbox_ownerId_state` ON `${TABLE_NAME}` (`ownerId`, `state`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "owners",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "ownerId"
+            ],
+            "referencedColumns": [
+              "ownerId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "shortform_daily_records",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`ownerId` TEXT NOT NULL, `packageName` TEXT NOT NULL, `localDate` TEXT NOT NULL, `zoneKey` TEXT NOT NULL, `source` TEXT NOT NULL, `durationMs` INTEGER NOT NULL, `transitionCount` INTEGER NOT NULL, `observed` INTEGER NOT NULL, `calculationVersion` TEXT NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`ownerId`, `packageName`, `localDate`, `zoneKey`, `source`))",
+        "fields": [
+          {
+            "fieldPath": "ownerId",
+            "columnName": "ownerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "packageName",
+            "columnName": "packageName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "localDate",
+            "columnName": "localDate",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "zoneKey",
+            "columnName": "zoneKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "source",
+            "columnName": "source",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "durationMs",
+            "columnName": "durationMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "transitionCount",
+            "columnName": "transitionCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "observed",
+            "columnName": "observed",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "calculationVersion",
+            "columnName": "calculationVersion",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "ownerId",
+            "packageName",
+            "localDate",
+            "zoneKey",
+            "source"
+          ]
+        }
+      },
+      {
+        "tableName": "local_import_receipts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`importKey` TEXT NOT NULL, `ownerId` TEXT NOT NULL, `sourceName` TEXT NOT NULL, `importedRows` INTEGER NOT NULL, `completedAt` INTEGER NOT NULL, PRIMARY KEY(`importKey`))",
+        "fields": [
+          {
+            "fieldPath": "importKey",
+            "columnName": "importKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ownerId",
+            "columnName": "ownerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceName",
+            "columnName": "sourceName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "importedRows",
+            "columnName": "importedRows",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "completedAt",
+            "columnName": "completedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "importKey"
+          ]
+        }
+      },
+      {
+        "tableName": "sleep_confirmations",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`ownerId` TEXT NOT NULL, `recordDate` TEXT NOT NULL, `zoneId` TEXT NOT NULL, `choice` TEXT NOT NULL, `startMs` INTEGER, `endMs` INTEGER, `origin` TEXT NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`ownerId`, `recordDate`))",
+        "fields": [
+          {
+            "fieldPath": "ownerId",
+            "columnName": "ownerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recordDate",
+            "columnName": "recordDate",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "zoneId",
+            "columnName": "zoneId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "choice",
+            "columnName": "choice",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "startMs",
+            "columnName": "startMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "endMs",
+            "columnName": "endMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "origin",
+            "columnName": "origin",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "ownerId",
+            "recordDate"
+          ]
+        }
+      },
+      {
+        "tableName": "shortform_hourly_records",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`ownerId` TEXT NOT NULL, `packageName` TEXT NOT NULL, `localDate` TEXT NOT NULL, `hour` INTEGER NOT NULL, `zoneId` TEXT NOT NULL, `durationMs` INTEGER NOT NULL, PRIMARY KEY(`ownerId`, `packageName`, `localDate`, `hour`, `zoneId`))",
+        "fields": [
+          {
+            "fieldPath": "ownerId",
+            "columnName": "ownerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "packageName",
+            "columnName": "packageName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "localDate",
+            "columnName": "localDate",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "hour",
+            "columnName": "hour",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "zoneId",
+            "columnName": "zoneId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "durationMs",
+            "columnName": "durationMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "ownerId",
+            "packageName",
+            "localDate",
+            "hour",
+            "zoneId"
+          ]
+        }
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '6d02c857c7796c46f6e62f2c43404355')"
+    ]
+  }
+}
