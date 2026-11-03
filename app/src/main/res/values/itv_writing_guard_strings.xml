@@ -1,0 +1,4 @@
+<resources>
+<string name="itv_writing_guard_label">ITV 작성 보호 테스트</string>
+<string name="itv_writing_guard_description">키보드 창과 입력란 구조 및 포커스를 확인해 작성 중 강아지 개입을 보류합니다. 메시지와 입력 문자, 화면 이미지는 읽거나 저장·전송하지 않습니다. 사용자가 접근성 설정에서 직접 허용·해제합니다.</string>
+</resources>

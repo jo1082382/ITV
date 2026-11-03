@@ -1,0 +1,34 @@
+# Android Studio 개인 설정
+*.iml
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+
+# Gradle·Kotlin 캐시
+.gradle/
+.kotlin/
+
+# 개인 PC의 Android SDK 경로
+/local.properties
+
+# 빌드 결과 및 캡처
+**/build/
+/captures/
+.externalNativeBuild/
+.cxx/
+
+# macOS 자동 생성 파일
+.DS_Store
+
+# 앱 서명키 및 서명 비밀번호
+*.jks
+*.keystore
+keystore.properties
+
+# 환경 변수·비밀정보
+.env
+.env.*
+
