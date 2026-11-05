@@ -27,7 +27,7 @@ internal class CoachingResponseController(private val journal: CoachingJournal) 
     }
     fun timeout(now: Long) {
         offerId?.let { journal.structured(it,"NO_RESPONSE") }
-        finish("무응답 · 10초 동안 선택 없음")
+        finish("무응답 · ${TestCoachingPolicy.RESPONSE_MS / 1000L}초 동안 선택 없음")
         offered = false; retryAt = now + TestCoachingPolicy.REMINDER_MS
     }
 }

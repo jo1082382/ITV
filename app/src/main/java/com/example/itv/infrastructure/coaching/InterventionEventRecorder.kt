@@ -17,10 +17,10 @@ internal object InterventionEventRecorder {
       dao.insert(p.row.copy(previousOfferGapMs=previous?.let {(p.row.wallMs-it.wallMs).takeIf {gap->gap>=0}}));failed=false;done=true}
     catch(e:CancellationException){throw e}catch(e:Exception){failed=true;delay(5000)}}
  }}}
- fun record(context:Context,id:String,kind:String){
+ fun record(context:Context,id:String,kind:String,engine:String="RULE",policyVersion:String="test-coaching-v2"){
   val session=ShortformDailyStore.sessionSnapshot()
   val row=InterventionEventEntity(java.util.UUID.randomUUID().toString(),id,System.currentTimeMillis(),kind,
-    "test-coaching-v2","RULE",session.app,session.durationMs,
+    policyVersion,engine,session.app,session.durationMs,
     ShortformDailyStore.today(context,"instagram").ms,ShortformDailyStore.today(context,"youtube").ms)
   if(!queue.trySend(Pending(context.applicationContext,row)).isSuccess)failed=true
  }

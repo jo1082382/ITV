@@ -10,7 +10,7 @@ internal class AssetMlpPredictor(context:Context):InterventionPredictor {
  private fun JSONArray.vector()=DoubleArray(length()){getDouble(it).also {v->require(v.isFinite())}}
  init {
   check(doc.getInt("schemaVersion")==1){"지원하지 않는 모델 형식"}
-  check(doc.getBoolean("trained")){"학습 모델 미등록 · 기존 룰 유지"}
+  check(doc.getBoolean("trained")){"학습 모델 미등록 · MLP 예측 보류"}
   check(doc.getString("target")=="rest_started_within_120s"){"모델 예측 목표 불일치"}
   val names=doc.getJSONArray("featureNames")
   check(names.length()==4 && expected.indices.all {names.getString(it)==expected[it]}){"입력 순서 불일치"}

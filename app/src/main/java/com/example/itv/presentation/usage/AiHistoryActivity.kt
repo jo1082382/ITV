@@ -63,7 +63,7 @@ class AiHistoryActivity:ComponentActivity(){
       Text("직전 제안 간격 · ${offer.gapMs?.let {duration(it)} ?: "기록 없음"}",fontSize=16.sp)
      }
     }
-    Text("기존 룰 판단 · AI 미연결 · 누적량은 당시 메모리 집계 기준",fontSize=13.sp)
+    Text(if(offer?.engine=="JEV") "Jev API 판단 · 상세 확률·평가는 Jev 공동 테스트 기록에서 확인" else "기존 룰 판단 · MLP 진단과 별도 · 누적량은 당시 메모리 집계 기준",fontSize=13.sp)
    }}
    item {Spacer(Modifier.height(12.dp))}
   }}

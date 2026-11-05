@@ -1,0 +1,3 @@
+# Local only. Never commit actual values. Real Jev calls consume credits.
+JEV_API_KEY=""
+ITV_TEST_TOKEN=""

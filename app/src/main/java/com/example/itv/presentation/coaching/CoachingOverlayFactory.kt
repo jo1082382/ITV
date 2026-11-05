@@ -215,6 +215,38 @@ internal class CoachingOverlayFactory(private val context:Context,private val pr
         s.bubbleFollow?.let {handler.removeCallbacks(it)}
         s.bubbleFollow=null
     }
+    fun feedback(onSubmit: (Int?) -> Unit): Pair<LinearLayout, WindowManager.LayoutParams> {
+        val root = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(dp(20),dp(16),dp(20),dp(16))
+            background = rounded(Color.rgb(244,255,244),Color.rgb(144,182,151))
+        }
+        root.addView(TextView(context).apply { text="이번 개입은 적절했나요?";textSize=18f;setTextColor(Color.rgb(36,61,48)) })
+        root.addView(TextView(context).apply { text="0점 매우 부적절 · 5점 보통 · 10점 매우 적절";textSize=12f })
+        val selected = TextView(context).apply { text="점수를 선택해 주세요." }
+        var score: Int? = null
+        val submit = Button(context).apply { text="평가 제출";isEnabled=false;setOnClickListener { score?.let(onSubmit) } }
+        val slider = SeekBar(context).apply { max=10;progress=5;contentDescription="개입 적절성 점수 0부터 10" }
+        slider.setOnSeekBarChangeListener(object: SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(bar: SeekBar?,value: Int,fromUser: Boolean) {
+                if(fromUser) { score=value;selected.text="선택: ${value}점";submit.isEnabled=true }
+            }
+            override fun onStartTrackingTouch(bar: SeekBar?) {}
+            override fun onStopTrackingTouch(bar: SeekBar?) {}
+        })
+        root.addView(slider,LinearLayout.LayoutParams(-1,dp(48)))
+        root.addView(selected);root.addView(submit)
+        root.addView(Button(context).apply { text="건너뛰기";setOnClickListener { onSubmit(null) } })
+        val params = WindowManager.LayoutParams(
+            minOf(dp(360),context.resources.displayMetrics.widthPixels-dp(28)),
+            WindowManager.LayoutParams.WRAP_CONTENT,WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,PixelFormat.TRANSLUCENT).apply {
+            gravity=Gravity.TOP or Gravity.CENTER_HORIZONTAL;y=dp(72)
+        }
+        return root to params
+    }
+    private fun rounded(fill: Int, stroke: Int, radius: Int = 18) = GradientDrawable().apply {
+        setColor(fill); cornerRadius = dp(radius).toFloat(); setStroke(dp(1), stroke)
+    }
     private fun startBubbleFollow(s:Session,width:Int,height:Int) {
         stopBubbleFollow(s)
         val follow=object:Runnable {
@@ -308,14 +340,13 @@ internal class CoachingOverlayFactory(private val context:Context,private val pr
             true
         }
     }
-    fun playReaction(root:View,title:String,finished:()->Unit) {
+    fun playReaction(root:View,title:String,reminderSeconds:Long=com.example.itv.domain.coaching.TestCoachingPolicy.REMINDER_MS/1000L,finished:()->Unit) {
         val s=sessions[root]
         if(s==null || s.stopped){finished();return}
         s.committed=true;s.shake?.cancel();s.dog.rotation=0f;s.animator?.cancel();s.hold?.let{handler.removeCallbacks(it)}
         s.reactionFinished=finished
         val prepare=com.example.itv.domain.coaching.TestCoachingPolicy.MISSION_START_MS
         val rest=com.example.itv.domain.coaching.TestCoachingPolicy.REST_MS
-        val reminder=com.example.itv.domain.coaching.TestCoachingPolicy.REMINDER_MS
         when(title) {
             "쉬기" -> {
                 s.dogParams.x=s.house.centerX()-s.dogParams.width/2
@@ -331,7 +362,7 @@ internal class CoachingOverlayFactory(private val context:Context,private val pr
             }
             "나중에" -> {
                 s.dog.setImageResource(R.drawable.itv_motion_wave)
-                s.speech.text="${reminder/60000}분 뒤에 다시 보자!"
+                s.speech.text=if(reminderSeconds%60L==0L) "${reminderSeconds/60L}분 뒤에 다시 보자!" else "${reminderSeconds}초 뒤에 다시 보자!"
             }
             else -> {
                 s.dogParams.x=s.cage.centerX()-s.dogParams.width/2

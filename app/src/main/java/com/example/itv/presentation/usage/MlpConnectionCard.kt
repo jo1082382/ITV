@@ -34,7 +34,7 @@ import java.time.LocalTime
     status="휴식 시작 예측 · ${"%.1f".format(prediction.probability*100)}%"
     detail="${prediction.modelVersion} · 그림자 모드"
    }
-  }catch(e:CancellationException){throw e}catch(e:Exception){status=e.message ?: "모델 연결 실패";detail="예측 보류 · 기존 개입 유지"}
+  }catch(e:CancellationException){throw e}catch(e:Exception){status=e.message ?: "모델 연결 실패";detail="예측 보류 · 현재 개입 설정 유지"}
   finally {busy=false}
  }
  InfoCard("MLP 모델 연결"){
