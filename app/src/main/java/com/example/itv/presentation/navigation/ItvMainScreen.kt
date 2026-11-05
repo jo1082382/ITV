@@ -294,6 +294,10 @@ private fun HomeSettingsDrawer(open: Boolean, onClose: () -> Unit, onOpenGoals: 
                         onClose()
                         context.startActivity(Intent(context, PermissionSettingsActivity::class.java).putExtra("initial_page", 0))
                     }
+                    if (com.example.itv.infrastructure.jev.JevFeature.available()) DrawerSettingItem("Jev 공동 테스트", "임계값·수동 요청·판단 기록·평가") {
+                        onClose()
+                        context.startActivity(Intent(context, com.example.itv.presentation.jev.JevTestActivity::class.java))
+                    }
                     DrawerSettingItem("목표 설정", "사용시간·취침·휴식 목표") { onClose(); onOpenGoals() }
                     DrawerSettingItem("권한", "수집 동의와 필요한 권한 확인") {
                         onClose()

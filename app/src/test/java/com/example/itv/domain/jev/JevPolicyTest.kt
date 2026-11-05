@@ -1,0 +1,78 @@
+package com.example.itv.domain.jev
+
+import org.junit.Assert.*
+import org.junit.Test
+
+class JevPolicyTest {
+    private fun context(ms:Long=900_000,returns:Int=0,bedtime:Int?=null)=
+        JevContext("session",JevSettings.INSTAGRAM,ms,ms,returns,600,bedtime,0)
+    @Test fun probabilityBoundaryAndNonFiniteValues() {
+        val settings=JevSettings()
+        assertTrue(JevCandidatePolicy.passes(0.8,settings))
+        assertFalse(JevCandidatePolicy.passes(0.799999,settings))
+        assertFalse(JevCandidatePolicy.passes(Double.NaN,settings))
+        assertFalse(JevCandidatePolicy.passes(Double.POSITIVE_INFINITY,settings))
+    }
+    @Test fun candidatesUseEnabledConditionsAndActualMeasurements() {
+        val settings=JevSettings()
+        assertEquals(listOf("CONTINUOUS"),JevCandidatePolicy.reasons(context(),settings))
+        assertTrue(JevCandidatePolicy.reasons(context(899_999),settings).isEmpty())
+        assertEquals(listOf("REPEATED_RETURNS"),JevCandidatePolicy.reasons(context(1000,3),settings))
+        assertTrue(JevCandidatePolicy.reasons(context().copy(quality="INSUFFICIENT"),settings).isEmpty())
+        assertTrue(JevCandidatePolicy.reasons(context(1000,0,null),settings).isEmpty())
+        assertEquals(listOf("BEDTIME"),JevCandidatePolicy.reasons(context(1000,0,20),settings))
+        assertTrue(JevCandidatePolicy.reasons(context(),settings.copy(continuousEnabled=false,returnsEnabled=false,bedtimeEnabled=false)).isEmpty())
+    }
+    @Test fun responseMustMatchRevisionSessionAppAndOriginalRequestDeadline() {
+        val s=JevSettings()
+        val c=context()
+        assertTrue(JevCandidatePolicy.resultIsCurrent(1,s,c,c,30_000))
+        assertFalse(JevCandidatePolicy.resultIsCurrent(1,s,c,c,30_001))
+        assertFalse(JevCandidatePolicy.resultIsCurrent(1,s.copy(revision=2),c,c,1))
+        assertFalse(JevCandidatePolicy.resultIsCurrent(1,s,c,c.copy(sessionId="other"),1))
+        assertFalse(JevCandidatePolicy.resultIsCurrent(1,s,c,null,1))
+    }
+    @Test fun unknownGapsNeverAddViewingOrContinuousAbsence() {
+        val tracker=JevSessionTracker {"id"}
+        tracker.observe(0,JevSettings.INSTAGRAM,JevSettings.INSTAGRAM)
+        tracker.observe(1000,JevSettings.INSTAGRAM,JevSettings.INSTAGRAM)
+        assertEquals(1000L,tracker.states.getValue(JevSettings.INSTAGRAM).totalMs)
+        tracker.observe(10_000,null,null)
+        tracker.observe(11_000,JevSettings.INSTAGRAM,JevSettings.INSTAGRAM)
+        assertEquals(1000L,tracker.states.getValue(JevSettings.INSTAGRAM).totalMs)
+        assertEquals(0L,tracker.states.getValue(JevSettings.INSTAGRAM).continuousMs)
+    }
+    @Test fun firstEntryAndInternalNavigationAreNotReturns() {
+        val tracker=JevSessionTracker {"id"}
+        tracker.observe(0,JevSettings.INSTAGRAM,JevSettings.INSTAGRAM)
+        tracker.observe(1000,JevSettings.INSTAGRAM,JevSettings.INSTAGRAM)
+        assertEquals(0,tracker.states.getValue(JevSettings.INSTAGRAM).returns.size)
+        tracker.observe(2000,"other.app",null)
+        tracker.observe(3000,JevSettings.INSTAGRAM,JevSettings.INSTAGRAM)
+        assertEquals(1,tracker.states.getValue(JevSettings.INSTAGRAM).returns.size)
+    }
+    private fun sessionAfterAway(seconds:Int):Pair<String,String> {
+        var id=0
+        val tracker=JevSessionTracker {"id-${id++}"}
+        tracker.observe(0,JevSettings.INSTAGRAM,JevSettings.INSTAGRAM)
+        val before=tracker.states.getValue(JevSettings.INSTAGRAM).id
+        tracker.observe(1000,"other.app",null)
+        for(i in 2..seconds)tracker.observe(i*1000L,"other.app",null)
+        tracker.observe((seconds+1)*1000L,JevSettings.INSTAGRAM,JevSettings.INSTAGRAM)
+        return before to tracker.states.getValue(JevSettings.INSTAGRAM).id
+    }
+    @Test fun sessionBoundaryIsExactly600VerifiedSeconds() {
+        val same=sessionAfterAway(599);assertEquals(same.first,same.second)
+        val fresh=sessionAfterAway(600);assertNotEquals(fresh.first,fresh.second)
+    }
+    @Test fun restartRestoresTotalsButNotContinuousViewing() {
+        val tracker=JevSessionTracker {"new"}
+        tracker.restore(JevSettings.INSTAGRAM,"saved",123_000,true)
+        tracker.observe(100,JevSettings.INSTAGRAM,JevSettings.INSTAGRAM)
+        assertEquals(123_000L,tracker.states.getValue(JevSettings.INSTAGRAM).totalMs)
+        assertEquals(0L,tracker.states.getValue(JevSettings.INSTAGRAM).continuousMs)
+    }
+    @Test(expected=IllegalArgumentException::class) fun invalidProbabilitySettingIsRejected() {
+        JevSettings(probabilityThreshold=Double.NaN).validated()
+    }
+}

@@ -16,6 +16,7 @@ android {
         targetSdk = 37
         versionCode = 1
         versionName = "1.0"
+        buildConfigField("boolean", "JEV_TESTING", "false")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -24,6 +25,13 @@ android {
     testBuildType = "qa"
 
     buildTypes {
+        getByName("debug") { buildConfigField("boolean", "JEV_TESTING", "true") }
+        create("teamTest") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".teamtest"
+            matchingFallbacks += listOf("debug")
+            resValue("string", "itv_launcher_app_name", "ITV 공동 테스트")
+        }
         create("qa") {
             initWith(getByName("debug"))
             applicationIdSuffix = ".qa"
@@ -41,6 +49,8 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
+        resValues = true
     }
 }
 
@@ -65,6 +75,13 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
     add("qaImplementation", libs.androidx.compose.ui.test.manifest)
     add("qaImplementation", libs.androidx.compose.ui.tooling)
+}
+
+// Explicitly enable host tests on AGP 9.5 (also required by Compose preview runfiles).
+androidComponents {
+    beforeVariants(selector().all()) { variant ->
+        (variant as com.android.build.api.variant.HasUnitTestBuilder).enableUnitTest = true
+    }
 }
 
 ksp {

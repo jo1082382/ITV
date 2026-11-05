@@ -6,6 +6,7 @@
         android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <queries>
         <intent>
@@ -44,6 +45,7 @@
         </activity>
 
         <activity android:name=".presentation.coaching.CoachingTestActivity" android:exported="false" />
+        <activity android:name=".presentation.jev.JevTestActivity" android:exported="false" />
         <service
             android:name=".presentation.coaching.CoachingMonitorService"
             android:exported="false"

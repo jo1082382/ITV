@@ -35,6 +35,9 @@ open class WritingGuardService : AccessibilityService() {
             if (root == null) null else try { root.packageName?.toString() }
             finally { @Suppress("DEPRECATION") root.recycle() }
         } catch (_: Exception) { null }
+        if (com.example.itv.infrastructure.jev.JevFeature.available()) {
+            com.example.itv.infrastructure.jev.JevObservationHub.foreground(pkg)
+        }
         if (pkg == packageName) {
             if (!ownScreen) {
                 // Pause once on entry; do not repeatedly write stores on scroll events.

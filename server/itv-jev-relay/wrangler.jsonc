@@ -1,0 +1,38 @@
+{
+  "name": "itv-jev-relay",
+  "main": "src/index.js",
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "itv-jev-test-db",
+    "database_id": "e67a7548-3ca8-4b21-abce-901a95e2afe8",
+    "migrations_dir": "migrations"
+  }],
+  "vars": {
+    "JEV_ENABLED": "true",
+    "JEV_MODEL": "jev-1.14.0",
+    "JEV_DAILY_LIMIT": "300",
+    "JEV_TESTER_DAILY_LIMIT": "40",
+    "JEV_MINUTE_LIMIT": "20",
+    "EVENT_DAILY_LIMIT": "5000"
+  },
+  "secrets": { "required": ["JEV_API_KEY", "ITV_TEST_TOKEN"] },
+  "workers_dev": true,
+  "preview_urls": false,
+  "compatibility_date": "2026-11-05",
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "redact_query_string": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "persist": true,
+      "invocation_logs": true
+    },
+    "traces": {
+      "enabled": false,
+      "persist": true,
+      "head_sampling_rate": 1
+    }
+  }
+}

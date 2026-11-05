@@ -8,7 +8,7 @@ import com.example.itv.domain.coaching.CoachingDiagnosticStatus
 private const val LEGACY_FILE = "coaching_test"
 internal class PreferencesDeveloperCoachingSettings(context: Context) : DeveloperCoachingSettings {
     private val prefs = context.applicationContext.getSharedPreferences(LEGACY_FILE, Context.MODE_PRIVATE)
-    override fun autoEnabled(): Boolean = prefs.getBoolean("autoEnabled", true)
+    override fun autoEnabled(): Boolean = prefs.getBoolean("autoEnabled", com.example.itv.BuildConfig.BUILD_TYPE != "teamTest")
     override fun setAutoEnabled(value: Boolean) { prefs.edit().putBoolean("autoEnabled", value).apply() }
 }
 internal class PreferencesCoachingDiagnosticStatus(context: Context) : CoachingDiagnosticStatus {
