@@ -45,29 +45,52 @@ class CoachingMonitorService : Service() {
         })
     }
     private val overlayFactory: CoachingOverlayFactory by lazy { CoachingOverlayFactory(this) }
+    private var retryPending=false
+    private var retryVisible=false
     private fun onChoice(title: String, message: String) {
+        if(retryVisible) {
+            if(title!="쉬기")return
+            retryVisible=false
+            selectedAnimation("쉬기") {
+                removeOverlay()
+                if(running && com.example.itv.composition.CoachingAccess.ready(this))
+                    missionController.begin(java.util.UUID.randomUUID().toString().take(8),SystemClock.elapsedRealtime())
+            }
+            return
+        }
         val selectedId = responseController.offerId ?: return
         when (responseController.choose(title, SystemClock.elapsedRealtime())) {
             ResponseOutcome.IGNORED -> return
             ResponseOutcome.EXPIRED -> { offerTimeout.run(); return }
             ResponseOutcome.REST -> {
                 handler.removeCallbacks(offerTimeout)
-                removeOverlay(); nm.cancel(7102)
-                missionController.begin(selectedId, SystemClock.elapsedRealtime())
+                selectedAnimation("쉬기") {
+                    removeOverlay(); nm.cancel(7102)
+                    if (running && com.example.itv.composition.CoachingAccess.ready(this)) {
+                        missionController.begin(selectedId, SystemClock.elapsedRealtime())
+                    }
+                }
                 com.example.itv.composition.CoachingAccess.state(this, "$title 선택 · 충분한 휴식 전까지 재제안 안 함")
             }
             ResponseOutcome.LATER -> {
                 handler.removeCallbacks(offerTimeout)
-                removeOverlay(); nm.cancel(7102)
+                selectedAnimation("나중에") { removeOverlay(); nm.cancel(7102) }
                 com.example.itv.composition.CoachingAccess.state(this, "나중에 선택 · 5분 뒤 조건 재확인")
             }
             ResponseOutcome.DISMISS -> {
                 handler.removeCallbacks(offerTimeout)
-                removeOverlay(); nm.cancel(7102)
+                selectedAnimation("닫기") { removeOverlay(); nm.cancel(7102) }
                 com.example.itv.composition.CoachingAccess.state(this, "$title 선택 · 충분한 휴식 전까지 재제안 안 함")
             }
         }
-        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+        // The selected response is shown in the character speech bubble.
+    }
+
+    private fun selectedAnimation(title: String, finished: () -> Unit) {
+        val root=overlay
+        if(root==null){finished();return}
+        overlayFactory.disableControls(root)
+        overlayFactory.playReaction(root,title,finished)
     }
 
     private var closingCause = "표시 중단 · 안전 보호/화면 전환"
@@ -78,7 +101,23 @@ class CoachingMonitorService : Service() {
             if (!missionController.state.started) failMissionStart()
         }
     }
-    private fun failMissionStart(): Unit { missionController.failStart() }
+    private fun failMissionStart(): Unit {
+        val failed=missionController.state.id!=null && !missionController.state.started && !missionController.state.pending
+        missionController.failStart()
+        if(failed)retryPending=true
+    }
+    private fun checkRetry(transition:Boolean=false) {
+        if(!retryPending || overlay!=null || completionView!=null || !running || !unlocked())return
+        if(!com.example.itv.composition.CoachingAccess.ready(this) || !Settings.canDrawOverlays(this))return
+        if(WritingGuard.blockReason()!=null)return
+        if(!transition && (ReelsProbe.screenState()==1 || YoutubeProbe.screenState()==1))return
+        val (root,params)=overlayFactory.retryOffer(::onChoice)
+        try {
+            wm.addView(root,params);overlay=root;retryVisible=true
+            overlayFactory.attachControls(root);retryPending=false
+            handler.postDelayed({if(overlay===root){retryVisible=false;removeOverlay()}},45_000L)
+        } catch(_:Exception){retryVisible=false;removeOverlay()}
+    }
     private var completionView: View? = null
     private val offerTimeout: Runnable = Runnable {
         if (responseController.offerId != null && overlay != null) {
@@ -110,13 +149,14 @@ class CoachingMonitorService : Service() {
         try {
             wm.addView(box, params); completionView = box
             missionController.completionDisplayed()
+            overlayFactory.attachControls(box)
             handler.postDelayed({ if (completionView === box) dismissCompletion() }, 10_000L)
         } catch (_: Exception) {
             // Keep pending to retry when permission/window state permits it.
         }
     }
     private fun dismissCompletion() {
-        completionView?.let { try { wm.removeView(it) } catch (_: Exception) {} }
+        completionView?.let { overlayFactory.removeControls(it); try { wm.removeView(it) } catch (_: Exception) {} }
         completionView = null
     }
     private val handler = Handler(Looper.getMainLooper())
@@ -163,6 +203,7 @@ class CoachingMonitorService : Service() {
                 running = false; stopSelf(); return
             }
             checkMission()
+            checkRetry()
             val using = observeUsage()
             val observation = observer.snapshot()
             progress.tick(SystemClock.elapsedRealtime(), using, observation, overlay != null)
@@ -249,6 +290,7 @@ class CoachingMonitorService : Service() {
     }
 
     private fun onYoutubeTransition() {
+        if(retryPending) {checkRetry(true);return}
         if (!running || !waitingYoutube || responseController.offered || responseController.suppressed) return
         val now = SystemClock.elapsedRealtime()
         if (!observeUsage() || !waitingYoutube) return
@@ -259,6 +301,7 @@ class CoachingMonitorService : Service() {
         showPuppy()
     }
     private fun onReelsTransition() {
+        if(retryPending) {checkRetry(true);return}
         // Only a transition AFTER arming can trigger this path.
         if (!running || !waitingTransition || responseController.offered || responseController.suppressed) return
         val now = SystemClock.elapsedRealtime()
@@ -276,8 +319,9 @@ class CoachingMonitorService : Service() {
         if (completionView != null || missionController.state.pending || overlay != null || !unlocked() || !com.example.itv.composition.CoachingAccess.ready(this) || !Settings.canDrawOverlays(this)) return
         val (root, params) = overlayFactory.offer(::onChoice)
         try {
-            wm.addView(root, params); overlay = root; responseController.offered = true; waitingTransition = false; waitingYoutube = false; responseController.retryAt = null
+            wm.addView(root, params); overlay = root; overlayFactory.attachControls(root); responseController.offered = true; waitingTransition = false; waitingYoutube = false; responseController.retryAt = null
             responseController.offerId = java.util.UUID.randomUUID().toString().take(8)
+            journal.structured(responseController.offerId!!,"OFFER_SHOWN")
             responseController.deadline = SystemClock.elapsedRealtime() + TestCoachingPolicy.RESPONSE_MS
             InterventionJournal.add(this, responseController.offerId!!, "개입 표시 성공 · " + when {
                 YoutubeProbe.screenState() == 1 -> "쇼츠"
@@ -303,7 +347,10 @@ class CoachingMonitorService : Service() {
     }
     private fun removeOverlay() {
         if (responseController.offerId != null) finishOffer(closingCause)
-        overlay?.let { try { wm.removeView(it) } catch (_: Exception) {} }; overlay = null
+        // Clear the reference before detach callbacks to avoid reentrant removal.
+        val previousOverlay = overlay
+        overlay = null
+        previousOverlay?.let { overlayFactory.removeControls(it); try { wm.removeView(it) } catch (_: Exception) {} }
     }
     override fun onDestroy() {
         closingCause = "표시 중단 · 서비스 종료"

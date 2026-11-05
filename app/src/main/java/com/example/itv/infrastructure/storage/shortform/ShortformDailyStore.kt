@@ -18,6 +18,9 @@ internal object ShortformDailyStore {
     fun today(c:Context,app:String):Day {
         val d=instance(c).today(app);return Day(d.ms,d.transitions,d.observed)
     }
+    fun recentSessionSnapshot() = coordinator?.recentSessionSnapshot(android.os.SystemClock.elapsedRealtime()) ?: ShortformSessionSnapshot()
+    fun sessionSnapshot() = coordinator?.sessionSnapshot(android.os.SystemClock.elapsedRealtime())
+        ?: ShortformSessionSnapshot()
     fun isReady()=coordinator?.isReady() ?: false
     fun storageStatus()=coordinator?.storageStatus() ?: ShortformStorageStatus()
     fun pause() { coordinator?.pause() }

@@ -152,6 +152,11 @@ fun UsageRecordsContent(modifier: Modifier = Modifier) {
         Text("기록", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
 
 }
+item(key="ai_history_open") {
+ Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.End) {
+  OutlinedButton(onClick={context.startActivity(Intent(context,AiHistoryActivity::class.java))}) {Text("AI",fontWeight=FontWeight.Bold)}
+ }
+}
 item {
 
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
