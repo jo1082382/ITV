@@ -311,7 +311,11 @@ item {
                                     }
                                     2 -> {item {
 
-                                        Text("구조 테스트", style = MaterialTheme.typography.titleLarge)
+                                        Text("캐릭터 · 구조 테스트", style = MaterialTheme.typography.titleLarge)
+                                        Button(onClick = {
+                                            startActivity(Intent(this@PermissionSettingsActivity,
+                                                com.example.itv.presentation.character.CompanionPreviewActivity::class.java))
+                                        }, modifier = Modifier.fillMaxWidth()) { Text("캐릭터 상호작용 미리보기") }
 
 }
 item {

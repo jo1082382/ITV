@@ -152,6 +152,11 @@ fun UsageRecordsContent(modifier: Modifier = Modifier) {
         Text("기록", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
 
 }
+item(key="ai_history_open") {
+ Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.End) {
+  OutlinedButton(onClick={context.startActivity(Intent(context,AiHistoryActivity::class.java))}) {Text("AI",fontWeight=FontWeight.Bold)}
+ }
+}
 item {
 
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -265,6 +270,9 @@ item(key = "hourly_usage_chart", contentType = "hourly_chart") {
                         Text("${if (data.days == 1) "오늘 사용시간" else "하루 평균 사용시간"} ${hourlyDuration(data.values[hour])}")
                         Text(if (data.days == 1) "이 시간대에 사용한 앱" else "앱별 시간대 하루 평균", style = MaterialTheme.typography.titleMedium)
                     }
+                }
+                item(key = "today_shortform_hour_$hour") {
+                    ShortformHourPanel(java.time.LocalDate.now().toString(), hour)
                 }
                 val apps = data.hourlyApps.getOrNull(hour).orEmpty().filter { it.minutes >= 1.0 }
                 if (apps.isEmpty()) item { Text("확인된 앱 사용 내역이 없습니다.") }

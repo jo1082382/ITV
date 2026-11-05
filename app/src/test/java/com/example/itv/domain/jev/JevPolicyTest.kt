@@ -32,6 +32,25 @@ class JevPolicyTest {
         assertFalse(JevCandidatePolicy.resultIsCurrent(1,s,c,c.copy(sessionId="other"),1))
         assertFalse(JevCandidatePolicy.resultIsCurrent(1,s,c,null,1))
     }
+    @Test fun displayedReactionCanContinueBeyondRequestTtlWhileContextIsCurrent() {
+        val s=JevSettings(enabled=true,collectionConsent=true,actualIntervention=true)
+        val c=context()
+        // The teammate's offer lasts 45 seconds; the 30-second TTL only gates first display.
+        assertFalse(JevCandidatePolicy.resultIsCurrent(s.revision,s,c,c,45_000))
+        assertTrue(JevCandidatePolicy.canContinueDisplayed(s.revision,s,c,c))
+        assertFalse(JevCandidatePolicy.canContinueDisplayed(s.revision,s,c,c.copy(sessionId="new")))
+        assertFalse(JevCandidatePolicy.canContinueDisplayed(s.revision,s,c,c.copy(packageName=JevSettings.YOUTUBE)))
+        assertFalse(JevCandidatePolicy.canContinueDisplayed(s.revision,s,c,c.copy(quality="INSUFFICIENT")))
+        assertFalse(JevCandidatePolicy.canContinueDisplayed(s.revision,s,c,null))
+    }
+    @Test fun changingSettingsOrConsentCancelsReactionAndMissionRetry() {
+        val s=JevSettings(enabled=true,collectionConsent=true,actualIntervention=true)
+        val c=context()
+        listOf(s.copy(revision=s.revision+1),s.copy(enabled=false),s.copy(collectionConsent=false),
+            s.copy(actualIntervention=false),s.copy(instagram=false)).forEach {
+            assertFalse(JevCandidatePolicy.canContinueDisplayed(s.revision,it,c,c))
+        }
+    }
     @Test fun unknownGapsNeverAddViewingOrContinuousAbsence() {
         val tracker=JevSessionTracker {"id"}
         tracker.observe(0,JevSettings.INSTAGRAM,JevSettings.INSTAGRAM)

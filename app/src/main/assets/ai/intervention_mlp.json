@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "trained": false,
+  "target": "rest_started_within_120s",
+  "modelVersion": "UNTRAINED-TEMPLATE",
+  "featureNames": [
+    "session_minutes",
+    "instagram_today_minutes",
+    "youtube_today_minutes",
+    "local_hour"
+  ],
+  "mean": [
+    0,
+    0,
+    0,
+    0
+  ],
+  "scale": [
+    1,
+    1,
+    1,
+    1
+  ],
+  "w1": [
+    [
+      0,
+      0,
+      0,
+      0
+    ]
+  ],
+  "b1": [
+    0
+  ],
+  "w2": [
+    0
+  ],
+  "b2": 0
+}

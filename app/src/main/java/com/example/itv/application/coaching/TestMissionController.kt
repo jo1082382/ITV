@@ -7,6 +7,7 @@ internal class TestMissionController(private val journal: CoachingJournal,
     private val history: MissionHistory, private val scheduler: MissionScheduler) {
     val state = TestRestMission()
     fun begin(id: String, now: Long) {
+        journal.structured(id,"MISSION_REQUESTED")
         state.begin(id, now); history.begin(id)
         scheduler.cancelStartTimeout(); scheduler.scheduleStartTimeout(TestCoachingPolicy.MISSION_START_MS)
         journal.add(id, "휴식 미션 시작 · 화면을 연속 30초 끄기")
@@ -14,6 +15,7 @@ internal class TestMissionController(private val journal: CoachingJournal,
     fun failStart() {
         val id = state.id ?: return
         if (state.started || state.pending) return
+        journal.structured(id,"START_NOT_OBSERVED")
         history.finish(id, "failed")
         journal.add(id, "미션 실패 · 쉬기 선택 후 15초 안에 화면 꺼짐 미관측")
         scheduler.cancelStartTimeout(); state.failStart()
@@ -22,6 +24,7 @@ internal class TestMissionController(private val journal: CoachingJournal,
         if (state.id == null || state.pending || state.offAt != null) return
         if (state.isLate(now)) { failStart(); return }
         if (state.screenOff(now)) {
+            journal.structured(state.id!!,"REST_STARTED")
             scheduler.cancelStartTimeout()
             journal.add(state.id!!, "휴식 시작 · 15초 안에 화면 꺼짐 관측")
         }
@@ -31,6 +34,7 @@ internal class TestMissionController(private val journal: CoachingJournal,
         val (result, duration) = state.screenOn(now)
         when (result) {
             TestMissionWake.SUCCESS -> {
+                journal.structured(id,"REST_COMPLETED")
                 history.finish(id, "success")
                 journal.add(id, "휴식 미션 완료 · 화면 꺼짐 30초 이상 관측")
             }
@@ -43,7 +47,7 @@ internal class TestMissionController(private val journal: CoachingJournal,
         state.displayed(); journal.add(id, "미션 완료 안내 표시")
     }
     fun stop() {
-        state.id?.let { history.finish(it, "interrupted") }
+        state.id?.let { journal.structured(it,"INTERRUPTED"); history.finish(it, "interrupted") }
         scheduler.cancelStartTimeout()
         state.id?.let { journal.add(it, if (state.pending) "서비스 종료 · 완료 안내 대기 종료" else "서비스 종료 · 휴식 미션 중단") }
         state.clear()

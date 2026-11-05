@@ -30,6 +30,18 @@ internal class ShortformRecordingCoordinator(
     private var dirty = false
     private var saved = 0L
     private val records = linkedMapOf<String, StoredShortformDay>()
+    private val hourly = linkedMapOf<String,StoredShortformHour>()
+    private fun hourKey(x:StoredShortformHour)="${x.packageName}|${x.date}|${x.hour}|${x.zone}"
+    private val sessionTracker=ShortformSessionTracker()
+    @Volatile private var session=ShortformSessionSnapshot()
+    @Volatile private var recentSession=ShortformSessionSnapshot()
+    fun recentSessionSnapshot(now:Long):ShortformSessionSnapshot {
+        val active=session
+        return if(active.app.isNotEmpty() && now-active.observedAt>1500) active else recentSession
+    }
+    fun sessionSnapshot(now:Long):ShortformSessionSnapshot = session.let {
+        if(now-it.observedAt in 0L..1500L) it else ShortformSessionSnapshot()
+    }
     private val clocks = mutableMapOf<String, ShortformClock>()
     private fun key(x: StoredShortformDay) = "${x.packageName}|${x.date}|${x.zoneKey}|${x.source}"
     private fun pkg(app: String) = when(app) {
@@ -43,7 +55,7 @@ internal class ShortformRecordingCoordinator(
                 try {
                     if (command.type == 3 || command.type == 5) synchronized(admissionLock) { admission.started(true) }
                     if (command.generation != lastGeneration) {
-                        clocks.clear()
+                        clocks.clear();sessionTracker.reset();recentSession=sessionTracker.recent;session=ShortformSessionSnapshot()
                         lastGeneration = command.generation
                     }
                     val initialize = command.initialize
@@ -53,6 +65,8 @@ internal class ShortformRecordingCoordinator(
                         while (!prepared) {
                             try {
                                 val initial = current.prepare()
+                                val initialHours=current.hours()
+                                hourly.clear();initialHours.forEach { hourly[hourKey(it)]=it }
                                 records.clear(); initial.forEach { records[key(it)] = it }
                                 prepared = true; ready = true; issue=ShortformStorageIssue.NONE;failure = null; publish()
                             } catch(e: CancellationException) { throw e }
@@ -66,6 +80,10 @@ internal class ShortformRecordingCoordinator(
                     when(command.type) {
                         0 -> {
                             val t = checkNotNull(command.time)
+                            ShortformHourPolicy.split(pkg(command.app),clocks[command.app] ?: ShortformClock(),command.valid,t).forEach {
+                                val id=hourKey(it); hourly[id]=it.copy(ms=Math.addExact(hourly[id]?.ms ?: 0L,it.ms))
+                            }
+                            session=sessionTracker.observe(command.app,command.valid,t);recentSession=sessionTracker.recent
                             val result = ShortformIntervalCalculator.evaluate(clocks[command.app] ?: ShortformClock(), command.valid, t)
                             result.contributions.forEach { add(command.app, it.date, it.zoneId, it.ms, 0) }
                             clocks[command.app] = result.clock
@@ -79,11 +97,11 @@ internal class ShortformRecordingCoordinator(
                                 add(command.app,date,t.zoneId,0,1);publish();save()
                             }
                         }
-                        2 -> { clocks.clear();save() }
+                        2 -> { clocks.clear();sessionTracker.reset();recentSession=sessionTracker.recent;session=ShortformSessionSnapshot();save() }
                         3 -> { publish();save() }
                         4 -> {
                             checkNotNull(service).clear()
-                            records.clear();clocks.clear();dirty=false;pendingSave=false;issue=ShortformStorageIssue.NONE;failure=null;publish()
+                            records.clear();hourly.clear();clocks.clear();sessionTracker.reset();recentSession=sessionTracker.recent;session=ShortformSessionSnapshot();dirty=false;pendingSave=false;issue=ShortformStorageIssue.NONE;failure=null;publish()
                         }
                         5 -> save()
                     }
@@ -108,7 +126,7 @@ internal class ShortformRecordingCoordinator(
     private suspend fun save() {
         if(!prepared || !dirty)return
         try {
-            checkNotNull(service).save(records.values.toList())
+            checkNotNull(service).saveWithHours(records.values.toList(),hourly.values.toList())
             dirty=false;pendingSave=false;saved=elapsedNow();issue=ShortformStorageIssue.NONE;failure=null
         } catch(e: CancellationException) { throw e }
         catch(e: Exception) { issue = ShortformStorageIssue.SAVING; failure=e.message }

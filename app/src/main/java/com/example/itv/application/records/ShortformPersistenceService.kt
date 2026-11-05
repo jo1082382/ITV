@@ -10,5 +10,10 @@ internal class ShortformPersistenceService(private val store: ShortformPersisten
         require(records.all { it.ms >= 0 && it.transitions >= 0 }) { "음수 숏폼 기록" }
         store.save(records)
     }
+    suspend fun hours() = store.hours()
+    suspend fun saveWithHours(records:List<StoredShortformDay>,hours:List<com.example.itv.domain.records.StoredShortformHour>) {
+        require(records.all { it.ms>=0 && it.transitions>=0 } && hours.all { it.ms>=0 && it.hour in 0..23 })
+        store.saveWithHours(records,hours)
+    }
     suspend fun clear() { store.clear() }
 }

@@ -12,6 +12,8 @@ import kotlinx.coroutines.*
 import androidx.room.withTransaction
 import com.example.itv.infrastructure.jev.*
 import com.example.itv.domain.jev.JevSettings
+import com.example.itv.domain.jev.JevContext
+import com.example.itv.domain.jev.JevCandidatePolicy
 import android.app.*
 import android.content.*
 import android.content.pm.ServiceInfo
@@ -56,7 +58,22 @@ class CoachingMonitorService : Service() {
         })
     }
     private val overlayFactory: CoachingOverlayFactory by lazy { CoachingOverlayFactory(this) }
-    private fun onChoice(title: String, message: String) {
+    private var retryPending=false
+    private var retryVisible=false
+    private var missionFromJev=false
+    private var missionJevSettings: JevSettings?=null
+    private var missionJevContext: JevContext?=null
+    private fun onChoice(title: String, @Suppress("UNUSED_PARAMETER") message: String) {
+        if(reactionInProgress)return
+        if(retryVisible) {
+            if(title!="쉬기")return
+            if(missionFromJev && !canContinueJevRetry()) { removeOverlay();return }
+            selectedAnimation("쉬기") {
+                removeOverlay()
+                startRestMission(java.util.UUID.randomUUID().toString().take(8))
+            }
+            return
+        }
         val selectedId = responseController.offerId ?: return
         val isJev = JevFeature.available() && jev.hasActiveOffer()
         val outcome = responseController.choose(title, SystemClock.elapsedRealtime())
@@ -73,23 +90,55 @@ class CoachingMonitorService : Service() {
             ResponseOutcome.EXPIRED -> { offerTimeout.run(); return }
             ResponseOutcome.REST -> {
                 handler.removeCallbacks(offerTimeout)
-                removeOverlay(); nm.cancel(7102)
-                missionController.begin(selectedId, SystemClock.elapsedRealtime())
+                missionFromJev=isJev
+                missionJevSettings=if(isJev)jev.store.settings.value else null
+                missionJevContext=if(isJev)jev.state.value.context else null
+                selectedAnimation("쉬기") {
+                    removeOverlay(); nm.cancel(7102)
+                    startRestMission(selectedId)
+                }
                 com.example.itv.composition.CoachingAccess.state(this, "$title 선택 · 충분한 휴식 전까지 재제안 안 함")
             }
             ResponseOutcome.LATER -> {
                 handler.removeCallbacks(offerTimeout)
-                removeOverlay(); nm.cancel(7102)
+                selectedAnimation("나중에") { removeOverlay(); nm.cancel(7102) }
                 com.example.itv.composition.CoachingAccess.state(this, if (isJev) "나중에 선택 · ${jev.store.settings.value.laterSeconds}초 뒤 조건 재확인" else "나중에 선택 · 5분 뒤 조건 재확인")
             }
             ResponseOutcome.DISMISS -> {
                 handler.removeCallbacks(offerTimeout)
-                removeOverlay(); nm.cancel(7102)
+                selectedAnimation("닫기") { removeOverlay(); nm.cancel(7102) }
                 com.example.itv.composition.CoachingAccess.state(this, "$title 선택 · 충분한 휴식 전까지 재제안 안 함")
             }
         }
-        if (isJev && outcome != ResponseOutcome.REST) handler.postDelayed({ maybeShowJevFeedback() }, 300L)
-        Toast.makeText(this, if (isJev && outcome == ResponseOutcome.LATER) "나중에 선택 · ${jev.store.settings.value.laterSeconds}초 뒤 조건 재확인" else message, Toast.LENGTH_LONG).show()
+        // Feedback waits until the reaction windows and any rest mission have finished.
+    }
+
+    private fun startRestMission(id: String) {
+        if(!running || !unlocked() || !com.example.itv.composition.CoachingAccess.ready(this))return
+        if(missionFromJev && !canContinueJevRetry())return
+        missionController.begin(id,SystemClock.elapsedRealtime())
+    }
+    private fun canContinueJevRetry(): Boolean {
+        val original=missionJevContext ?: return false
+        val settings=missionJevSettings ?: return false
+        val now=SystemClock.elapsedRealtime()
+        return jevMode() && jev.store.tokenConfigured.value && WritingGuard.blockReason()==null &&
+            JevObservationHub.foregroundPackage==original.packageName && now-JevObservationHub.checkedAt in 0..1500 &&
+            JevCandidatePolicy.canContinueDisplayed(settings.revision,jev.store.settings.value,original,jev.state.value.context)
+    }
+    private var reactionInProgress=false
+    private fun selectedAnimation(title: String, finished: () -> Unit) {
+        val root=overlay ?: return
+        if(reactionInProgress)return
+        reactionInProgress=true
+        overlayFactory.disableControls(root)
+        val reminder=if(jevMode())jev.store.settings.value.laterSeconds.toLong() else TestCoachingPolicy.REMINDER_MS/1000L
+        overlayFactory.playReaction(root,title,reminder) {
+            if(overlay===root && running) {
+                reactionInProgress=false
+                finished()
+            }
+        }
     }
 
     private var closingCause = "표시 중단 · 안전 보호/화면 전환"
@@ -100,7 +149,25 @@ class CoachingMonitorService : Service() {
             if (!missionController.state.started) failMissionStart()
         }
     }
-    private fun failMissionStart(): Unit { missionController.failStart() }
+    private fun failMissionStart(): Unit {
+        val failed=missionController.state.id!=null && !missionController.state.started && !missionController.state.pending
+        missionController.failStart()
+        if(failed)retryPending=true
+    }
+    private fun checkRetry(transition:Boolean=false) {
+        if(!retryPending || !running)return
+        if(missionFromJev && !canContinueJevRetry()) { retryPending=false;return }
+        if(overlay!=null || feedbackView!=null || completionView!=null || missionController.state.id!=null || !unlocked())return
+        if(!com.example.itv.composition.CoachingAccess.ready(this) || !Settings.canDrawOverlays(this))return
+        if(WritingGuard.blockReason()!=null)return
+        if(!transition && (ReelsProbe.screenState()==1 || YoutubeProbe.screenState()==1))return
+        val (root,params)=overlayFactory.retryOffer(::onChoice)
+        try {
+            wm.addView(root,params);overlay=root;retryVisible=true
+            overlayFactory.attachControls(root);retryPending=false
+            handler.postDelayed({if(overlay===root){retryVisible=false;removeOverlay()}},45_000L)
+        } catch(_:Exception){retryVisible=false;removeOverlay()}
+    }
     private var completionView: View? = null
     private val offerTimeout: Runnable = Runnable {
         if (responseController.offerId != null && overlay != null) {
@@ -135,13 +202,14 @@ class CoachingMonitorService : Service() {
         try {
             wm.addView(box, params); completionView = box
             missionController.completionDisplayed()
+            overlayFactory.attachControls(box)
             handler.postDelayed({ if (completionView === box) dismissCompletion() }, 10_000L)
         } catch (_: Exception) {
             // Keep pending to retry when permission/window state permits it.
         }
     }
     private fun dismissCompletion() {
-        completionView?.let { try { wm.removeView(it) } catch (_: Exception) {} }
+        completionView?.let { overlayFactory.removeControls(it); try { wm.removeView(it) } catch (_: Exception) {} }
         completionView = null
     }
     private val handler = Handler(Looper.getMainLooper())
@@ -190,10 +258,13 @@ class CoachingMonitorService : Service() {
             checkMission()
             val using = if (jevMode()) unlocked() else observeUsage()
             val observation = observer.snapshot()
+            if(overlay!=null && (!using || observation.guardReason!=null))removeOverlay()
             if (jevMode()) {
-                jev.tick(using, missionController.state.id != null || completionView != null, overlay != null)
-                if (overlay != null && (!using || observation.guardReason != null || !jev.canKeepDisplayed())) removeOverlay()
-            } else progress.tick(SystemClock.elapsedRealtime(), using, observation, overlay != null)
+                jev.tick(using, missionController.state.id != null || completionView != null || reactionInProgress || retryPending || retryVisible, overlay != null)
+                val current=if(retryVisible)canContinueJevRetry() else jev.canKeepDisplayed()
+                if (overlay != null && (!using || observation.guardReason != null || !current)) removeOverlay()
+            } else if(!reactionInProgress) progress.tick(SystemClock.elapsedRealtime(), using, observation, overlay != null)
+            checkRetry()
             if (feedbackView != null && (!using || !canShowJevFeedback())) dismissJevFeedback()
             maybeShowJevFeedback()
             publishDiagnostics()
@@ -286,6 +357,7 @@ class CoachingMonitorService : Service() {
     }
 
     private fun onYoutubeTransition() {
+        if(retryPending) {checkRetry(true);return}
         if (jevMode()) { if (running && jev.state.value.context?.packageName == JevSettings.YOUTUBE) showPuppy(); return }
         if (!running || !waitingYoutube || responseController.offered || responseController.suppressed) return
         val now = SystemClock.elapsedRealtime()
@@ -297,6 +369,7 @@ class CoachingMonitorService : Service() {
         showPuppy()
     }
     private fun onReelsTransition() {
+        if(retryPending) {checkRetry(true);return}
         if (jevMode()) { if (running && jev.state.value.context?.packageName == JevSettings.INSTAGRAM) showPuppy(); return }
         // Only a transition AFTER arming can trigger this path.
         if (!running || !waitingTransition || responseController.offered || responseController.suppressed) return
@@ -321,8 +394,15 @@ class CoachingMonitorService : Service() {
         val jevOfferId = if (isJev) jev.approvedId() else null
         val (root, params) = overlayFactory.offer(::onChoice)
         try {
-            wm.addView(root, params); overlay = root; responseController.offered = true; waitingTransition = false; waitingYoutube = false; responseController.retryAt = null
+            wm.addView(root, params); overlay = root; overlayFactory.attachControls(root); responseController.offered = true; waitingTransition = false; waitingYoutube = false; responseController.retryAt = null
             responseController.offerId = jevOfferId ?: java.util.UUID.randomUUID().toString().take(8)
+            journal.engine=if(isJev)"JEV" else "RULE"
+            journal.policyVersion=if(isJev)"jev-candidate-v1" else "test-coaching-v2"
+            journal.onStructured=if(isJev && jevOfferId!=null) { _,kind ->
+                if(kind in setOf("MISSION_REQUESTED","START_NOT_OBSERVED","REST_STARTED","REST_COMPLETED","INTERRUPTED"))
+                    jev.recordMission(jevOfferId,kind)
+            } else null
+            journal.structured(responseController.offerId!!,"OFFER_SHOWN")
             if (isJev) jev.shown()
             responseController.deadline = SystemClock.elapsedRealtime() + TestCoachingPolicy.RESPONSE_MS
             InterventionJournal.add(this, responseController.offerId!!, "개입 표시 성공 · " + when {
@@ -350,7 +430,7 @@ class CoachingMonitorService : Service() {
     }
     private fun canShowJevFeedback(): Boolean {
         if (!JevFeature.available() || !jev.store.settings.value.collectionConsent ||
-            overlay != null || completionView != null || missionController.state.id != null ||
+            overlay != null || completionView != null || missionController.state.id != null || reactionInProgress || retryPending ||
             !unlocked() || !Settings.canDrawOverlays(this)) return false
         val reason = WritingGuard.blockReason()
         return reason == null || (WritingGuard.connected &&
@@ -392,7 +472,10 @@ class CoachingMonitorService : Service() {
     private fun removeOverlay() {
         if (overlay != null && JevFeature.available()) jev.cancelled(closingCause)
         if (responseController.offerId != null) finishOffer(closingCause)
-        overlay?.let { try { wm.removeView(it) } catch (_: Exception) {} }; overlay = null
+        // Clear the reference before detach callbacks to avoid reentrant removal.
+        val previousOverlay = overlay
+        overlay = null;retryVisible=false;reactionInProgress=false
+        previousOverlay?.let { overlayFactory.removeControls(it); try { wm.removeView(it) } catch (_: Exception) {} }
     }
     override fun onDestroy() {
         closingCause = "표시 중단 · 서비스 종료"

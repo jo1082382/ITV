@@ -62,6 +62,13 @@ object JevCandidatePolicy {
     }
     fun passes(probability: Double, s: JevSettings) =
         probability.isFinite() && probability in 0.0..1.0 && probability >= s.probabilityThreshold
+    /** A displayed offer/reaction is no longer limited by the pre-display response TTL. */
+    fun canContinueDisplayed(requestRevision: Long, settings: JevSettings, requested: JevContext,
+                             current: JevContext?) =
+        settings.enabled && settings.collectionConsent && settings.actualIntervention &&
+        requestRevision == settings.revision && current?.quality == "VALID" &&
+        current.sessionId == requested.sessionId && current.packageName == requested.packageName &&
+        settings.targets(current.packageName)
     fun resultIsCurrent(requestRevision: Long, settings: JevSettings, requested: JevContext,
                         current: JevContext?, responseAgeMs: Long) =
         requestRevision == settings.revision && current?.quality == "VALID" &&

@@ -35,6 +35,8 @@
             android:name=".presentation.usage.UsageReportActivity"
             android:exported="false" />
 
+        <activity android:name=".presentation.character.CompanionPreviewActivity" android:exported="false" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true">
@@ -72,5 +74,6 @@
         <activity
             android:name="com.example.itv.presentation.coaching.YoutubeProbeActivity"
             android:exported="false" />
+    <activity android:name=".presentation.usage.AiHistoryActivity" android:exported="false" />
     </application>
 </manifest>

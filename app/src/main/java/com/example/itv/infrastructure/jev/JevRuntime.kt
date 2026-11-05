@@ -39,6 +39,7 @@ class JevRuntime private constructor(context: Context) {
     private val controls=mutableMapOf<String,Attempt>()
     private data class Approval(val trial: JevTrial,val settings: JevSettings,val captured: JevContext,val requestedAt: Long)
     private var approval: Approval?=null
+    private var displayedApproval: Approval?=null
     private var active: JevTrial?=null
     private var displayReceipt: Job?=null
     private var inFlight: Job?=null
@@ -200,17 +201,14 @@ class JevRuntime private constructor(context: Context) {
     fun approvedId(): String? = approval?.trial?.id
     fun hasActiveOffer() = active != null
     fun canKeepDisplayed(): Boolean {
-        val trial = active ?: return false
-        val payload = JSONObject(trial.payload)
-        val s = store.settings.value
-        val c = state.value.context
-        return attached && enabled && s.collectionConsent && s.actualIntervention &&
-            payload.getJSONObject("settings").optLong("revision") == s.revision &&
-            c?.sessionId == payload.optString("session_id") && c.packageName == payload.optString("package_name") && c.quality == "VALID"
+        val displayed = displayedApproval ?: return false
+        return attached && enabled && store.tokenConfigured.value &&
+            JevCandidatePolicy.canContinueDisplayed(displayed.settings.revision,store.settings.value,
+                displayed.captured,state.value.context)
     }
     fun shown() {
         val a=approval ?: return
-        active=a.trial;approval=null
+        active=a.trial;displayedApproval=a;approval=null
         displayReceipt=scope.launch {
             runCatching { repository.displayed(a.trial.id) }.onFailure { store.notice.value="표시 기록 저장 실패 · "+it.message }
         }
@@ -233,6 +231,7 @@ class JevRuntime private constructor(context: Context) {
         }
     }
     fun cancelled(reason: String) {
+        displayedApproval=null
         val trial=active ?: return
         active=null
         val receipt=displayReceipt
@@ -240,6 +239,17 @@ class JevRuntime private constructor(context: Context) {
             receipt?.join()
             runCatching { repository.event(trial,"response",JSONObject().put("action","CANCELLED").put("reason",reason)) }
                 .onFailure { store.notice.value="중단 기록 저장 실패" }
+        }
+    }
+    fun recordMission(decisionId: String,kind: String) {
+        if(!JevFeature.available())return
+        val receipt=displayReceipt
+        scope.launch {
+            receipt?.join()
+            runCatching {
+                val trial=withContext(Dispatchers.IO) { store.dao.trial(decisionId) } ?: return@runCatching
+                repository.event(trial,"mission",JSONObject().put("reason",kind))
+            }.onFailure { store.notice.value="미션 기록 저장 실패" }
         }
     }
     private fun suppress(trial: JevTrial,reason: String) {

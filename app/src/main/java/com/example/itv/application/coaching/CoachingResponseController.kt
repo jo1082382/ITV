@@ -15,6 +15,7 @@ internal class CoachingResponseController(private val journal: CoachingJournal) 
     fun choose(title: String, now: Long): ResponseOutcome {
         if (offerId == null) return ResponseOutcome.IGNORED
         if (now >= deadline) return ResponseOutcome.EXPIRED
+        offerId?.let { journal.structured(it, when(title) { "쉬기" -> "ACCEPTED"; "나중에" -> "LATER"; else -> "DISMISSED" }) }
         finish("선택 · $title")
         return if (title == "나중에") {
             offered = false; retryAt = now + TestCoachingPolicy.REMINDER_MS
@@ -25,7 +26,8 @@ internal class CoachingResponseController(private val journal: CoachingJournal) 
         }
     }
     fun timeout(now: Long) {
-        finish("무응답 · 10초 동안 선택 없음")
+        offerId?.let { journal.structured(it,"NO_RESPONSE") }
+        finish("무응답 · ${TestCoachingPolicy.RESPONSE_MS / 1000L}초 동안 선택 없음")
         offered = false; retryAt = now + TestCoachingPolicy.REMINDER_MS
     }
 }

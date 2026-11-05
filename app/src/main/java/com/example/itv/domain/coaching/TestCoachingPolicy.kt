@@ -4,7 +4,7 @@ package com.example.itv.domain.coaching
 internal object TestCoachingPolicy {
     const val INTERVENTION_MS = 60_000L
     const val REMINDER_MS = 300_000L
-    const val RESPONSE_MS = 10_000L
+    const val RESPONSE_MS = 45_000L
     const val MISSION_START_MS = 15_000L
     const val REST_MS = 30_000L
     const val SAFE_MS = 5_000L
