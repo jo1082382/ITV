@@ -34,7 +34,7 @@ internal object ReelsProbe {
         currentInstagram = false
         lastTick = frameAt
         status = "ITV 내부 · 탐색 생략"
-        serviceContext?.let { ctx ->
+        appContext?.let { ctx ->
             com.example.itv.composition.shortformObservationService(ctx).presence(ShortformApp.INSTAGRAM, false)
         }
     }
@@ -44,7 +44,7 @@ internal object ReelsProbe {
         return if (valid) 1 else 0
     }
 
-    private var serviceContext: Context? = null
+    private var appContext: Context? = null
     var enabled = false
     var latest = emptySet<String>()
     private var currentInstagram = false
@@ -104,7 +104,7 @@ internal object ReelsProbe {
     }
 
     fun tick(service: AccessibilityService) {
-        serviceContext = service.applicationContext
+        appContext = service.applicationContext
         com.example.itv.composition.ReelsCalibrationConnection.initialize(service)
         val now = SystemClock.elapsedRealtime()
         if (now - lastScan < 100L) return
@@ -250,16 +250,12 @@ internal object ReelsProbe {
             val rect = Rect()
             source.getBoundsInScreen(rect)
             // source 자체에 ID가 없을 경우 부모 컨테이너의 ID까지 확인
-            var id = source.viewIdResourceName
-            if (id == null) {
-                val parent = source.parent
-                if (parent != null) {
-                    try {
-                        id = parent.viewIdResourceName
-                    } finally {
-                        @Suppress("DEPRECATION")
-                        parent.recycle()
-                    }
+            val id = source.viewIdResourceName ?: source.parent?.let { parent ->
+                try {
+                    parent.viewIdResourceName
+                } finally {
+                    @Suppress("DEPRECATION")
+                    parent.recycle()
                 }
             }
             val allowedIds = (reels ?: emptySet()) + DEFAULT_REELS_MARKERS
@@ -270,7 +266,7 @@ internal object ReelsProbe {
                 lastRunCandidates = candidates
                 lastScroll = now
                 SwipeDynamicsTracker.onTransition(ShortformApp.INSTAGRAM, now)
-                val ctx = serviceContext ?: return
+                val ctx = appContext ?: return
                 ShortformPersonalStatsStore.onTransition(ctx, ShortformApp.INSTAGRAM, now)
                 com.example.itv.composition.shortformObservationService(ctx).transition(ShortformApp.INSTAGRAM)
                 onTransition?.invoke()

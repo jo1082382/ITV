@@ -18,6 +18,7 @@ import org.json.JSONObject
 import java.time.Duration
 import java.time.ZonedDateTime
 import java.util.UUID
+import kotlin.time.Duration.Companion.seconds
 
 object JevObservationHub {
     @Volatile var foregroundPackage: String?=null
@@ -30,8 +31,8 @@ data class JevLiveState(val status: String="Jev 꺼짐",val context: JevContext?
 
 /** Main-thread coordinator. Network/Room/Keystore work is delegated to IO implementations. */
 class JevRuntime private constructor(context: Context) {
-    private val app=context.applicationContext
-    val repository=JevRepository.get(app)
+    private val appContext=context.applicationContext
+    val repository=JevRepository.get(appContext)
     val store=repository.store
     private val scope=CoroutineScope(SupervisorJob()+Dispatchers.Main.immediate)
     private val tracker=JevSessionTracker { UUID.randomUUID().toString() }
@@ -58,7 +59,7 @@ class JevRuntime private constructor(context: Context) {
     private var loaded=false
     private var attached=false
     private var bedtimeMinute: Int?=null
-    private val bootId=runCatching { Settings.Global.getInt(app.contentResolver,Settings.Global.BOOT_COUNT) }.getOrDefault(-1)
+    private val bootId=runCatching { Settings.Global.getInt(appContext.contentResolver,Settings.Global.BOOT_COUNT) }.getOrDefault(-1)
     val enabled: Boolean get()=JevFeature.available() && store.settings.value.enabled
     init {
         scope.launch {
@@ -79,14 +80,14 @@ class JevRuntime private constructor(context: Context) {
             }
         }
         scope.launch {
-            ItvDatabase.get(app).dao().observeHomeGoals("demo-guest").collect { goals ->
+            ItvDatabase.get(appContext).dao().observeHomeGoals("demo-guest").collect { goals ->
                 bedtimeMinute=goals.firstOrNull { it.enabled && it.goalType=="BEDTIME" }?.localMinuteOfDay
             }
         }
         scope.launch(Dispatchers.IO) {
             while (isActive) {
-                runCatching { ShortformPersonalStatsStore.refreshBaselineCache(app) }
-                delay(60_000L)
+                runCatching { ShortformPersonalStatsStore.refreshBaselineCache(appContext) }
+                delay(60.seconds)
             }
         }
     }
@@ -109,7 +110,7 @@ class JevRuntime private constructor(context: Context) {
     }
     fun enrichContext(base: JevContext, nowElapsed: Long = SystemClock.elapsedRealtime()): JevContext {
         val personal = ShortformPersonalStatsStore.quickContextMetrics(
-            context = app,
+            context = appContext,
             pkg = base.packageName,
             currentSessionMs = base.sessionMs,
             currentContinuousMs = base.continuousMs
@@ -143,7 +144,7 @@ class JevRuntime private constructor(context: Context) {
             else -> 0
         }
         val guard=WritingGuard.blockReason()
-        val confirmed=pkg?.takeIf { screen==1 && guard==null && unlocked && s.targets(it) }
+        val confirmed=pkg?.takeIf { screen==1 && guard==null && s.targets(it) }
         val effectivePkg=if(guard!=null && pkg!="com.example.itv")"GUARD_BLOCKED" else pkg
         tracker.observe(now,effectivePkg,confirmed)
         val sameAppSafe=pkg!=null && s.targets(pkg) && guard==null && unlocked && screen>=0
@@ -170,7 +171,7 @@ class JevRuntime private constructor(context: Context) {
         val block=when {
             !s.collectionConsent -> "외부 전송 동의 필요"
             !store.tokenConfigured.value -> "테스트 토큰 필요"
-            !CoachingConsentStore.granted(app) -> "기존 사용량 수집 동의 필요"
+            !CoachingConsentStore.granted(appContext) -> "기존 사용량 수집 동의 필요"
             !unlocked -> "화면 꺼짐·잠금"
             guard!=null -> guard
             c==null || c.quality!="VALID" -> "확인된 숏폼 관측 대기"
@@ -196,7 +197,6 @@ class JevRuntime private constructor(context: Context) {
             if(eligible) {
                 control.asked=true;control.at=now;control.total=c.sessionMs
                 persist()
-                val requestedAt=now
                 inFlight=scope.launch {
                     try {
                         val answer=repository.evaluate(c,s,"LIVE",reasons.joinToString("|"))
@@ -207,11 +207,11 @@ class JevRuntime private constructor(context: Context) {
                             if(sameForeground && it.packageName==c.packageName && it.sessionId==c.sessionId) it.copy(quality="VALID") else it
                         }
                         when {
-                            !attached || !enabled || !JevCandidatePolicy.resultIsCurrent(s.revision,store.settings.value,c,fresh,doneAt-requestedAt) ->
+                            !attached || !enabled || !JevCandidatePolicy.resultIsCurrent(s.revision,store.settings.value,c,fresh,doneAt-now) ->
                                 suppress(answer.trial,"STALE_CONTEXT_OR_SETTINGS")
                             !JevCandidatePolicy.passes(answer.probability,s,c) -> suppress(answer.trial,"BELOW_PROBABILITY_THRESHOLD")
                             !s.actualIntervention -> suppress(answer.trial,"OBSERVE_ONLY")
-                            else -> approval=Approval(answer.trial,s,c,requestedAt)
+                            else -> approval=Approval(answer.trial,s,c,now)
                         }
                     } catch(e:CancellationException) { throw e }
                     catch(e:Exception) { mutableState.value=mutableState.value.copy(status="Jev 요청 보류 · "+(e.message ?: "오류"));store.notice.value=e.message }
@@ -238,7 +238,7 @@ class JevRuntime private constructor(context: Context) {
         }
         val readyForScreen = if (probe == 1) (transition || now - a.requestedAt >= 15_000L) else (probe == 0)
         return attached && enabled && s.collectionConsent && s.actualIntervention && store.tokenConfigured.value &&
-            CoachingConsentStore.granted(app) && !missionActiveState.value && active==null &&
+            CoachingConsentStore.granted(appContext) && !missionActiveState.value && active==null &&
             sameForeground && readyForScreen &&
             control?.suppressedSession!=a.captured.sessionId && (control?.deferUntil ?: 0)<=now &&
             WritingGuard.blockReason()==null && safeSince?.let { now-it>=5000 }==true &&

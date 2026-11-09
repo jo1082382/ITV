@@ -14,15 +14,15 @@ import com.example.itv.presentation.coaching.YoutubeProbeActivity
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.delay
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.Lifecycle
 import androidx.compose.foundation.lazy.LazyColumn
 import android.Manifest
 import android.content.pm.PackageManager
-import android.content.Context
 import android.content.Intent
-import android.net.Uri
+import androidx.core.net.toUri
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
@@ -41,33 +41,27 @@ class PermissionSettingsActivity : ComponentActivity() {
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { refresh() }
     private var showJournalDelete by mutableStateOf(false)
-    private var selectedPage by mutableStateOf(0)
+    private var selectedPage by mutableIntStateOf(0)
     private var showAccessibilityDisclosure by mutableStateOf(false)
     private val guardConnected get() = settingsService.state.value.data.guardConnected
     private val notifications get() = settingsService.state.value.data.notifications
-    private val monitorVisible get() = settingsService.state.value.data.monitorVisible
-    private val autoEnabled get() = settingsService.state.value.data.autoEnabled
     private val consent get() = settingsService.state.value.data.consent
     private val usage get() = settingsService.state.value.data.usage
     private val overlay get() = settingsService.state.value.data.overlay
-    private val history get() = settingsService.state.value.data.history
     private val settingsService: com.example.itv.application.permissions.PermissionSettingsService by lazy {
         com.example.itv.composition.permissionSettingsService(this, lifecycleScope)
     }
     private var settingsInitialized = false
 
-    @androidx.compose.runtime.Composable
+    @Composable
     private fun StandalonePermissions() {
         val screenState by settingsService.state.collectAsState()
         val notice = screenState.error
-        val guardConnected = screenState.data.guardConnected
         val notifications = screenState.data.notifications
         val monitorVisible = screenState.data.monitorVisible
-        val autoEnabled = screenState.data.autoEnabled
         val consent = screenState.data.consent
         val usage = screenState.data.usage
         val overlay = screenState.data.overlay
-        val history = screenState.data.history
 
         Scaffold { padding ->
             Column(Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)) {
@@ -98,7 +92,7 @@ class PermissionSettingsActivity : ComponentActivity() {
         }
     }
 
-    @androidx.compose.runtime.Composable
+    @Composable
     private fun FoldPermission(title: String, allowed: Boolean?, explanation: String, action: () -> Unit) {
         var expanded by remember { mutableStateOf(false) }
         OutlinedCard(Modifier.fillMaxWidth(), colors = CardDefaults.outlinedCardColors(
@@ -137,7 +131,6 @@ class PermissionSettingsActivity : ComponentActivity() {
             val notice = screenState.error
             val guardConnected = screenState.data.guardConnected
             val notifications = screenState.data.notifications
-            val monitorVisible = screenState.data.monitorVisible
             val autoEnabled = screenState.data.autoEnabled
             val consent = screenState.data.consent
             val usage = screenState.data.usage
@@ -187,8 +180,8 @@ class PermissionSettingsActivity : ComponentActivity() {
                     while (true) {
                         if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
                             settingsService.pollDiagnostics(selectedPage == 5)
-                                            }
-                        delay(if (selectedPage == 0 || selectedPage == 3) 1000L else if (selectedPage == 5) 5000L else 60_000L)
+                        }
+                        delay((if (selectedPage == 0 || selectedPage == 3) 1 else if (selectedPage == 5) 5 else 60).seconds)
                     }
                 }
                 val diagnostics = screenState.diagnostics
@@ -196,14 +189,14 @@ class PermissionSettingsActivity : ComponentActivity() {
                 val missionCounts = diagnostics.missionCounts
                 Scaffold { padding ->
                     Column(Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)) {
-                if (screenState.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+                        if (screenState.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
                         TextButton(onClick = { finish() }) { Text("‹ 설정으로 돌아가기") }
                         Text("개발용 통합 상태", style = MaterialTheme.typography.headlineSmall)
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             OutlinedButton(onClick = { openAccessibility() }, modifier = Modifier.weight(1f)) { Text("접근성 설정") }
                             OutlinedButton(onClick = { selectedPage = 2 }, modifier = Modifier.weight(1f)) { Text("구조 테스트") }
                         }
-                        ScrollableTabRow(selectedTabIndex = selectedPage, edgePadding = 0.dp) {
+                        PrimaryScrollableTabRow(selectedTabIndex = selectedPage, edgePadding = 0.dp) {
                             listOf("상태", "권한", "테스트", "스와이프 테스트", "동의", "개입기록").forEachIndexed { index, label ->
                                 Tab(selected = selectedPage == index, onClick = { selectedPage = index }, text = { Text(label) })
                             }
@@ -455,7 +448,7 @@ items(history.size) { index -> Text(history[index], style = MaterialTheme.typogr
         }
         val action = if (isOverlay) Settings.ACTION_MANAGE_OVERLAY_PERMISSION
             else Settings.ACTION_USAGE_ACCESS_SETTINGS
-        val packageUri = Uri.parse("package:$packageName")
+        val packageUri = "package:$packageName".toUri()
         // Some system Settings apps ignore the package URI and still show a list.
         try {
             // Pass the ITV package for both special-access settings screens.
@@ -524,7 +517,7 @@ private fun SwipeDynamicsDevSection() {
 
     LaunchedEffect(Unit) {
         while (true) {
-            delay(1000L)
+            delay(1.seconds)
             refreshTick = android.os.SystemClock.elapsedRealtime()
         }
     }

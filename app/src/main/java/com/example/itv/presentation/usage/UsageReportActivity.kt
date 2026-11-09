@@ -13,6 +13,7 @@ import kotlinx.coroutines.isActive
 import androidx.lifecycle.repeatOnLifecycle
 import com.example.itv.data.local.ItvDatabase
 import android.graphics.Bitmap
+import androidx.core.graphics.createBitmap
 import androidx.compose.foundation.Image
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.draw.clip
@@ -26,11 +27,8 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -44,16 +42,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
 import com.example.itv.presentation.permissions.PermissionSettingsActivity
 import com.example.itv.ui.theme.ITVTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.io.File
 import java.time.*
 import java.util.Locale
-import kotlin.math.ceil
 import kotlin.math.roundToLong
+import kotlin.time.Duration.Companion.seconds
 
 private val ChartSurface = Color(0xFFFDFDFF)
 internal val RecordContentGreen = Color(0xFFEAF4D8)
@@ -91,7 +87,7 @@ fun UsageRecordsContent(modifier: Modifier = Modifier) {
     var shortformSummary by remember { mutableStateOf<ShortformPersonalStatsStore.PersonalizedSummary?>(null) }
     var nights by remember { mutableStateOf<NightReport?>(null) }
     var nightError by remember { mutableStateOf<String?>(null) }
-    var days by rememberSaveable { mutableStateOf(1) }
+    var days by rememberSaveable { mutableIntStateOf(1) }
     var summaryOpen by rememberSaveable { mutableStateOf(false) }
     var shortformOpen by rememberSaveable { mutableStateOf(true) }
     var hourlyOpen by rememberSaveable { mutableStateOf(false) }
@@ -101,7 +97,7 @@ fun UsageRecordsContent(modifier: Modifier = Modifier) {
     var report by remember { mutableStateOf<Report?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(true) }
-    var revision by remember { mutableStateOf(0) }
+    var revision by remember { mutableIntStateOf(0) }
 
     // Runs only while this tab is composed and the Activity is resumed.
     val owner = context.hostActivity()
@@ -110,7 +106,7 @@ fun UsageRecordsContent(modifier: Modifier = Modifier) {
         host.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             revision++
             while (isActive) {
-                delay(60_000L)
+                delay(60.seconds)
                 revision++
             }
         }
@@ -150,7 +146,7 @@ fun UsageRecordsContent(modifier: Modifier = Modifier) {
         try {
             nights = withContext(Dispatchers.IO) { queryNightReport(context, 0) }
         } catch (e: kotlinx.coroutines.CancellationException) { throw e }
-        catch (e: Exception) { nightError = "화면 기록을 조회하지 못했습니다." }
+        catch (_: Exception) { nightError = "화면 기록을 조회하지 못했습니다." }
     }
 
     // Keep drilldown state outside lazy items so off-screen disposal cannot reset it.
@@ -279,19 +275,18 @@ item(key = "hourly_usage_chart", contentType = "hourly_chart") {
         
             val detailHour = selected
             if (detailHour != null && detailHour in data.values.indices) {
-                val hour = detailHour
                 item(key = "detail_header") {
                     TextButton(onClick = { selected = null }) { Text("시간대별 상세 접기") }
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("${hour}:00–${hour + 1}:00", fontWeight = FontWeight.Bold)
-                        Text("${if (data.days == 1) "오늘 사용시간" else "하루 평균 사용시간"} ${hourlyDuration(data.values[hour])}")
+                        Text("$detailHour:00–${detailHour + 1}:00", fontWeight = FontWeight.Bold)
+                        Text("${if (data.days == 1) "오늘 사용시간" else "하루 평균 사용시간"} ${hourlyDuration(data.values[detailHour])}")
                         Text(if (data.days == 1) "이 시간대에 사용한 앱" else "앱별 시간대 하루 평균", style = MaterialTheme.typography.titleMedium)
                     }
                 }
-                item(key = "today_shortform_hour_$hour") {
-                    ShortformHourPanel(java.time.LocalDate.now().toString(), hour)
+                item(key = "today_shortform_hour_$detailHour") {
+                    ShortformHourPanel(LocalDate.now().toString(), detailHour)
                 }
-                val apps = data.hourlyApps.getOrNull(hour).orEmpty().filter { it.minutes >= 1.0 }
+                val apps = data.hourlyApps.getOrNull(detailHour).orEmpty().filter { it.minutes >= 1.0 }
                 if (apps.isEmpty()) item { Text("확인된 앱 사용 내역이 없습니다.") }
                 items(count = apps.size, key = { index -> "app_${apps[index].packageName}" }) { index ->
                     AppUsageCard(apps[index], periodColor(data.days))
@@ -416,8 +411,6 @@ internal fun Context.hostActivity(): ComponentActivity? = when (this) {
 }
 
 
-private fun fmt(v:Double)=String.format(Locale.KOREA,"%.2f",v)
-
 // Round the complete duration first, so 59.5 minutes carries into the next hour.
 internal fun summaryDuration(minutes: Double): String {
     val roundedMinutes = minutes.roundToLong()
@@ -425,8 +418,6 @@ internal fun summaryDuration(minutes: Double): String {
     val remainingMinutes = roundedMinutes % 60
     return "${hours}시간 ${remainingMinutes}분"
 }
-
-private fun appUsageDuration(minutes: Double): String = "${minutes.roundToLong()}분"
 
 private data class AppDisplayInfo(val name: String, val icon: Bitmap?)
 
@@ -448,7 +439,7 @@ internal fun AppUsageCard(app: AppHourUsage, accent: Color, iconOnly: Boolean = 
                 val drawable = try { pm.getApplicationIcon(app.packageName) }
                     catch (_: Exception) { pm.defaultActivityIcon }
                 val pixels = (40 * context.resources.displayMetrics.density).toInt().coerceIn(40, 192)
-                Bitmap.createBitmap(pixels, pixels, Bitmap.Config.ARGB_8888).also { bitmap ->
+                createBitmap(pixels, pixels).also { bitmap ->
                     drawable.setBounds(0, 0, pixels, pixels)
                     drawable.draw(android.graphics.Canvas(bitmap))
                 }

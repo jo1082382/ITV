@@ -196,10 +196,10 @@ internal object YoutubeProbe {
 
                     if (panel) {
                         if (nonShortsSince == 0L) nonShortsSince = now
-                        if (now - nonShortsSince < 15_000L && previousAt != 0L && now - previousAt <= 15_000L) {
-                            state = 1
+                        state = if (now - nonShortsSince < 15_000L && previousAt != 0L && now - previousAt <= 15_000L) {
+                            1
                         } else {
-                            state = 0
+                            0
                         }
                         status = "댓글·패널 표시 · 시청 유지"
                         return

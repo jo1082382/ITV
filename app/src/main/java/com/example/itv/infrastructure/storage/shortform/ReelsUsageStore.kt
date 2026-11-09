@@ -38,7 +38,7 @@ internal object ReelsUsageStore {
         val samples = data.optJSONObject("samples") ?: JSONObject()
         fun read(key: String): Set<String>? {
             val a = samples.optJSONArray(key) ?: return null
-            return (0 until a.length()).map { a.getString(it) }.toSet()
+            return (0 until a.length()).asSequence().map { a.getString(it) }.toSet()
         }
         return ReelsCalibrationSamples(read("reels"), read("feed"), read("dm"), read("comments"))
     }
@@ -47,7 +47,7 @@ internal object ReelsUsageStore {
     }
     @Synchronized fun saveSamplesConfirmed(samples: ReelsCalibrationSamples) {
         val value = JSONObject()
-        fun put(key: String, ids: Set<String>?) { if (ids != null) value.put(key, JSONArray(ids.sorted())) }
+        fun put(key: String, ids: Set<String>?) { ids?.let { value.put(key, JSONArray(it.sorted())) } }
         put("reels", samples.reels); put("feed", samples.feed)
         put("dm", samples.dm); put("comments", samples.comments)
         val next = JSONObject(data.toString()).put("samples", value)
@@ -79,7 +79,7 @@ internal object ReelsUsageStore {
         val days = data.optJSONObject("days") ?: JSONObject().also { data.put("days", it) }
         return days.optJSONObject(key) ?: JSONObject().also { days.put(key, it) }
     }
-    @Synchronized fun observe(valid: Boolean, context: Context) {
+    @Synchronized fun observe(valid: Boolean, @Suppress("UNUSED_PARAMETER") context: Context) {
         val now = SystemClock.elapsedRealtime()
         val wall = System.currentTimeMillis()
         val dt = now - lastTick

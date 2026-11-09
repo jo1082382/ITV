@@ -1,5 +1,4 @@
 package com.example.itv.presentation.coaching
-import com.example.itv.domain.coaching.RestUsageClock
 import com.example.itv.infrastructure.coaching.InterventionJournal
 import com.example.itv.infrastructure.coaching.MissionStats
 
@@ -17,14 +16,9 @@ import com.example.itv.domain.jev.JevCandidatePolicy
 import android.app.*
 import android.content.*
 import android.content.pm.ServiceInfo
-import android.graphics.Color
-import android.graphics.PixelFormat
-import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
 import android.os.*
 import android.provider.Settings
 import android.view.*
-import android.widget.*
 import com.example.itv.domain.coaching.DeveloperStatus
 import com.example.itv.domain.coaching.DeveloperSnapshot
 import com.example.itv.R
@@ -52,9 +46,9 @@ class CoachingMonitorService : Service() {
     }
     private val progress: CoachingProgressCoordinator by lazy {
         CoachingProgressCoordinator(responseController, object : CoachingProgressEffects {
-            override fun status(value: String): Unit { com.example.itv.composition.CoachingAccess.state(this@CoachingMonitorService, value) }
-            override fun hideOffer(): Unit { removeOverlay(); nm.cancel(7102) }
-            override fun showOffer(): Unit { showPuppy() }
+            override fun status(value: String) { com.example.itv.composition.CoachingAccess.state(this@CoachingMonitorService, value) }
+            override fun hideOffer() { removeOverlay(); nm.cancel(7102) }
+            override fun showOffer() { showPuppy() }
         })
     }
     private val overlayFactory: CoachingOverlayFactory by lazy { CoachingOverlayFactory(this) }
@@ -147,13 +141,13 @@ class CoachingMonitorService : Service() {
 
     private var closingCause = "표시 중단 · 안전 보호/화면 전환"
     private val missionStartTimeout: Runnable = Runnable { onMissionStartTimeout() }
-    private fun onMissionStartTimeout(): Unit {
+    private fun onMissionStartTimeout() {
         if (missionController.state.id != null && !missionController.state.started && !missionController.state.pending) {
             if (!pm.isInteractive) missionScreenOff()
             if (!missionController.state.started) failMissionStart()
         }
     }
-    private fun failMissionStart(): Unit {
+    private fun failMissionStart() {
         val failed=missionController.state.id!=null && !missionController.state.started && !missionController.state.pending
         missionController.failStart()
         if(failed)retryPending=true
@@ -191,7 +185,7 @@ class CoachingMonitorService : Service() {
         dismissCompletion()
         missionController.screenOff(SystemClock.elapsedRealtime())
     }
-    private fun missionScreenOn(): Unit { missionController.screenOn(SystemClock.elapsedRealtime()) }
+    private fun missionScreenOn() { missionController.screenOn(SystemClock.elapsedRealtime()) }
     private fun checkMission() {
         if (!pm.isInteractive) missionScreenOff() else missionScreenOn()
         if (!missionController.state.pending || !unlocked() || completionView != null) return
@@ -201,7 +195,7 @@ class CoachingMonitorService : Service() {
         if (reason != null && !(WritingGuard.connected &&
             SystemClock.elapsedRealtime() - WritingGuard.checkedAt <= 3000L &&
             reason == "ITV 내부 화면 · 구조 탐색 생략 / 개입 보류")) return
-        val id = missionController.state.id ?: return
+        if (missionController.state.id == null) return
         val (box, params) = overlayFactory.completion(::dismissCompletion)
         try {
             wm.addView(box, params); completionView = box
@@ -225,7 +219,6 @@ class CoachingMonitorService : Service() {
         get() = progress.waitingTransition
         set(value) { progress.waitingTransition = value }
     private val interventionMs = TestCoachingPolicy.INTERVENTION_MS
-    private val reminderMs = TestCoachingPolicy.REMINDER_MS
     private var overlay: View? = null
     private var displayedPackage: String? = null
     private var receiverRegistered = false
@@ -235,10 +228,9 @@ class CoachingMonitorService : Service() {
         set(value) { progress.safeSince = value }
     private val wm by lazy { getSystemService(WindowManager::class.java) }
     private val pm by lazy { getSystemService(PowerManager::class.java) }
-    private val km by lazy { getSystemService(KeyguardManager::class.java) }
     private val nm by lazy { getSystemService(NotificationManager::class.java) }
     private fun unlocked() = observer.unlocked()
-    private fun resetOfferState(): Unit { progress.reset() }
+    private fun resetOfferState() { progress.reset() }
     private fun observeUsage(): Boolean = progress.observe(SystemClock.elapsedRealtime(), unlocked(), overlay != null)
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -330,7 +322,7 @@ class CoachingMonitorService : Service() {
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_USER_PRESENT)
         }
-        if (Build.VERSION.SDK_INT >= 33) registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(receiver, filter, RECEIVER_NOT_EXPORTED)
         else {
             @Suppress("DEPRECATION")
             registerReceiver(receiver, filter)
@@ -481,7 +473,7 @@ class CoachingMonitorService : Service() {
                     withContext(Dispatchers.IO) {
                         jev.store.db.withTransaction {
                             val latest = jev.store.dao.trial(trial.id)
-                            if (latest != null) jev.store.dao.saveTrial(latest.copy(feedbackPrompted = true))
+                            latest?.let { jev.store.dao.saveTrial(it.copy(feedbackPrompted = true)) }
                         }
                     }
                 } catch (_: Exception) { dismissJevFeedback() }

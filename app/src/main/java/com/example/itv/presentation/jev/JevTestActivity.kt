@@ -38,6 +38,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.UUID
 import kotlin.math.roundToInt
+import kotlin.time.Duration.Companion.seconds
 
 class JevTestActivity: ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -65,7 +66,7 @@ private fun JevTestScreen(vm: JevTestViewModel,onBack: ()->Unit,modifier: Modifi
         TextButton(onClick=onBack) { Text("‹ 설정으로 돌아가기") }
         Text("Jev 공동 테스트",Modifier.padding(horizontal=20.dp),style=MaterialTheme.typography.headlineSmall,
             fontWeight=FontWeight.Bold,color=ItvGreen)
-        ScrollableTabRow(selectedTabIndex=page,edgePadding=12.dp) {
+        PrimaryScrollableTabRow(selectedTabIndex=page,edgePadding=12.dp) {
             listOf("연결","판단 설정","수동 요청","상태·기록","실시간 측정 테스트","스와이프 테스트").forEachIndexed { i,title ->
                 Tab(selected=page==i,onClick={page=i},text={Text(title)})
             }
@@ -389,7 +390,7 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
 
     LaunchedEffect(Unit) {
         while (true) {
-            kotlinx.coroutines.delay(1000L)
+            kotlinx.coroutines.delay(1.seconds)
             refreshTick = android.os.SystemClock.elapsedRealtime()
         }
     }
@@ -574,7 +575,7 @@ private fun SwipeTestPage(busy: Boolean) {
 
     LaunchedEffect(Unit) {
         while (true) {
-            kotlinx.coroutines.delay(1000L)
+            kotlinx.coroutines.delay(1.seconds)
             refreshTick = android.os.SystemClock.elapsedRealtime()
         }
     }

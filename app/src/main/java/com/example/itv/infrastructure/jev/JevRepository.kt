@@ -15,6 +15,7 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
 import java.util.UUID
+import kotlin.time.Duration.Companion.seconds
 
 class RelayFailure(val code: String, val httpStatus: Int=0): Exception(code)
 data class JevAnswer(val trial: JevTrial, val probability: Double)
@@ -41,7 +42,7 @@ class JevRepository private constructor(context: Context) {
         store.scope.launch {
             while(isActive) {
                 if(store.ready && store.settings.value.collectionConsent && store.tokenConfigured.value) flush()
-                delay(5000)
+                delay(5.seconds)
             }
         }
     }

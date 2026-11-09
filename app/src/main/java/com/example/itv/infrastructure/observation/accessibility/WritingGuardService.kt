@@ -13,6 +13,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 
 /** Reads UI structure only: never accesses node.text, hints, descriptions or event text. */
+@android.annotation.SuppressLint("AccessibilityPolicy")
 open class WritingGuardService : AccessibilityService() {
     private val observers = com.example.itv.infrastructure.observation.ObservationRegistry()
     private val handler = Handler(Looper.getMainLooper())
@@ -76,8 +77,8 @@ open class WritingGuardService : AccessibilityService() {
         val now = SystemClock.elapsedRealtime()
         val pkg = event?.packageName?.toString()
         if (ownScreen && pkg == packageName &&
-            event?.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
-            event?.eventType != AccessibilityEvent.TYPE_WINDOWS_CHANGED &&
+            event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            event.eventType != AccessibilityEvent.TYPE_WINDOWS_CHANGED &&
             now - lastOwnCheck < 1000L) return
         lastOwnCheck = now
         // Coalesce bursts without postponing an already scheduled scan (no starvation).

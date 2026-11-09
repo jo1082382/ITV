@@ -155,7 +155,7 @@ class JevSessionTracker(private val newId: () -> String) {
         for (app in listOf(JevSettings.INSTAGRAM, JevSettings.YOUTUBE)) {
             val state = states.getOrPut(app) { AppState(newId()) }
             if (pkg == app && previousPkg != app) {
-                val verifiedAway = state.awayMs + if (contiguous && previousPkg != null && previousPkg != app) delta else 0L
+                val verifiedAway = state.awayMs + if (contiguous && previousPkg != null) delta else 0L
                 if (verifiedAway >= 600_000L) {
                     state.id = newId(); state.totalMs = 0
                 }

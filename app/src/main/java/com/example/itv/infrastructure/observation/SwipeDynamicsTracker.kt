@@ -184,7 +184,7 @@ internal object SwipeDynamicsTracker {
 
     @Synchronized
     fun reset(app: ShortformApp? = null) {
-        val targets = if (app != null) listOf(app) else listOf(ShortformApp.YOUTUBE, ShortformApp.INSTAGRAM)
+        val targets = app?.let { listOf(it) } ?: listOf(ShortformApp.YOUTUBE, ShortformApp.INSTAGRAM)
         for (t in targets) {
             val s = states.getValue(t)
             s.runStartElapsed = 0L

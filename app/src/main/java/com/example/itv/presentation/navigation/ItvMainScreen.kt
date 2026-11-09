@@ -3,7 +3,6 @@ import com.example.itv.domain.goals.HomeGoalRow
 
 
 import com.example.itv.presentation.usage.UsageRecordsContent
-import androidx.compose.foundation.lazy.LazyColumn
 import android.content.Intent
 import androidx.compose.ui.platform.LocalContext
 import com.example.itv.presentation.permissions.PermissionSettingsActivity
@@ -47,7 +46,7 @@ private val tabs = listOf(
 
 @Composable
 fun ItvMainScreen(
-    goals: Flow<List<HomeGoalRow>>,
+    @Suppress("UNUSED_PARAMETER") goals: Flow<List<HomeGoalRow>>,
     selectedTab: String,
     onSelectTab: (String) -> Unit,
     onOpenGoals: () -> Unit,
@@ -152,32 +151,15 @@ private fun TabPage(modifier: Modifier = Modifier, content: @Composable () -> Un
 }
 
 @Composable
-private fun PageTitle(title: String, description: String) {
-    Text(title, style = MaterialTheme.typography.headlineMedium,
-        color = ItvGreen, fontWeight = FontWeight.Bold)
-    Text(description, style = MaterialTheme.typography.bodyMedium)
-}
-
-@Composable
-private fun InfoCard(title: String, body: String) {
-    Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp),
-        border = BorderStroke(1.dp, ItvLine),
-        colors = CardDefaults.cardColors(containerColor = ItvMint)) {
-        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text(body, style = MaterialTheme.typography.bodyMedium)
-        }
-    }
-}
-
-@Composable
 private fun RecordsScreen() {
     UsageRecordsContent()
 }
 
 @Composable
 private fun CharacterScreen() {
-    PageTitle("캐릭터", "나의 디지털 쉼표를 함께 만들어가요.")
+    Text("캐릭터", style = MaterialTheme.typography.headlineMedium,
+        color = ItvGreen, fontWeight = FontWeight.Bold)
+    Text("나의 디지털 쉼표를 함께 만들어가요.", style = MaterialTheme.typography.bodyMedium)
     Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp),
         colors = CardDefaults.cardColors(containerColor = ItvMint), border = BorderStroke(1.dp, ItvLine)) {
         Column(Modifier.fillMaxWidth().padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally,
@@ -187,32 +169,14 @@ private fun CharacterScreen() {
             Text("나와 함께 쉬어가는 강아지 친구")
         }
     }
-    InfoCard("성장·꾸미기 연동 준비 중", "현재 강아지 캐릭터는 기본 모습입니다. 레벨, 보상, 꾸미기 저장 기능은 아직 연결되지 않았습니다.")
-}
-
-@Composable
-private fun SettingsScreen(onOpenGoals: () -> Unit, onOpenCoaching: () -> Unit) {
-    val context = LocalContext.current
-    PageTitle("설정", "내 목표와 앱 상태를 확인해요.")
-    InfoCard("목표 관리", "하루 휴대폰 사용시간, 취침시간, 사용 후 휴식 목표를 수정할 수 있습니다.")
-    Button(onClick = onOpenGoals, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
-        shape = RoundedCornerShape(16.dp)) { Text("목표 설정 열기") }
-    InfoCard("코칭 상태", "관측 기능 연결 여부와 코칭 실행 상태를 별도 화면에서 확인합니다.")
-    OutlinedButton(onClick = onOpenCoaching, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
-        shape = RoundedCornerShape(16.dp)) { Text("코칭 상태 열기") }
-    InfoCard("계정", "현재 시험용 게스트(demo-guest)로 사용 중입니다. 로그인과 서버 백업은 아직 연결되지 않았습니다.")
-    InfoCard("수집 동의·권한", "수집 동의, 실제 OS 권한 상태와 이 기기의 설정 내역을 확인합니다.")
-    OutlinedButton(onClick = { context.startActivity(Intent(context, PermissionSettingsActivity::class.java)) },
-        modifier = Modifier.fillMaxWidth()) { Text("수집 동의·권한 및 내역 열기") }
-}
-
-@Composable
-private fun CoachingStatusScreen(onBack: () -> Unit) {
-    TextButton(onClick = onBack) { Text("‹ 설정으로 돌아가기") }
-    PageTitle("코칭 상태", "관측과 코칭의 현재 구현 상태를 안내합니다.")
-    InfoCard("관측 상태 · 미연결", "실제 사용량 관측 기능은 아직 연결되지 않았습니다. 사용량 표의 미측정은 0분 사용을 의미하지 않습니다.")
-    InfoCard("코칭 실행 · 미연결", "현재 코칭을 판단하거나 표시하지 않습니다. 목표 활성화만으로 코칭이 시작되지는 않습니다.")
-    InfoCard("동의·OS 권한", "설정의 수집 동의·권한 및 내역에서 실제 상태를 확인하세요. 권한을 허용해도 현재 수집·코칭은 시작되지 않습니다.")
+    Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp),
+        border = BorderStroke(1.dp, ItvLine),
+        colors = CardDefaults.cardColors(containerColor = ItvMint)) {
+        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("성장·꾸미기 연동 준비 중", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text("현재 강아지 캐릭터는 기본 모습입니다. 레벨, 보상, 꾸미기 저장 기능은 아직 연결되지 않았습니다.", style = MaterialTheme.typography.bodyMedium)
+        }
+    }
 }
 
 @Composable
@@ -230,22 +194,6 @@ private fun RecordsTabIcon(color: Color) {
                 size = Size(size.width * .14f, size.height * barHeight),
                 cornerRadius = androidx.compose.ui.geometry.CornerRadius(2.dp.toPx()))
         }
-    }
-}
-
-@Composable
-private fun LazySettingsPage(onOpenGoals: () -> Unit, modifier: Modifier = Modifier) {
-    val context = LocalContext.current
-    fun openStatus() { context.startActivity(Intent(context, PermissionSettingsActivity::class.java)) }
-    LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        item { PageTitle("설정", "내 목표와 앱 상태를 확인해요.") }
-        item { InfoCard("개발용 통합 상태", "측정 상태·누적 시계·개입 대기 이유와 권한을 확인합니다.") }
-        item { Button(onClick = { openStatus() }, modifier = Modifier.fillMaxWidth()) { Text("통합 상태 · 권한 · 구조 테스트") } }
-        item { InfoCard("목표 관리", "하루 사용시간, 취침시간, 사용 후 휴식 목표를 수정할 수 있습니다.") }
-        item { OutlinedButton(onClick = onOpenGoals, modifier = Modifier.fillMaxWidth()) { Text("목표 설정 열기") } }
-        item { InfoCard("계정", "현재 시험용 게스트(demo-guest)로 사용 중입니다. 로그인과 서버 백업은 아직 연결되지 않았습니다.") }
-        item { InfoCard("수집 동의·권한", "통합 상태 화면의 동의/내역 탭에서 수집 안내와 설정 내역을 확인할 수 있습니다.") }
     }
 }
 
@@ -281,8 +229,8 @@ private fun HomeSettingsDrawer(open: Boolean, onClose: () -> Unit, onOpenGoals: 
                 shape = RoundedCornerShape(topStart = 26.dp, bottomStart = 26.dp),
                 color = ItvMint, border = BorderStroke(1.dp, ItvLine), shadowElevation = 4.dp) {
                 Column(Modifier.fillMaxSize().clickable(
-                    interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = {}
-                ).verticalScroll(rememberScrollState()).padding(20.dp),
+                    interactionSource = remember { MutableInteractionSource() }, indication = null
+                ) {}.verticalScroll(rememberScrollState()).padding(20.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp)) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Text("설정", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge,

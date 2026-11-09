@@ -109,10 +109,10 @@ private fun decode(j: JSONObject) = JevSettings(
 ).validated()
 
 class JevStore private constructor(context: Context) {
-    private val app=context.applicationContext
-    private val prefs=app.getSharedPreferences("jev_test_settings_v1",Context.MODE_PRIVATE)
-    private val tokenFile=TestToken(app)
-    val db=Room.databaseBuilder(app,JevDatabase::class.java,"jev-testing.db").build()
+    private val appContext=context.applicationContext
+    private val prefs=appContext.getSharedPreferences("jev_test_settings_v1",Context.MODE_PRIVATE)
+    private val tokenFile=TestToken(appContext)
+    val db=Room.databaseBuilder(appContext,JevDatabase::class.java,"jev-testing.db").build()
     val dao=db.dao()
     val scope=CoroutineScope(SupervisorJob()+Dispatchers.IO)
     private val mutableSettings=MutableStateFlow(JevSettings())

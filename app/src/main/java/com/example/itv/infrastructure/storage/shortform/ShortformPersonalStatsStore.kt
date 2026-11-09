@@ -474,7 +474,7 @@ internal object ShortformPersonalStatsStore {
         // Total app usage today from UsageReport
         fun appUsageTodayMs(pkg: String): Long {
             val r = todayUsageReport ?: return 0L
-            val minutes = r.hourlyApps.flatten().filter { it.packageName == pkg }.sumOf { it.minutes }
+            val minutes = r.hourlyApps.asSequence().flatten().filter { it.packageName == pkg }.sumOf { it.minutes }
             return (minutes * 60_000.0).toLong()
         }
         val igParentTodayMs = appUsageTodayMs(PKG_INSTAGRAM)

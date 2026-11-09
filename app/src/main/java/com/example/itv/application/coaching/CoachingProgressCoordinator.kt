@@ -20,7 +20,7 @@ internal class CoachingProgressCoordinator(
     var waitingTransition: Boolean = false
     var safeSince: Long? = null
     private val interventionMs: Long = TestCoachingPolicy.INTERVENTION_MS
-    fun reset(): Unit {
+    fun reset() {
         waitingYoutube = false; waitingTransition = false; safeSince = null
         responseController.offered = false; responseController.retryAt = null
         responseController.suppressed = false
@@ -34,7 +34,7 @@ internal class CoachingProgressCoordinator(
         }
         return using
     }
-    fun tick(now: Long, using: Boolean, observation: CoachingObservation, offerVisible: Boolean): Unit {
+    fun tick(now: Long, using: Boolean, observation: CoachingObservation, offerVisible: Boolean) {
             val guardReason = observation.guardReason
             if (guardReason != null) {
                 safeSince = null
@@ -51,20 +51,23 @@ internal class CoachingProgressCoordinator(
                     safeAt == null || now - safeAt < 5000L -> effects.status( "작성 종료 확인 중 · 안전 상태 5초 대기")
                     responseController.retryAt != null && now < (responseController.retryAt ?: now) -> effects.status( "나중에 선택 · 재알림 대기")
                     elapsed >= interventionMs -> {
-                        val youtube = observation.youtubeState
-                        if (youtube == 1) {
-                            waitingYoutube = true; waitingTransition = false
-                            effects.status( "개입 대기 · 다음 쇼츠 전환을 기다리는 중")
-                        } else if (youtube == -1) {
-                            waitingYoutube = false; waitingTransition = false
-                            effects.status( "YouTube/현재 화면 확인 중 · 개입 보류")
-                        } else when (observation.reelsState) {
+                        when (observation.youtubeState) {
                             1 -> {
-                                waitingYoutube = false; waitingTransition = true
-                                effects.status( "개입 대기 · 다음 릴스 전환을 기다리는 중")
+                                waitingYoutube = true; waitingTransition = false
+                                effects.status( "개입 대기 · 다음 쇼츠 전환을 기다리는 중")
                             }
-                            0 -> { waitingYoutube = false; waitingTransition = false; effects.showOffer() }
-                            else -> effects.status( "현재 화면 판별 불가 · 개입 보류")
+                            -1 -> {
+                                waitingYoutube = false; waitingTransition = false
+                                effects.status( "YouTube/현재 화면 확인 중 · 개입 보류")
+                            }
+                            else -> when (observation.reelsState) {
+                                1 -> {
+                                    waitingYoutube = false; waitingTransition = true
+                                    effects.status( "개입 대기 · 다음 릴스 전환을 기다리는 중")
+                                }
+                                0 -> { waitingYoutube = false; waitingTransition = false; effects.showOffer() }
+                                else -> effects.status( "현재 화면 판별 불가 · 개입 보류")
+                            }
                         }
                     }
                 }
