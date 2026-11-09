@@ -172,3 +172,25 @@ test("kill switch blocks new Jev calls while event collection remains available"
   assert.equal(f.calls,0);
  }finally{f.db.close();}
 });
+test("optional personalized and swipe metrics are forwarded when present and omitted for un-updated clients",async()=>{
+ let sent=[];const f=fixture({upstream:async(_url,init)=>{sent.push(JSON.parse(init.body));return Response.json({
+  model:"jev-1.14.0",answers:{intervene:{noul:0.78}},usage:{input_tokens:210}
+ });}});
+ try {
+  assert.equal((await f.request("/api/jev/evaluate",context("plain-teammate"))).status,200);
+  assert.equal(sent[0].state.session_vs_personal_avg_ratio,undefined);
+  assert.equal((await f.request("/api/jev/evaluate",{
+   ...context("enriched-client"),
+   session_vs_personal_avg_ratio:1.35,
+   today_vs_7d_avg_ratio:1.42,
+   effective_spm_1m:12.5,
+   swipe_accel_1m:3.5,
+   fast_swipe_streak:4
+  })).status,200);
+  assert.equal(sent[1].state.session_vs_personal_avg_ratio,1.35);
+  assert.equal(sent[1].state.today_vs_7d_avg_ratio,1.42);
+  assert.equal(sent[1].state.effective_swipes_per_minute_1m,12.5);
+  assert.equal(sent[1].state.swipe_acceleration_1m,3.5);
+  assert.equal(sent[1].state.consecutive_fast_swipe_streak,4);
+ }finally{f.db.close();}
+});

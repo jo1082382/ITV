@@ -17,9 +17,12 @@ open class WritingGuardService : AccessibilityService() {
     private val observers = com.example.itv.infrastructure.observation.ObservationRegistry()
     private val handler = Handler(Looper.getMainLooper())
     private val messengerPackages = setOf(
-        "com.kakao.talk", "com.discord", "com.instagram.android",
+        "com.kakao.talk", "com.discord",
         "com.google.android.apps.messaging", "com.samsung.android.messaging",
         "com.android.mms", "org.telegram.messenger", "jp.naver.line.android"
+    )
+    private val shortformPackages = setOf(
+        "com.google.android.youtube", "com.instagram.android"
     )
     private var ownScreen = false
     private var lastOwnCheck = 0L
@@ -32,6 +35,8 @@ open class WritingGuardService : AccessibilityService() {
         // Determine only the foreground package. Never traverse ITV's Compose tree.
         val pkg = try {
             val root = rootInActiveWindow
+                ?: windows?.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive }?.root
+                ?: windows?.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isFocused }?.root
             if (root == null) null else try { root.packageName?.toString() }
             finally { @Suppress("DEPRECATION") root.recycle() }
         } catch (_: Exception) { null }
@@ -119,15 +124,15 @@ open class WritingGuardService : AccessibilityService() {
             var visited = 0
             var truncated = false
             fun walk(node: AccessibilityNodeInfo, depth: Int) {
-                if (visited >= 700 || depth > 40) { truncated = true; return }
-                visited++
                 if (!node.isVisibleToUser) return
+                if (visited >= 1500 || depth > 45) { truncated = true; return }
+                visited++
                 if (node.isEditable) {
                     editable = true
                     if (node.isFocused) focused = true
                 }
                 for (i in 0 until node.childCount) {
-                    if (visited >= 700) { truncated = true; break }
+                    if (visited >= 1500) { truncated = true; break }
                     val child = node.getChild(i) ?: continue
                     try { walk(child, depth + 1) } finally {
                         @Suppress("DEPRECATION")
@@ -143,7 +148,7 @@ open class WritingGuardService : AccessibilityService() {
                 pkg == "com.instagram.android" && ReelsProbe.dmScreen() -> result(true, "Instagram DM 화면 감지 · 개입 보류")
                 focused -> result(true, "입력란 포커스 감지 · 개입 보류")
                 pkg in messengerPackages && editable -> result(true, "메신저 입력란 감지 · 개입 보류")
-                truncated -> result(true, "화면 구조 검사 제한 · 개입 보류")
+                truncated && pkg !in shortformPackages -> result(true, "화면 구조 검사 제한 · 개입 보류")
                 else -> result(false, "키보드·입력란 보호 조건 미감지")
             }
         } catch (_: Exception) {

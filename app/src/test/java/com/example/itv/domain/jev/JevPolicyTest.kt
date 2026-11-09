@@ -94,4 +94,31 @@ class JevPolicyTest {
     @Test(expected=IllegalArgumentException::class) fun invalidProbabilitySettingIsRejected() {
         JevSettings(probabilityThreshold=Double.NaN).validated()
     }
+    @Test fun personalizedAndSwipeMetricsAdjustCandidatesAndThresholdSafely() {
+        val settings=JevSettings(probabilityThreshold=0.80, personalizedEnabled=true)
+        // Without personal or swipe signals, threshold and candidate reasons remain unchanged
+        val plain=context(ms=300_000)
+        assertEquals(0.80, JevCandidatePolicy.effectiveThreshold(settings, plain), 0.0001)
+        assertTrue(JevCandidatePolicy.reasons(plain, settings).isEmpty())
+
+        // With personal session ratio >= 1.25 and swipe overheat, candidate triggers and threshold lowers by 0.15 (to 0.65)
+        val overheated=plain.copy(
+            sessionVsAvgRatio=1.40,
+            todayVs7dRatio=1.50,
+            effectiveSpm1m=13.0,
+            swipeAccel1m=4.0,
+            fastSwipeStreak=4
+        )
+        val reasons=JevCandidatePolicy.reasons(overheated, settings)
+        assertTrue("PERSONAL_SESSION_EXCEEDED" in reasons)
+        assertTrue("RAPID_SWIPE_OVERHEAT" in reasons)
+        assertEquals(0.65, JevCandidatePolicy.effectiveThreshold(settings, overheated), 0.0001)
+        assertTrue(JevCandidatePolicy.passes(0.66, settings, overheated))
+        assertFalse(JevCandidatePolicy.passes(0.64, settings, overheated))
+
+        // When personalizedEnabled is false, falls back to base threshold and base candidate rules
+        val disabledSettings=settings.copy(personalizedEnabled=false)
+        assertEquals(0.80, JevCandidatePolicy.effectiveThreshold(disabledSettings, overheated), 0.0001)
+        assertTrue(JevCandidatePolicy.reasons(overheated, disabledSettings).isEmpty())
+    }
 }

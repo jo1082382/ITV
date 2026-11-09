@@ -2,6 +2,7 @@ package com.example.itv.presentation.usage
 import com.example.itv.domain.records.*
 import com.example.itv.composition.queryNightReport
 import com.example.itv.composition.queryUsageReport
+import com.example.itv.infrastructure.storage.shortform.ShortformPersonalStatsStore
 
 
 import androidx.compose.foundation.lazy.LazyRow
@@ -87,10 +88,12 @@ fun UsageRecordsContent(modifier: Modifier = Modifier) {
     val goalFlow = remember(context) { com.example.itv.composition.goalService(ItvDatabase.get(context)).observeHomeGoals("demo-guest") }
     val comparisonGoals by goalFlow.collectAsState(initial = emptyList())
     var todayForComparison by remember { mutableStateOf<Report?>(null) }
+    var shortformSummary by remember { mutableStateOf<ShortformPersonalStatsStore.PersonalizedSummary?>(null) }
     var nights by remember { mutableStateOf<NightReport?>(null) }
     var nightError by remember { mutableStateOf<String?>(null) }
     var days by rememberSaveable { mutableStateOf(1) }
     var summaryOpen by rememberSaveable { mutableStateOf(false) }
+    var shortformOpen by rememberSaveable { mutableStateOf(true) }
     var hourlyOpen by rememberSaveable { mutableStateOf(false) }
     var goalsOpen by rememberSaveable { mutableStateOf(false) }
     var nightOpen by rememberSaveable { mutableStateOf(false) }
@@ -120,15 +123,21 @@ fun UsageRecordsContent(modifier: Modifier = Modifier) {
         try {
             val result = withContext(Dispatchers.IO) {
                 val period = context.queryUsageReport(days)
-                period to if (days == 1) period else context.queryUsageReport(1)
+                val todayRep = if (days == 1) period else context.queryUsageReport(1)
+                val sfSummary = runCatching { ShortformPersonalStatsStore.loadSummary(context, todayRep) }.getOrNull()
+                Triple(period, todayRep, sfSummary)
             }
             report = result.first
             todayForComparison = result.second
+            if (result.third != null) shortformSummary = result.third
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
             report = null
             todayForComparison = null
+            shortformSummary = withContext(Dispatchers.IO) {
+                runCatching { ShortformPersonalStatsStore.loadSummary(context, null) }.getOrNull()
+            }
             error = e.message ?: "사용량을 불러오지 못했습니다."
         } finally {
             loading = false
@@ -244,6 +253,14 @@ item {
             }
 
 }
+}
+}
+item(key = "shortform_personal_toggle") {
+    RecordSectionToggle("🎬", "숏폼 사용량", periodColor(days), shortformOpen) { shortformOpen = !shortformOpen }
+}
+if (shortformOpen) {
+item(key = "shortform_personal_section") {
+    ShortformPersonalUsageSection(shortformSummary)
 }
 }
 item(key = "hourly_toggle") {

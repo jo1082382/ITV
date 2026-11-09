@@ -5,10 +5,13 @@ import android.os.SystemClock
 import android.provider.Settings
 import com.example.itv.data.local.ItvDatabase
 import com.example.itv.domain.jev.*
+import com.example.itv.domain.records.ShortformApp
 import com.example.itv.infrastructure.coaching.CoachingConsentStore
+import com.example.itv.infrastructure.observation.SwipeDynamicsTracker
 import com.example.itv.infrastructure.observation.accessibility.WritingGuard
 import com.example.itv.infrastructure.observation.instagram.ReelsProbe
 import com.example.itv.infrastructure.observation.youtube.YoutubeProbe
+import com.example.itv.infrastructure.storage.shortform.ShortformPersonalStatsStore
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import org.json.JSONObject
@@ -80,6 +83,12 @@ class JevRuntime private constructor(context: Context) {
                 bedtimeMinute=goals.firstOrNull { it.enabled && it.goalType=="BEDTIME" }?.localMinuteOfDay
             }
         }
+        scope.launch(Dispatchers.IO) {
+            while (isActive) {
+                runCatching { ShortformPersonalStatsStore.refreshBaselineCache(app) }
+                delay(60_000L)
+            }
+        }
     }
     fun start() { attached=true }
     fun stop() {
@@ -98,6 +107,23 @@ class JevRuntime private constructor(context: Context) {
         val elapsed=Duration.between(start,now).toMinutes()
         return elapsed.takeIf { it in 0 until settings.bedtimeWindowMinutes.toLong() }?.toInt()
     }
+    fun enrichContext(base: JevContext, nowElapsed: Long = SystemClock.elapsedRealtime()): JevContext {
+        val personal = ShortformPersonalStatsStore.quickContextMetrics(
+            context = app,
+            pkg = base.packageName,
+            currentSessionMs = base.sessionMs,
+            currentContinuousMs = base.continuousMs
+        )
+        val shortformApp = if (base.packageName == JevSettings.INSTAGRAM) ShortformApp.INSTAGRAM else ShortformApp.YOUTUBE
+        val swipeSnap = SwipeDynamicsTracker.snapshot(shortformApp, nowElapsed, base.observedAt)
+        return base.copy(
+            sessionVsAvgRatio = personal.sessionVsAvgRatio,
+            todayVs7dRatio = personal.todayVs7dRatio,
+            effectiveSpm1m = swipeSnap.effectiveSpm1m.takeIf { swipeSnap.totalSwipesInRun > 0 || it > 0.0 },
+            swipeAccel1m = swipeSnap.effectiveAccel1m.takeIf { swipeSnap.totalSwipesInRun > 0 || it != 0.0 },
+            fastSwipeStreak = swipeSnap.currentFastStreak
+        )
+    }
     fun tick(unlocked: Boolean, missionActive: Boolean, offerVisible: Boolean) {
         missionActiveState.value=missionActive
         if(!enabled || !store.ready || !loaded)return
@@ -105,6 +131,9 @@ class JevRuntime private constructor(context: Context) {
         val now=SystemClock.elapsedRealtime()
         if(revision!=s.revision) {
             approval?.let { suppress(it.trial,"SETTINGS_CHANGED") };approval=null
+            if(revision!=-1L) {
+                for(c in controls.values) { c.asked=false;c.at=0;c.total=0 }
+            }
             revision=s.revision;safeSince=null
         }
         val pkg=if(!unlocked)"LOCKED" else JevObservationHub.foregroundPackage.takeIf { now-JevObservationHub.checkedAt in 0..1500 }
@@ -115,13 +144,21 @@ class JevRuntime private constructor(context: Context) {
         }
         val guard=WritingGuard.blockReason()
         val confirmed=pkg?.takeIf { screen==1 && guard==null && unlocked && s.targets(it) }
-        tracker.observe(now,pkg,confirmed)
+        val effectivePkg=if(guard!=null && pkg!="com.example.itv")"GUARD_BLOCKED" else pkg
+        tracker.observe(now,effectivePkg,confirmed)
+        val sameAppSafe=pkg!=null && s.targets(pkg) && guard==null && unlocked && screen>=0
         val c=pkg?.takeIf(s::targets)?.let { tracker.context(it,now,System.currentTimeMillis(),bedtime(s)) }
+            ?.let { enrichContext(it, now) }
             ?.let { if(confirmed==pkg)it else it.copy(quality="INSUFFICIENT") }
         if(c?.quality=="VALID")lastObservedContext=c
-        if(confirmed==null)safeSince=null else if(safeSince==null)safeSince=now
+        if(!unlocked || guard!=null || pkg==null || !s.targets(pkg))safeSince=null else if((confirmed!=null || sameAppSafe) && safeSince==null)safeSince=now
         val currentApproval=approval
-        if(currentApproval!=null && !JevCandidatePolicy.resultIsCurrent(currentApproval.settings.revision,s,currentApproval.captured,c,now-currentApproval.requestedAt)) {
+        val approvalContext=c?.let {
+            if(sameAppSafe && currentApproval!=null && it.packageName==currentApproval.captured.packageName && it.sessionId==currentApproval.captured.sessionId)
+                it.copy(quality="VALID")
+            else it
+        }
+        if(currentApproval!=null && !JevCandidatePolicy.resultIsCurrent(currentApproval.settings.revision,s,currentApproval.captured,approvalContext,now-currentApproval.requestedAt)) {
             suppress(currentApproval.trial,"STALE_CONTEXT_OR_RESULT");approval=null
         }
         val control=c?.let { controls.getOrPut(it.packageName){Attempt()} }
@@ -164,11 +201,15 @@ class JevRuntime private constructor(context: Context) {
                     try {
                         val answer=repository.evaluate(c,s,"LIVE",reasons.joinToString("|"))
                         mutableState.value=mutableState.value.copy(probability=answer.probability)
-                        val fresh=state.value.context
+                        val doneAt=SystemClock.elapsedRealtime()
+                        val sameForeground=JevObservationHub.foregroundPackage==c.packageName && doneAt-JevObservationHub.checkedAt in 0..1500
+                        val fresh=(state.value.context ?: c.takeIf { sameForeground })?.let {
+                            if(sameForeground && it.packageName==c.packageName && it.sessionId==c.sessionId) it.copy(quality="VALID") else it
+                        }
                         when {
-                            !attached || !enabled || !JevCandidatePolicy.resultIsCurrent(s.revision,store.settings.value,c,fresh,SystemClock.elapsedRealtime()-requestedAt) ->
+                            !attached || !enabled || !JevCandidatePolicy.resultIsCurrent(s.revision,store.settings.value,c,fresh,doneAt-requestedAt) ->
                                 suppress(answer.trial,"STALE_CONTEXT_OR_SETTINGS")
-                            !JevCandidatePolicy.passes(answer.probability,s) -> suppress(answer.trial,"BELOW_PROBABILITY_THRESHOLD")
+                            !JevCandidatePolicy.passes(answer.probability,s,c) -> suppress(answer.trial,"BELOW_PROBABILITY_THRESHOLD")
                             !s.actualIntervention -> suppress(answer.trial,"OBSERVE_ONLY")
                             else -> approval=Approval(answer.trial,s,c,requestedAt)
                         }
@@ -179,8 +220,8 @@ class JevRuntime private constructor(context: Context) {
         }
         if(now-savedAt>=5000)persist()
     }
-    /** Called only by a transition that occurred after approval. */
-    fun canShow(): Boolean {
+    /** Called when approved and ready to display (on transition or when navigating within the same app). */
+    fun canShow(transition: Boolean = true): Boolean {
         val a=approval ?: return false
         val s=store.settings.value
         val now=SystemClock.elapsedRealtime()
@@ -191,20 +232,34 @@ class JevRuntime private constructor(context: Context) {
             JevSettings.YOUTUBE -> YoutubeProbe.screenState()
             else -> 0
         }
+        val sameForeground=JevObservationHub.foregroundPackage==pkg && now-JevObservationHub.checkedAt in 0..1500
+        val currentContext=(state.value.context ?: a.captured.takeIf { sameForeground })?.let {
+            if(sameForeground && it.packageName==pkg && it.sessionId==a.captured.sessionId) it.copy(quality="VALID") else it
+        }
+        val readyForScreen = if (probe == 1) (transition || now - a.requestedAt >= 15_000L) else (probe == 0)
         return attached && enabled && s.collectionConsent && s.actualIntervention && store.tokenConfigured.value &&
             CoachingConsentStore.granted(app) && !missionActiveState.value && active==null &&
-            JevObservationHub.foregroundPackage==pkg && now-JevObservationHub.checkedAt in 0..1500 && probe==1 &&
+            sameForeground && readyForScreen &&
             control?.suppressedSession!=a.captured.sessionId && (control?.deferUntil ?: 0)<=now &&
             WritingGuard.blockReason()==null && safeSince?.let { now-it>=5000 }==true &&
-            JevCandidatePolicy.resultIsCurrent(a.settings.revision,s,a.captured,state.value.context,now-a.requestedAt)
+            JevCandidatePolicy.resultIsCurrent(a.settings.revision,s,a.captured,currentContext,now-a.requestedAt)
     }
     fun approvedId(): String? = approval?.trial?.id
+    fun approvedPackage(): String? = approval?.captured?.packageName
     fun hasActiveOffer() = active != null
     fun canKeepDisplayed(): Boolean {
         val displayed = displayedApproval ?: return false
+        val now = SystemClock.elapsedRealtime()
+        val sameForeground = JevObservationHub.foregroundPackage == displayed.captured.packageName &&
+            now - JevObservationHub.checkedAt in 0..1500
+        val currentContext = (state.value.context ?: displayed.captured.takeIf { sameForeground })?.let {
+            if (sameForeground && it.packageName == displayed.captured.packageName && it.sessionId == displayed.captured.sessionId)
+                it.copy(quality = "VALID")
+            else it
+        }
         return attached && enabled && store.tokenConfigured.value &&
             JevCandidatePolicy.canContinueDisplayed(displayed.settings.revision,store.settings.value,
-                displayed.captured,state.value.context)
+                displayed.captured,currentContext)
     }
     fun shown() {
         val a=approval ?: return
@@ -271,6 +326,7 @@ class JevRuntime private constructor(context: Context) {
             finally { persistMutex.unlock() }
         }
     }
+    fun sessionState(pkg: String) = tracker.states[pkg]
     /** Explicit operator action for a test run, never automatic on restart or settings edits. */
     fun resetTestObservation() {
         approval?.let { suppress(it.trial,"OPERATOR_RESET") };approval=null

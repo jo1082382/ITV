@@ -122,9 +122,13 @@ class CoachingMonitorService : Service() {
         val original=missionJevContext ?: return false
         val settings=missionJevSettings ?: return false
         val now=SystemClock.elapsedRealtime()
+        val sameForeground=JevObservationHub.foregroundPackage==original.packageName && now-JevObservationHub.checkedAt in 0..1500
+        val currentContext=(jev.state.value.context ?: original.takeIf { sameForeground })?.let {
+            if(sameForeground && it.packageName==original.packageName && it.sessionId==original.sessionId) it.copy(quality="VALID") else it
+        }
         return jevMode() && jev.store.tokenConfigured.value && WritingGuard.blockReason()==null &&
-            JevObservationHub.foregroundPackage==original.packageName && now-JevObservationHub.checkedAt in 0..1500 &&
-            JevCandidatePolicy.canContinueDisplayed(settings.revision,jev.store.settings.value,original,jev.state.value.context)
+            sameForeground &&
+            JevCandidatePolicy.canContinueDisplayed(settings.revision,jev.store.settings.value,original,currentContext)
     }
     private var reactionInProgress=false
     private fun selectedAnimation(title: String, finished: () -> Unit) {
@@ -223,6 +227,7 @@ class CoachingMonitorService : Service() {
     private val interventionMs = TestCoachingPolicy.INTERVENTION_MS
     private val reminderMs = TestCoachingPolicy.REMINDER_MS
     private var overlay: View? = null
+    private var displayedPackage: String? = null
     private var receiverRegistered = false
     private var running = false
     private var safeSince: Long?
@@ -258,12 +263,16 @@ class CoachingMonitorService : Service() {
             checkMission()
             val using = if (jevMode()) unlocked() else observeUsage()
             val observation = observer.snapshot()
-            if(overlay!=null && (!using || observation.guardReason!=null))removeOverlay()
+            val nowElapsed = SystemClock.elapsedRealtime()
+            val fgPkg = JevObservationHub.foregroundPackage.takeIf { nowElapsed - JevObservationHub.checkedAt in 0..1500 }
+            val leftDisplayedApp = displayedPackage != null && fgPkg != displayedPackage
+            if (overlay != null && (!using || observation.guardReason != null || leftDisplayedApp)) removeOverlay()
             if (jevMode()) {
                 jev.tick(using, missionController.state.id != null || completionView != null || reactionInProgress || retryPending || retryVisible, overlay != null)
-                val current=if(retryVisible)canContinueJevRetry() else jev.canKeepDisplayed()
+                val current = if (retryVisible) canContinueJevRetry() else jev.canKeepDisplayed()
                 if (overlay != null && (!using || observation.guardReason != null || !current)) removeOverlay()
-            } else if(!reactionInProgress) progress.tick(SystemClock.elapsedRealtime(), using, observation, overlay != null)
+                if (overlay == null && jev.canShow(transition = false)) showPuppy(transition = false)
+            } else if (!reactionInProgress) progress.tick(nowElapsed, using, observation, overlay != null)
             checkRetry()
             if (feedbackView != null && (!using || !canShowJevFeedback())) dismissJevFeedback()
             maybeShowJevFeedback()
@@ -358,7 +367,11 @@ class CoachingMonitorService : Service() {
 
     private fun onYoutubeTransition() {
         if(retryPending) {checkRetry(true);return}
-        if (jevMode()) { if (running && jev.state.value.context?.packageName == JevSettings.YOUTUBE) showPuppy(); return }
+        if (jevMode()) {
+            val targetPkg = jev.state.value.context?.packageName ?: jev.approvedPackage()
+            if (running && targetPkg == JevSettings.YOUTUBE) showPuppy(transition = true)
+            return
+        }
         if (!running || !waitingYoutube || responseController.offered || responseController.suppressed) return
         val now = SystemClock.elapsedRealtime()
         if (!observeUsage() || !waitingYoutube) return
@@ -366,11 +379,15 @@ class CoachingMonitorService : Service() {
         val safeAt = safeSince ?: return
         if (now-safeAt < 5000L || usageClock.usedMs < interventionMs || now < (responseController.retryAt ?: 0L)) return
         if (YoutubeProbe.screenState()!=1 || !CoachingAutoStart.enabled(this)) return
-        showPuppy()
+        showPuppy(transition = true)
     }
     private fun onReelsTransition() {
         if(retryPending) {checkRetry(true);return}
-        if (jevMode()) { if (running && jev.state.value.context?.packageName == JevSettings.INSTAGRAM) showPuppy(); return }
+        if (jevMode()) {
+            val targetPkg = jev.state.value.context?.packageName ?: jev.approvedPackage()
+            if (running && targetPkg == JevSettings.INSTAGRAM) showPuppy(transition = true)
+            return
+        }
         // Only a transition AFTER arming can trigger this path.
         if (!running || !waitingTransition || responseController.offered || responseController.suppressed) return
         val now = SystemClock.elapsedRealtime()
@@ -379,12 +396,12 @@ class CoachingMonitorService : Service() {
         if (WritingGuard.blockReason() != null) { safeSince = null; return }
         if (now - safeAt < 5000L || usageClock.usedMs < interventionMs || now < (responseController.retryAt ?: 0L)) return
         if (ReelsProbe.screenState() != 1 || !CoachingAutoStart.enabled(this)) return
-        showPuppy()
+        showPuppy(transition = true)
     }
-    private fun showPuppy() {
+    private fun showPuppy(transition: Boolean = true) {
         val isJev = jevMode()
         if (WritingGuard.blockReason() != null) return
-        if (isJev) { if (!jev.canShow()) return }
+        if (isJev) { if (!jev.canShow(transition)) return }
         else {
             if (responseController.suppressed || usageClock.usedMs < interventionMs || SystemClock.elapsedRealtime() < (responseController.retryAt ?: 0L)) return
             val safeAt = safeSince ?: return
@@ -394,7 +411,9 @@ class CoachingMonitorService : Service() {
         val jevOfferId = if (isJev) jev.approvedId() else null
         val (root, params) = overlayFactory.offer(::onChoice)
         try {
-            wm.addView(root, params); overlay = root; overlayFactory.attachControls(root); responseController.offered = true; waitingTransition = false; waitingYoutube = false; responseController.retryAt = null
+            wm.addView(root, params); overlay = root
+            displayedPackage = JevObservationHub.foregroundPackage.takeIf { SystemClock.elapsedRealtime() - JevObservationHub.checkedAt in 0..1500 }
+            overlayFactory.attachControls(root); responseController.offered = true; waitingTransition = false; waitingYoutube = false; responseController.retryAt = null
             responseController.offerId = jevOfferId ?: java.util.UUID.randomUUID().toString().take(8)
             journal.engine=if(isJev)"JEV" else "RULE"
             journal.policyVersion=if(isJev)"jev-candidate-v1" else "test-coaching-v2"
@@ -474,7 +493,7 @@ class CoachingMonitorService : Service() {
         if (responseController.offerId != null) finishOffer(closingCause)
         // Clear the reference before detach callbacks to avoid reentrant removal.
         val previousOverlay = overlay
-        overlay = null;retryVisible=false;reactionInProgress=false
+        overlay = null;displayedPackage=null;retryVisible=false;reactionInProgress=false
         previousOverlay?.let { overlayFactory.removeControls(it); try { wm.removeView(it) } catch (_: Exception) {} }
     }
     override fun onDestroy() {

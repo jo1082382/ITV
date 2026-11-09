@@ -94,7 +94,7 @@ internal fun JevSettings.json(): JSONObject = JSONObject().apply {
     put("bedtimeEnabled",bedtimeEnabled);put("bedtimeDelayMinutes",bedtimeDelayMinutes);put("bedtimeWindowMinutes",bedtimeWindowMinutes)
     put("probabilityThreshold",probabilityThreshold);put("reevaluateSeconds",reevaluateSeconds)
     put("additionalViewingSeconds",additionalViewingSeconds);put("resultTtlSeconds",resultTtlSeconds)
-    put("laterSeconds",laterSeconds);put("dailyLimit",dailyLimit);put("revision",revision)
+    put("laterSeconds",laterSeconds);put("dailyLimit",dailyLimit);put("personalizedEnabled",personalizedEnabled);put("revision",revision)
 }
 private fun decode(j: JSONObject) = JevSettings(
     enabled=j.optBoolean("enabled"),collectionConsent=j.optBoolean("collectionConsent"),actualIntervention=j.optBoolean("actualIntervention"),
@@ -105,7 +105,7 @@ private fun decode(j: JSONObject) = JevSettings(
     bedtimeWindowMinutes=j.optInt("bedtimeWindowMinutes",480),probabilityThreshold=j.optDouble("probabilityThreshold",0.8),
     reevaluateSeconds=j.optInt("reevaluateSeconds",300),additionalViewingSeconds=j.optInt("additionalViewingSeconds",300),
     resultTtlSeconds=j.optInt("resultTtlSeconds",30),laterSeconds=j.optInt("laterSeconds",300),
-    dailyLimit=j.optInt("dailyLimit",20),revision=j.optLong("revision",1)
+    dailyLimit=j.optInt("dailyLimit",20),personalizedEnabled=j.optBoolean("personalizedEnabled",true),revision=j.optLong("revision",1)
 ).validated()
 
 class JevStore private constructor(context: Context) {

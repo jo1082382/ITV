@@ -5,8 +5,15 @@ import java.util.Locale
 
 
 import androidx.activity.result.contract.ActivityResultContracts
+import com.example.itv.domain.records.ShortformApp
+import com.example.itv.infrastructure.observation.SwipeDynamicsTracker
+import com.example.itv.infrastructure.observation.instagram.ReelsProbe
+import com.example.itv.infrastructure.observation.youtube.YoutubeProbe
 import com.example.itv.presentation.coaching.ReelsProbeActivity
 import com.example.itv.presentation.coaching.YoutubeProbeActivity
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.delay
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.Lifecycle
@@ -122,7 +129,7 @@ class PermissionSettingsActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (savedInstanceState == null) selectedPage = intent.getIntExtra("initial_page", 0).coerceIn(0, 4)
+        if (savedInstanceState == null) selectedPage = intent.getIntExtra("initial_page", 0).coerceIn(0, 5)
         settingsService.initialize()
         settingsInitialized = true
         setContent {
@@ -179,9 +186,9 @@ class PermissionSettingsActivity : ComponentActivity() {
                 LaunchedEffect(selectedPage) {
                     while (true) {
                         if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
-                            settingsService.pollDiagnostics(selectedPage == 4)
+                            settingsService.pollDiagnostics(selectedPage == 5)
                                             }
-                        delay(if (selectedPage == 0) 1000L else if (selectedPage == 4) 5000L else 60_000L)
+                        delay(if (selectedPage == 0 || selectedPage == 3) 1000L else if (selectedPage == 5) 5000L else 60_000L)
                     }
                 }
                 val diagnostics = screenState.diagnostics
@@ -197,7 +204,7 @@ class PermissionSettingsActivity : ComponentActivity() {
                             OutlinedButton(onClick = { selectedPage = 2 }, modifier = Modifier.weight(1f)) { Text("구조 테스트") }
                         }
                         ScrollableTabRow(selectedTabIndex = selectedPage, edgePadding = 0.dp) {
-                            listOf("상태", "권한", "테스트", "동의", "개입기록").forEachIndexed { index, label ->
+                            listOf("상태", "권한", "테스트", "스와이프 테스트", "동의", "개입기록").forEachIndexed { index, label ->
                                 Tab(selected = selectedPage == index, onClick = { selectedPage = index }, text = { Text(label) })
                             }
                         }
@@ -335,7 +342,12 @@ item {
 
 }
                                     }
-                                    4 -> {
+                                    3 -> {
+                                        item {
+                                            SwipeDynamicsDevSection()
+                                        }
+                                    }
+                                    5 -> {
                                         item {
                                             DevCard("휴식 미션 성공률 · 누적") {
                                                 Text("미션 부여: ${missionCounts.assigned}회")
@@ -367,7 +379,7 @@ item {
                                             DevCard("결과 ${journalRows.size - index}") { Text(journalRows[index]) }
                                         }
                                     }
-                                    3 -> {item {
+                                    4 -> {item {
 
                                         DevCard("사용정보 수집 동의 · 안내 v1") {
                                             Text("목적: 앱 사용시간 확인 및 휴식 코칭. 앱 식별자·사용 이벤트 시각·시간, 화면 켜짐·잠금 여부를 기기에서 처리합니다. 현재 서버로 전송하지 않습니다.")
@@ -406,7 +418,7 @@ items(history.size) { index -> Text(history[index], style = MaterialTheme.typogr
     private fun openAccessibility() {
         if (!consent && !guardConnected) {
             settingsService.showMessage("동의/내역 탭에서 수집 안내를 확인하고 동의해 주세요.")
-            selectedPage = 3
+            selectedPage = 4
         } else showAccessibilityDisclosure = true
     }
     private fun openProbe(target: Class<*>) {
@@ -502,3 +514,86 @@ private fun DevCard(title: String, content: @Composable ColumnScope.() -> Unit) 
         }
     }
 }
+
+private fun signedVal(v: Double): String = if (v > 0.0) "+${"%.1f".format(v)}" else "%.1f".format(v)
+
+@Composable
+private fun SwipeDynamicsDevSection() {
+    var selectedApp by remember { mutableStateOf(ShortformApp.YOUTUBE) }
+    var refreshTick by remember { mutableLongStateOf(android.os.SystemClock.elapsedRealtime()) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1000L)
+            refreshTick = android.os.SystemClock.elapsedRealtime()
+        }
+    }
+
+    val snap = remember(selectedApp, refreshTick) { SwipeDynamicsTracker.snapshot(selectedApp) }
+    val updatedAt = Instant.ofEpochMilli(snap.updatedWallMs).atZone(ZoneId.systemDefault())
+        .format(DateTimeFormatter.ofPattern("HH:mm:ss"))
+
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        DevCard("스와이프 속도 · 가속도 감별 테스트") {
+            Text("유튜브 쇼츠나 인스타그램 릴스를 시청·스와이프한 뒤 돌아오면 분당 스와이프 수(SPM)와 스와이프 가속도 기록을 확인할 수 있습니다.", style = MaterialTheme.typography.bodySmall)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(
+                    selected = selectedApp == ShortformApp.YOUTUBE,
+                    onClick = { selectedApp = ShortformApp.YOUTUBE },
+                    label = { Text("YouTube 쇼츠") }
+                )
+                FilterChip(
+                    selected = selectedApp == ShortformApp.INSTAGRAM,
+                    onClick = { selectedApp = ShortformApp.INSTAGRAM },
+                    label = { Text("Instagram 릴스") }
+                )
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { refreshTick = android.os.SystemClock.elapsedRealtime() },
+                    modifier = Modifier.weight(1f)
+                ) { Text("기록 즉시 갱신") }
+                OutlinedButton(
+                    onClick = {
+                        if (selectedApp == ShortformApp.YOUTUBE) YoutubeProbe.reset() else ReelsProbe.reset()
+                        SwipeDynamicsTracker.reset(selectedApp)
+                        refreshTick = android.os.SystemClock.elapsedRealtime()
+                    },
+                    modifier = Modifier.weight(1f)
+                ) { Text("현재 앱 기록 초기화") }
+            }
+        }
+
+        DevCard("현재 감별 요약 (${if (selectedApp == ShortformApp.YOUTUBE) "YouTube 쇼츠" else "Instagram 릴스"})") {
+            Text("• 패턴 감별 결과: ${snap.patternLabel}", style = MaterialTheme.typography.titleMedium)
+            Text("• 측정 상태: ${if (snap.active) "실시간 관측 중" else "직전 시청 세션 보존 기록"} (갱신: $updatedAt · 세션 ${"%.1f".format(snap.sessionDurationSeconds)}초)", style = MaterialTheme.typography.bodySmall)
+            Text("• 스와이프 집계: 전체 ${snap.totalSwipesInRun}회 → 유효 ${snap.effectiveSwipesInRun}회 (광고·단발 즉시 스킵 제외 ${snap.filteredAdSkipsInRun}회) · 연속 고속 스트릭 ${snap.currentFastStreak}회", style = MaterialTheme.typography.bodySmall)
+            HorizontalDivider(Modifier.padding(vertical = 4.dp))
+            Text("1) 광고 보정 유효 분당 스와이프 수 (SPM)")
+            Text("  • 최근 1분 유효 SPM: ${"%.1f".format(snap.effectiveSpm1m)} 회/분 (원시: ${"%.1f".format(snap.rawSpm1m)} · 직전 1분 유효: ${"%.1f".format(snap.effectiveSpmPrev1m)})")
+            Text("  • 최근 30초 단기 유효 환산: ${"%.1f".format(snap.effectiveSpm30s)} 회/분 (원시: ${"%.1f".format(snap.rawSpm30s)} · 직전 30초 유효: ${"%.1f".format(snap.effectiveSpmPrev30s)})")
+            Text("  • 현재 세션 평균 유효 SPM: ${"%.1f".format(snap.effectiveSessionSpm)} 회/분 (원시: ${"%.1f".format(snap.rawSessionSpm)})")
+            HorizontalDivider(Modifier.padding(vertical = 4.dp))
+            Text("2) 광고 보정 유효 스와이프 가속도")
+            Text("  • 1분 구간 유효 가속도: ${signedVal(snap.effectiveAccel1m)} 회/분² (배율 ${"%.2f".format(snap.effectiveAccelRatio1m)}x · 원시 ${signedVal(snap.rawAccel1m)})")
+            Text("  • 30초 단기 유효 가속도: ${signedVal(snap.effectiveAccel30s)} 회/분² (원시 ${signedVal(snap.rawAccel30s)})")
+        }
+
+        DevCard("스와이프별 실시간 기록 로그 (최근 ${snap.events.size}건)") {
+            if (snap.events.isEmpty()) {
+                Text("아직 기록된 스와이프가 없습니다. 쇼츠/릴스를 넘긴 뒤 확인해 보세요.")
+            } else {
+                snap.events.forEach { ev ->
+                    val t = Instant.ofEpochMilli(ev.wallMs).atZone(ZoneId.systemDefault())
+                        .format(DateTimeFormatter.ofPattern("HH:mm:ss"))
+                    val tag = if (ev.filteredAsAdSkip) "[광고/단발 스킵 제외]" else "[유효 반영]"
+                    Text("#${ev.index} · $t · $tag · ${ev.patternLabel}", style = MaterialTheme.typography.labelLarge)
+                    Text("  - 유효 SPM: 1분 ${"%.1f".format(ev.effectiveSpm1m)} (원시 ${"%.1f".format(ev.rawSpm1m)}) · 30초환산 ${"%.1f".format(ev.effectiveSpm30s)} (원시 ${"%.1f".format(ev.rawSpm30s)}) · 스트릭 ${ev.fastStreakAtSwipe}회", style = MaterialTheme.typography.bodySmall)
+                    Text("  - 유효 가속도: 1분 ${signedVal(ev.effectiveAccel1m)}회/분² (${"%.2f".format(ev.effectiveAccelRatio1m)}x) · 30초단기 ${signedVal(ev.effectiveAccel30s)}회/분²", style = MaterialTheme.typography.bodySmall)
+                    HorizontalDivider(Modifier.padding(vertical = 4.dp))
+                }
+            }
+        }
+    }
+}
+

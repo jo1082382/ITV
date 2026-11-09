@@ -24,6 +24,13 @@ internal fun JevContext.json() = JSONObject().put("session_id",sessionId).put("p
     .put("bedtime_goal_enabled",bedtimePassedMinutes!=null)
     .put("bedtime_passed_minutes",bedtimePassedMinutes ?: JSONObject.NULL)
     .put("observed_at",Instant.ofEpochMilli(observedAt).toString()).put("quality",quality)
+    .apply {
+        sessionVsAvgRatio?.takeIf { it.isFinite() && it >= 0.0 }?.let { put("session_vs_personal_avg_ratio", it) }
+        todayVs7dRatio?.takeIf { it.isFinite() && it >= 0.0 }?.let { put("today_vs_7d_avg_ratio", it) }
+        effectiveSpm1m?.takeIf { it.isFinite() && it >= 0.0 }?.let { put("effective_spm_1m", it) }
+        swipeAccel1m?.takeIf { it.isFinite() }?.let { put("swipe_accel_1m", it) }
+        if (fastSwipeStreak > 0) put("fast_swipe_streak", fastSwipeStreak)
+    }
 
 class JevRepository private constructor(context: Context) {
     val store=JevStore.get(context)
@@ -86,8 +93,9 @@ class JevRepository private constructor(context: Context) {
             val key="daily_${settings.testerId}_$day"
             val count=store.readControl(key)?.toIntOrNull() ?: 0
             check(count<settings.dailyLimit) { "이 기기의 일일 호출 한도에 도달했습니다." }
+            val settingsJson = settings.json().put("effectiveProbabilityThreshold", JevCandidatePolicy.effectiveThreshold(settings, c))
             val payload=c.json().put("protocol_version",2).put("id",requestId).put("tester_id",settings.testerId)
-                .put("source",source).put("trigger_reason",reason).put("settings",settings.json())
+                .put("source",source).put("trigger_reason",reason).put("settings",settingsJson)
                 .put("app_version",BuildConfig.VERSION_NAME)
             val trial=JevTrial(requestId,settings.testerId,source,payload.toString(),System.currentTimeMillis())
             store.dao.saveTrial(trial)

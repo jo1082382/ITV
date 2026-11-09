@@ -57,6 +57,11 @@ export function identity(data, uuid) {
     throw new HttpError(400, "INVALID_SOURCE");
   return { legacy, tester, source, eventId: legacy ? uuid() : id(data.id, "id") };
 }
+export function optionalMetric(value, min = 0, max = 1000, integer = false) {
+  if (value === undefined || value === null) return undefined;
+  if (!Number.isFinite(value) || value < min || value > max || (integer && !Number.isInteger(value))) return undefined;
+  return value;
+}
 export function evaluation(data, uuid) {
   const who = identity(data, uuid);
   const bedtimeEnabled = data.bedtime_goal_enabled !== false;
@@ -72,8 +77,19 @@ export function evaluation(data, uuid) {
   const settings = data.settings ?? {};
   if (!settings || typeof settings !== "object" || Array.isArray(settings) || JSON.stringify(settings).length > 2000)
     throw new HttpError(400, "INVALID_SETTINGS");
-  return { ...who, context: { session_minutes: minutes, continuous_minutes: continuous, returns_10m: returns,
-    bedtime_passed_minutes: bedtime, bedtime_goal_enabled: bedtimeEnabled, returns_observed_seconds: coverage },
+  const context = { session_minutes: minutes, continuous_minutes: continuous, returns_10m: returns,
+    bedtime_passed_minutes: bedtime, bedtime_goal_enabled: bedtimeEnabled, returns_observed_seconds: coverage };
+  const sessionRatio = optionalMetric(data.session_vs_personal_avg_ratio, 0, 100);
+  const today7dRatio = optionalMetric(data.today_vs_7d_avg_ratio, 0, 100);
+  const effectiveSpm = optionalMetric(data.effective_spm_1m, 0, 600);
+  const swipeAccel = optionalMetric(data.swipe_accel_1m, -600, 600);
+  const fastStreak = optionalMetric(data.fast_swipe_streak, 0, 1000, true);
+  if (sessionRatio !== undefined) context.session_vs_personal_avg_ratio = sessionRatio;
+  if (today7dRatio !== undefined) context.today_vs_7d_avg_ratio = today7dRatio;
+  if (effectiveSpm !== undefined) context.effective_spm_1m = effectiveSpm;
+  if (swipeAccel !== undefined) context.swipe_accel_1m = swipeAccel;
+  if (fastStreak !== undefined) context.fast_swipe_streak = fastStreak;
+  return { ...who, context,
     settings, trigger: text(data.trigger_reason, "trigger_reason", 200, true),
     packageName: text(data.package_name, "package_name", 100, true),
     sessionId: data.session_id == null ? null : id(data.session_id, "session_id"),

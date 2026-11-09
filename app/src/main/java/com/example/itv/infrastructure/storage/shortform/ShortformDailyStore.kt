@@ -24,6 +24,12 @@ internal object ShortformDailyStore {
     fun isReady()=coordinator?.isReady() ?: false
     fun storageStatus()=coordinator?.storageStatus() ?: ShortformStorageStatus()
     fun pause() { coordinator?.pause() }
-    suspend fun deleteAllAndAwait(c:Context) { instance(c).deleteAllAndAwait() }
-    fun clear(c:Context) { instance(c).clear() }
+    suspend fun deleteAllAndAwait(c:Context) {
+        instance(c).deleteAllAndAwait()
+        ShortformPersonalStatsStore.clear(c)
+    }
+    fun clear(c:Context) {
+        instance(c).clear()
+        ShortformPersonalStatsStore.clear(c)
+    }
 }

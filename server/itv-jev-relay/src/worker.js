@@ -39,15 +39,21 @@ export function createWorker({ upstreamFetch = globalThis.fetch, now = Date.now,
     const reservation = await reserve(env.DB,input,env,started,token,digest,PROMPT_VERSION);
     if (!reservation.owner) return reply(resultFor(reservation.row,true),reservation.row.request_state === "PENDING" ? 202 : 200);
     const c = input.context;
-    const payload = {
-     model:env.JEV_MODEL || "jev-1.14.0",
-     state:{
+    const state = {
       current_session_minutes:c.session_minutes,continuous_shortform_minutes:c.continuous_minutes,
       returns_in_last_10_minutes:c.returns_10m,returns_observation_coverage_seconds:c.returns_observed_seconds,bedtime_goal_enabled:c.bedtime_goal_enabled,
       minutes_after_bedtime_goal:c.bedtime_passed_minutes
-     },
+    };
+    if (c.session_vs_personal_avg_ratio !== undefined) state.session_vs_personal_avg_ratio = c.session_vs_personal_avg_ratio;
+    if (c.today_vs_7d_avg_ratio !== undefined) state.today_vs_7d_avg_ratio = c.today_vs_7d_avg_ratio;
+    if (c.effective_spm_1m !== undefined) state.effective_swipes_per_minute_1m = c.effective_spm_1m;
+    if (c.swipe_accel_1m !== undefined) state.swipe_acceleration_1m = c.swipe_accel_1m;
+    if (c.fast_swipe_streak !== undefined) state.consecutive_fast_swipe_streak = c.fast_swipe_streak;
+    const payload = {
+     model:env.JEV_MODEL || "jev-1.14.0",
+     state,
      questions:{intervene:{type:"noul",
-      instructions:"Based only on these reported short-form viewing measures, would offering an optional short break now be appropriate? Consider sustained viewing, repeated app returns, and an enabled bedtime goal. A disabled bedtime goal provides no evidence. This is appropriateness of timing, not a diagnosis or a prediction that the user will comply. Prefer no when the evidence is insufficient.",
+      instructions:"Based only on these reported short-form viewing measures, would offering an optional short break now be appropriate? Consider sustained viewing, repeated app returns, and an enabled bedtime goal, as well as optional personal usage ratios and swipe-speed dynamics when present. A disabled bedtime goal provides no evidence. This is appropriateness of timing, not a diagnosis or a prediction that the user will comply. Prefer no when the evidence is insufficient.",
       criteria:{true:"The observed pattern supports a timely, voluntary break suggestion.",false:"The pattern is brief or insufficient to justify a break suggestion now."}}}
     };
     let outcome;
