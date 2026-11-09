@@ -37,16 +37,8 @@ internal class AuthService(
 
     suspend fun signInAsGuest(): Result<AuthUser> = signIn { repository.signInAsGuest() }
 
-    suspend fun signOut() {
-        try {
-            repository.signOut()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            // 로그아웃 실패해도 화면은 로그아웃 상태로 전환한다.
-        }
-        mutableState.value = AuthState.SignedOut
-    }
+    /** 로그아웃하면 새 게스트가 활성 사용자가 된다. (SRS 3.1.3) */
+    suspend fun signOut(): Result<AuthUser> = signIn { repository.signOut() }
 
     // 취소(CancellationException)는 실패로 바꾸지 않고 그대로 다시 던진다.
     private suspend fun signIn(block: suspend () -> AuthUser): Result<AuthUser> = try {

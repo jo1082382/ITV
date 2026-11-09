@@ -37,8 +37,8 @@ interface AuthRepository {
     /** 게스트로 시작 — 이전 게스트가 있으면 재사용, 없으면 새로 발급 (서버 통신 없음) */
     suspend fun signInAsGuest(): AuthUser
 
-    /** 로그아웃 — Firebase 세션 해제 + 게스트 활성 표시 해제 (게스트 데이터는 삭제하지 않음) */
-    suspend fun signOut()
+    /** 로그아웃 — Firebase 세션 해제 후, 계정 자료는 보관하고 비어 있는 새 게스트로 전환해 반환 */
+    suspend fun signOut(): AuthUser
 }
 
 internal object AuthPolicy {
