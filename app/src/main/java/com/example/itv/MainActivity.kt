@@ -25,8 +25,20 @@ import com.example.itv.data.local.ItvDatabase
 import com.example.itv.presentation.goal.GoalSettingsScreen
 import com.example.itv.presentation.goal.GoalSettingsViewModel
 import com.example.itv.ui.theme.ITVTheme
+import androidx.compose.foundation.layout.Box
+import androidx.compose.ui.Alignment
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.lifecycle.lifecycleScope
+import com.example.itv.application.auth.AuthService
+import com.example.itv.composition.authService
+import com.example.itv.domain.auth.AuthState
+import com.example.itv.presentation.auth.LoginScreen
+
 
 class MainActivity : ComponentActivity() {
+    // 로그인 서비스는 이 Activity 안에서만 쓴다.
+    private val auth: AuthService by lazy { authService(this, lifecycleScope) }
+
     override fun onResume() {
         super.onResume()
         com.example.itv.presentation.coaching.CoachingAutoStart.sync(this)
@@ -41,6 +53,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             var showPermissionIntro by remember { mutableStateOf(!introMarker.exists()) }
             var introError by remember { mutableStateOf<String?>(null) }
+            val authState by auth.state.collectAsState()
             fun acknowledgeIntro(openSettings: Boolean) {
                 try {
                     introMarker.writeText("seen")
@@ -82,8 +95,19 @@ class MainActivity : ComponentActivity() {
                         })
                 }
                 Scaffold(modifier = Modifier.fillMaxSize()) { padding ->
-                    GoalSettingsScreen(viewModel, Modifier.padding(padding))
+                    when (authState) {
+                        AuthState.Loading -> Box(
+                            Modifier.fillMaxSize().padding(padding),
+                            contentAlignment = Alignment.Center
+                        ) { CircularProgressIndicator() }
+
+                        AuthState.SignedOut -> LoginScreen(auth, Modifier.padding(padding))
+
+                        // TODO: "demo-guest"를 로그인한 ownerId로 교체
+                        is AuthState.SignedIn -> GoalSettingsScreen(viewModel, Modifier.padding(padding))
+                    }
                 }
+
             }
         }
     }

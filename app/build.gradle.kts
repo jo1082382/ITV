@@ -2,6 +2,9 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.ksp)
+
+    // 파이어베이스 로그인을 위해 추가한 기능
+    id("com.google.gms.google-services")
 }
 
 android {
@@ -75,6 +78,18 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
     add("qaImplementation", libs.androidx.compose.ui.test.manifest)
     add("qaImplementation", libs.androidx.compose.ui.tooling)
+
+    // Firebase BOM (버전 한번에 관리)
+    implementation(platform("com.google.firebase:firebase-bom:33.5.1"))
+    // Firebase Authentication
+    implementation("com.google.firebase:firebase-auth")
+    // Google 로그인용 Credential Manager
+    implementation("androidx.credentials:credentials:1.3.0")
+    implementation("androidx.credentials:credentials-play-services-auth:1.3.0")
+    implementation("com.google.android.libraries.identity.googleid:googleid:1.1.1")
+    // Google/Firebase가 쓰는 "Task" 방식의 비동기 결과를, Kotlin의 "코루틴(suspend 함수)" 방식으로 변환해주는 다리(어댑터) 역할
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.9.0")
+
 }
 
 // Explicitly enable host tests on AGP 9.5 (also required by Compose preview runfiles).
