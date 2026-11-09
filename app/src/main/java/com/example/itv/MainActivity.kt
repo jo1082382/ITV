@@ -33,11 +33,45 @@ import com.example.itv.application.auth.AuthService
 import com.example.itv.composition.authService
 import com.example.itv.domain.auth.AuthState
 import com.example.itv.presentation.auth.LoginScreen
+import android.widget.Toast
+import kotlinx.coroutines.launch
+import com.example.itv.domain.auth.LoginCancelledException
+import com.example.itv.presentation.auth.AccountActionButton
+import com.example.itv.presentation.auth.AccountStatusCard
 
 
 class MainActivity : ComponentActivity() {
     // 로그인 서비스는 이 Activity 안에서만 쓴다.
     private val auth: AuthService by lazy { authService(this, lifecycleScope) }
+    private var authBusy = false
+
+    // [로그인] 설정의 로그인 버튼 동작. 계정 선택 취소는 오류로 취급하지 않는다.
+    private fun loginWithGoogle() {
+        if (authBusy) return
+        authBusy = true
+        lifecycleScope.launch {
+            try {
+                auth.signInWithGoogle().onFailure { e ->
+                    if (e !is LoginCancelledException) toast("로그인에 실패했습니다. 다시 시도해 주세요.")
+                }
+            } finally { authBusy = false }
+        }
+    }
+
+    // [로그인] 설정의 로그아웃 버튼 동작. SRS에 따라 새 게스트로 전환된다.
+    private fun logout() {
+        if (authBusy) return
+        authBusy = true
+        lifecycleScope.launch {
+            try {
+                auth.signOut().onFailure { toast("로그아웃에 실패했습니다. 다시 시도해 주세요.") }
+            } finally { authBusy = false }
+        }
+    }
+
+    private fun toast(message: String) = Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+
+
 
     override fun onResume() {
         super.onResume()
@@ -95,7 +129,7 @@ class MainActivity : ComponentActivity() {
                         })
                 }
                 Scaffold(modifier = Modifier.fillMaxSize()) { padding ->
-                    when (authState) {
+                    when (val state = authState) {
                         AuthState.Loading -> Box(
                             Modifier.fillMaxSize().padding(padding),
                             contentAlignment = Alignment.Center
@@ -103,8 +137,19 @@ class MainActivity : ComponentActivity() {
 
                         AuthState.SignedOut -> LoginScreen(auth, Modifier.padding(padding))
 
-                        // TODO: "demo-guest"를 로그인한 ownerId로 교체
-                        is AuthState.SignedIn -> GoalSettingsScreen(viewModel, Modifier.padding(padding))
+                        // TODO: 로그인 계정별 데이터 연결
+                        //  1) 조원 코드의 "demo-guest"를 AuthState.SignedIn.user.ownerId로 교체
+                        //  2) 게스트 → 로그인 시 게스트 데이터(캐릭터 레벨·포인트·경험치)를 계정 데이터와 병합
+                        //  (조원과 협의 후 별도 작업)
+                        is AuthState.SignedIn -> GoalSettingsScreen(
+                            viewModel,
+                            Modifier.padding(padding),
+                            // [로그인] 설정 드로어에 계정 상태와 로그인/로그아웃 버튼을 끼워 넣는다.
+                            accountStatus = { AccountStatusCard(state.user) },
+                            accountAction = {
+                                AccountActionButton(state.user, onLogin = ::loginWithGoogle, onLogout = ::logout)
+                            }
+                        )
                     }
                 }
 

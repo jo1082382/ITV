@@ -51,6 +51,10 @@ fun ItvMainScreen(
     selectedTab: String,
     onSelectTab: (String) -> Unit,
     onOpenGoals: () -> Unit,
+    // [로그인] 설정 드로어에 계정 영역을 끼워 넣는 슬롯. accountStatus=상단 계정 상태, accountAction=맨 아래 로그인/로그아웃 버튼.
+    // 내용은 presentation/auth/AccountSection.kt에서 채운다. 기본값이 비어 있어 다른 호출부는 영향 없음.
+    accountStatus: @Composable () -> Unit = {},
+    accountAction: @Composable () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val activeTab = selectedTab.takeIf { id -> tabs.any { it.id == id } } ?: "home"
@@ -141,7 +145,7 @@ fun ItvMainScreen(
 
         }
     }
-    HomeSettingsDrawer(settingsOpen, { settingsOpen = false }, onOpenGoals)
+    HomeSettingsDrawer(settingsOpen, { settingsOpen = false }, onOpenGoals, accountStatus, accountAction)
     }
 }
 
@@ -264,7 +268,8 @@ private fun CenteredHomePage(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun HomeSettingsDrawer(open: Boolean, onClose: () -> Unit, onOpenGoals: () -> Unit) {
+private fun HomeSettingsDrawer(open: Boolean, onClose: () -> Unit, onOpenGoals: () -> Unit,
+                               accountStatus: @Composable () -> Unit, accountAction: @Composable () -> Unit) {
     val context = LocalContext.current
     val development = (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
     AnimatedVisibility(visible = open, enter = fadeIn(tween(240)), exit = fadeOut(tween(240))) {
@@ -290,6 +295,7 @@ private fun HomeSettingsDrawer(open: Boolean, onClose: () -> Unit, onOpenGoals: 
                         TextButton(onClick = onClose) { Text("닫기", color = ItvGreen) }
                     }
                     HorizontalDivider(color = ItvLine)
+                    accountStatus() // [로그인] 설정 맨 위에 현재 계정 상태 표시
                     if (development) DrawerSettingItem("개발용 통합 상태", "측정·시계·개입·미션 기록") {
                         onClose()
                         context.startActivity(Intent(context, PermissionSettingsActivity::class.java).putExtra("initial_page", 0))
@@ -308,6 +314,7 @@ private fun HomeSettingsDrawer(open: Boolean, onClose: () -> Unit, onOpenGoals: 
                         runCatching { context.startActivity(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
                             .onFailure { android.widget.Toast.makeText(context, "접근성 설정을 열지 못했습니다.", android.widget.Toast.LENGTH_SHORT).show() }
                     }
+                    accountAction() // [로그인] 설정 맨 아래 로그인/로그아웃 버튼
                 }
             }
         }

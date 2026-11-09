@@ -27,7 +27,8 @@ private val bedtimePresets = listOf(Preset("22:00", 22), Preset("23:00", 23), Pr
 private val breakPresets = listOf(Preset("15분 사용 / 3분 휴식", 15, 3), Preset("30분 사용 / 5분 휴식", 30, 5), Preset("45분 사용 / 10분 휴식", 45, 10), Preset("60분 사용 / 10분 휴식", 60, 10))
 
 @Composable
-fun GoalSettingsScreen(viewModel: GoalSettingsViewModel, modifier: Modifier = Modifier) {
+fun GoalSettingsScreen(viewModel: GoalSettingsViewModel, modifier: Modifier = Modifier,
+                       accountStatus: @Composable () -> Unit = {}, accountAction: @Composable () -> Unit = {}) {
     val repository = viewModel.repository
     val scope = rememberCoroutineScope()
     var loading by remember { mutableStateOf(true) }
@@ -153,6 +154,8 @@ fun GoalSettingsScreen(viewModel: GoalSettingsViewModel, modifier: Modifier = Mo
                 selectedTab = selectedTab,
                 onSelectTab = { selectedTab = it },
                 onOpenGoals = { openedFromMain = true; home = false },
+                accountStatus = accountStatus,
+                accountAction = accountAction,
                 modifier = modifier
             )
         }
