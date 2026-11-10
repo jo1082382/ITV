@@ -26,11 +26,18 @@ internal fun JevContext.json() = JSONObject().put("session_id",sessionId).put("p
     .put("bedtime_passed_minutes",bedtimePassedMinutes ?: JSONObject.NULL)
     .put("observed_at",Instant.ofEpochMilli(observedAt).toString()).put("quality",quality)
     .apply {
+        personalAvgSessionMinutes?.takeIf { it.isFinite() && it >= 0.0 }?.let { put("personal_avg_session_minutes", it) }
         sessionVsAvgRatio?.takeIf { it.isFinite() && it >= 0.0 }?.let { put("session_vs_personal_avg_ratio", it) }
+        todayShortformMinutes?.takeIf { it.isFinite() && it >= 0.0 }?.let { put("today_shortform_minutes", it) }
+        avg7dDailyMinutes?.takeIf { it.isFinite() && it >= 0.0 }?.let { put("avg_7d_daily_shortform_minutes", it) }
         todayVs7dRatio?.takeIf { it.isFinite() && it >= 0.0 }?.let { put("today_vs_7d_avg_ratio", it) }
         effectiveSpm1m?.takeIf { it.isFinite() && it >= 0.0 }?.let { put("effective_spm_1m", it) }
+        effectiveSessionSpm?.takeIf { it.isFinite() && it >= 0.0 }?.let { put("effective_session_spm", it) }
+        personalAvgSpm?.takeIf { it.isFinite() && it >= 0.0 }?.let { put("personal_avg_spm", it) }
+        currentVsPersonalSpmRatio?.takeIf { it.isFinite() && it >= 0.0 }?.let { put("current_vs_personal_avg_spm_ratio", it) }
         swipeAccel1m?.takeIf { it.isFinite() }?.let { put("swipe_accel_1m", it) }
         if (fastSwipeStreak > 0) put("fast_swipe_streak", fastSwipeStreak)
+        if (swipeOverheated) put("swipe_overheated", true)
     }
 
 class JevRepository private constructor(context: Context) {

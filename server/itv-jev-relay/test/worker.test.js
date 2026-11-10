@@ -181,16 +181,30 @@ test("optional personalized and swipe metrics are forwarded when present and omi
   assert.equal(sent[0].state.session_vs_personal_avg_ratio,undefined);
   assert.equal((await f.request("/api/jev/evaluate",{
    ...context("enriched-client"),
+   personal_avg_session_minutes:12.5,
    session_vs_personal_avg_ratio:1.35,
+   today_shortform_minutes:45.2,
+   avg_7d_daily_shortform_minutes:31.8,
    today_vs_7d_avg_ratio:1.42,
    effective_spm_1m:12.5,
+   effective_session_spm:10.4,
+   personal_avg_spm:7.8,
+   current_vs_personal_avg_spm_ratio:1.6,
    swipe_accel_1m:3.5,
-   fast_swipe_streak:4
+   fast_swipe_streak:4,
+   swipe_overheated:true
   })).status,200);
+  assert.equal(sent[1].state.personal_avg_session_minutes,12.5);
   assert.equal(sent[1].state.session_vs_personal_avg_ratio,1.35);
+  assert.equal(sent[1].state.today_shortform_minutes,45.2);
+  assert.equal(sent[1].state.avg_7d_daily_shortform_minutes,31.8);
   assert.equal(sent[1].state.today_vs_7d_avg_ratio,1.42);
   assert.equal(sent[1].state.effective_swipes_per_minute_1m,12.5);
+  assert.equal(sent[1].state.effective_session_swipes_per_minute,10.4);
+  assert.equal(sent[1].state.personal_avg_swipes_per_minute,7.8);
+  assert.equal(sent[1].state.current_vs_personal_avg_spm_ratio,1.6);
   assert.equal(sent[1].state.swipe_acceleration_1m,3.5);
   assert.equal(sent[1].state.consecutive_fast_swipe_streak,4);
+  assert.equal(sent[1].state.swipe_overheated,true);
  }finally{f.db.close();}
 });

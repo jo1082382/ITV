@@ -52,7 +52,7 @@ internal class AndroidPermissionSettings(context: Context) : android.content.Con
     override suspend fun clearJournal(): Unit = withContext(Dispatchers.IO) { com.example.itv.infrastructure.coaching.InterventionJournal.clear(this@AndroidPermissionSettings) 
         Unit
     }
-    override suspend fun setAutoEnabled(value: Boolean): Unit = withContext(Dispatchers.IO) { CoachingAutoStart.setEnabled(this@AndroidPermissionSettings, value); autoEnabled = CoachingAutoStart.enabled(this@AndroidPermissionSettings) 
+    override suspend fun setAutoEnabled(value: Boolean): Unit = withContext(Dispatchers.IO) { CoachingAutoStart.setEnabled(this@AndroidPermissionSettings, value); autoEnabled = CoachingAutoStart.testModeEnabled(this@AndroidPermissionSettings) 
         Unit
     }
     private var guardConnected = false
@@ -84,7 +84,7 @@ internal class AndroidPermissionSettings(context: Context) : android.content.Con
         usage = try { (getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager).checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), packageName) == AppOpsManager.MODE_ALLOWED } catch (_: Exception) { null }
         overlay = try { Settings.canDrawOverlays(this@AndroidPermissionSettings) } catch (_: Exception) { null }
         notifications = try { com.example.itv.composition.CoachingAccess.notifications(this@AndroidPermissionSettings) } catch (_: Exception) { null }
-        autoEnabled = CoachingAutoStart.enabled(this@AndroidPermissionSettings)
+        autoEnabled = CoachingAutoStart.testModeEnabled(this@AndroidPermissionSettings)
     
         Unit
     }
@@ -113,7 +113,7 @@ internal class AndroidPermissionSettings(context: Context) : android.content.Con
             nm.areNotificationsEnabled() &&
                 (nm.getNotificationChannel(com.example.itv.composition.CoachingAccess.MONITOR)?.importance ?: android.app.NotificationManager.IMPORTANCE_NONE) != android.app.NotificationManager.IMPORTANCE_NONE
         } catch (_: Exception) { null }
-        autoEnabled = CoachingAutoStart.enabled(this@AndroidPermissionSettings)
+        autoEnabled = CoachingAutoStart.testModeEnabled(this@AndroidPermissionSettings)
         val next = JSONObject(doc.toString())
         var changed = false
         for ((key, name, value) in listOf(Triple("usage", "사용 정보 접근", usage), Triple("overlay", "다른 앱 위에 표시", overlay), Triple("notifications", "휴식 제안 알림", notifications))) {

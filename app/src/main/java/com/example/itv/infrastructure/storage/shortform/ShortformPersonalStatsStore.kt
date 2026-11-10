@@ -43,19 +43,21 @@ internal object ShortformPersonalStatsStore {
 
     data class PersonalizedTargetMetrics(
         val filter: TargetFilter,
-        // 1. Today vs 7-day & 30-day daily averages
+        // 1. Today vs 7-day & 30-day daily averages (excluding 0-usage days)
         val todayDurationMs: Long,
         val avg7dDailyMs: Long,
         val observedDays7d: Int,
         val total7dDurationMs: Long,
-        /** Today's duration divided by 7-day daily average (1.0 = 100%). Null if no 7d baseline. */
+        /** Today's duration divided by 7-day daily average (1.0 = 100%). Null if no 7d baseline or 0 today. */
         val todayVs7dRatio: Double?,
         val avg30dDailyMs: Long,
         val observedDays30d: Int,
         val total30dDurationMs: Long,
         val todayVs30dRatio: Double?,
+        /** 7-day daily average divided by 30-day daily average. */
+        val avg7dVs30dRatio: Double?,
 
-        // 2. Session length personalization (Current/Recent session vs Personal average session length)
+        // 2. Session length personalization (Today, 7-day, 30-day, and overall)
         val currentSessionMs: Long,
         val currentSessionLive: Boolean,
         val currentSessionSwipes: Int,
@@ -63,23 +65,40 @@ internal object ShortformPersonalStatsStore {
         val maxSessionMs: Long,
         val totalRecordedSessions: Int,
         val todaySessionCount: Int,
+        val avg7dSessionMs: Long,
+        val max7dSessionMs: Long,
+        val sessionCount7d: Int,
         val avg7dSessionCount: Double,
+        val avg30dSessionMs: Long,
+        val max30dSessionMs: Long,
+        val sessionCount30d: Int,
+        val avg30dSessionCount: Double,
         /** Current (or most recent) session duration divided by personal average session duration. */
         val currentVsAvgSessionRatio: Double?,
+        /** 7-day average session duration divided by 30-day (personal) average session duration. */
+        val session7dVs30dRatio: Double?,
 
         // 3. Transitions (Swipes) & SPM personalization
         val todaySwipes: Long,
+        val total7dSwipes: Long,
         val avg7dDailySwipes: Double,
         val todayVs7dSwipesRatio: Double?,
+        val avg7dSwipesPerSession: Double,
+        val avg7dSpm: Double,
+        val total30dSwipes: Long,
+        val avg30dDailySwipes: Double,
+        val avg30dSwipesPerSession: Double,
         val avgSwipesPerSession: Double,
         val todayAvgSpm: Double,
         val personalAvgSpm: Double,
 
-        // 4. Share of total app/phone usage
+        // 4. Share of total app/phone usage (active days/hours only)
         val parentAppTodayMs: Long,
         val shortformShareOfAppRatio: Double?,
         val totalPhoneTodayMs: Long,
-        val shortformShareOfPhoneRatio: Double?
+        val shortformShareOfPhoneRatio: Double?,
+        val periodShareOfAppRatio: Double?,
+        val periodShareOfPhoneRatio: Double?
     )
 
     data class PersonalizedSummary(
@@ -123,13 +142,19 @@ internal object ShortformPersonalStatsStore {
     )
     @Volatile
     private var cached7dAvgByPkg: Map<String, Long> = emptyMap()
+    @Volatile
+    private var cachedPersonalAvgSpmByPkg: Map<String, Double> = emptyMap()
 
     data class QuickPersonalMetrics(
         val avgSessionMs: Long,
+        val avgSessionMinutes: Double?,
         val sessionVsAvgRatio: Double?,
         val todayDurationMs: Long,
+        val todayShortformMinutes: Double?,
         val avg7dDailyMs: Long,
-        val todayVs7dRatio: Double?
+        val avg7dDailyMinutes: Double?,
+        val todayVs7dRatio: Double?,
+        val personalAvgSpm: Double?
     )
 
     private fun pkgOf(app: ShortformApp): String = when (app) {
@@ -139,50 +164,96 @@ internal object ShortformPersonalStatsStore {
 
     private fun round2(v: Double): Double = kotlin.math.round(v * 100.0) / 100.0
 
-    /** Refreshes the 7-day daily average cache from Room on a background thread. */
+    /** Refreshes the 7-day daily average and 30-day personal SPM caches from Room on a background thread. */
     suspend fun refreshBaselineCache(context: Context) {
         val appCtx = context.applicationContext
         val allDbRows = runCatching { ItvDatabase.get(appCtx).shortformDao().all("demo-guest") }.getOrDefault(emptyList())
         val todayDate = LocalDate.now()
         val start7d = todayDate.minusDays(6)
-        val result = mutableMapOf<String, Long>()
+        val start30d = todayDate.minusDays(29)
+        val result7d = mutableMapOf<String, Long>()
+        val resultSpm = mutableMapOf<String, Double>()
         for (pkg in listOf(PKG_INSTAGRAM, PKG_YOUTUBE)) {
-            val byDate = linkedMapOf<LocalDate, Long>()
+            val byDate7d = linkedMapOf<LocalDate, Long>()
+            val byDate30dMs = linkedMapOf<LocalDate, Long>()
+            val byDate30dSwipes = linkedMapOf<LocalDate, Long>()
             for (row in allDbRows) {
                 if (row.packageName != pkg) continue
                 val d = runCatching { LocalDate.parse(row.localDate) }.getOrNull() ?: continue
+                if (!d.isBefore(start30d) && !d.isAfter(todayDate) && (row.observed || row.durationMs > 0L)) {
+                    byDate30dMs[d] = (byDate30dMs[d] ?: 0L) + row.durationMs
+                    byDate30dSwipes[d] = (byDate30dSwipes[d] ?: 0L) + row.transitionCount
+                }
                 if (!d.isBefore(start7d) && !d.isAfter(todayDate) && (row.observed || row.durationMs > 0L)) {
-                    byDate[d] = (byDate[d] ?: 0L) + row.durationMs
+                    byDate7d[d] = (byDate7d[d] ?: 0L) + row.durationMs
                 }
             }
             val liveToday = ShortformDailyStore.today(appCtx, if (pkg == PKG_INSTAGRAM) "instagram" else "youtube")
-            if (liveToday.observed || liveToday.ms > 0L) {
-                byDate[todayDate] = maxOf(byDate[todayDate] ?: 0L, liveToday.ms)
+            if (liveToday.ms > 0L) {
+                byDate7d[todayDate] = maxOf(byDate7d[todayDate] ?: 0L, liveToday.ms)
+                byDate30dMs[todayDate] = maxOf(byDate30dMs[todayDate] ?: 0L, liveToday.ms)
+                byDate30dSwipes[todayDate] = maxOf(byDate30dSwipes[todayDate] ?: 0L, liveToday.transitions.toLong())
             }
-            if (byDate.isNotEmpty()) {
-                result[pkg] = byDate.values.sum() / byDate.size
+            val active7dValues = byDate7d.values.filter { it >= MIN_VALID_SESSION_MS }
+                .ifEmpty { byDate7d.values.filter { it > 0L } }
+            if (active7dValues.isNotEmpty()) {
+                result7d[pkg] = active7dValues.sum() / active7dValues.size
+            }
+            val active30dDates = byDate30dMs.filterValues { it >= MIN_VALID_SESSION_MS }.keys
+                .ifEmpty { byDate30dMs.filterValues { it > 0L }.keys }
+            val total30dMs = active30dDates.sumOf { byDate30dMs[it] ?: 0L }
+            val total30dSwipes = active30dDates.sumOf { byDate30dSwipes[it] ?: 0L }
+            if (total30dMs >= 10_000L && total30dSwipes > 0L) {
+                resultSpm[pkg] = round2(total30dSwipes.toDouble() / (total30dMs / 60_000.0))
             }
         }
-        cached7dAvgByPkg = result
+        cached7dAvgByPkg = result7d
+        cachedPersonalAvgSpmByPkg = resultSpm
     }
 
-    /** Fast, non-blocking lookup of personalized ratios for Jev runtime evaluation. */
+    private fun expireStaleRunIfNeeded(pkg: String, run: ActiveRun, nowElapsed: Long, nowWall: Long) {
+        if (run.id.isEmpty()) return
+        val idleElapsed = if (run.nonConfirmedSince > 0L) {
+            nowElapsed - run.nonConfirmedSince
+        } else {
+            nowElapsed - run.lastConfirmedElapsed
+        }
+        // Only expire when the user has actually stopped watching for >= 15s (never cut an active run at 00:00 midnight)
+        if (idleElapsed >= SESSION_GRACE_MS || idleElapsed < 0L) {
+            if (run.durationMs >= MIN_VALID_SESSION_MS) {
+                val endWall = (run.startWallMs + run.durationMs).coerceAtLeast(run.startWallMs)
+                upsertRunToHistory(pkg, run, if (endWall > 0L) endWall else nowWall)
+                persist()
+            }
+            run.reset()
+        }
+    }
+
+    /** Fast, non-blocking lookup of personalized ratios and baselines for Jev runtime evaluation. */
     @Synchronized
     fun quickContextMetrics(
         context: Context,
         pkg: String,
-        currentSessionMs: Long,
         currentContinuousMs: Long
     ): QuickPersonalMetrics {
         ensureInitialized(context)
+        val nowElapsed = SystemClock.elapsedRealtime()
+        val nowWall = System.currentTimeMillis()
+        val run = runs[pkg]
+        if (run != null) {
+            expireStaleRunIfNeeded(pkg, run, nowElapsed, nowWall)
+        }
         val appSessions = sessions.filter { it.packageName == pkg }
         val basisSessions = if (appSessions.size >= 2) appSessions else sessions
         val avgSessionMs = if (basisSessions.isNotEmpty()) {
             basisSessions.sumOf { it.durationMs } / basisSessions.size
         } else 0L
+        val avgSessionMinutes = if (avgSessionMs >= 30_000L) round2(avgSessionMs / 60_000.0) else null
 
-        val activeRunMs = runs[pkg]?.durationMs ?: 0L
-        val effectiveCurrentSessionMs = maxOf(currentContinuousMs, activeRunMs, currentSessionMs)
+        val activeRunMs = run?.takeIf {
+            it.id.isNotEmpty() && nowElapsed - it.lastConfirmedElapsed in 0L until SESSION_GRACE_MS
+        }?.durationMs ?: 0L
+        val effectiveCurrentSessionMs = maxOf(currentContinuousMs, activeRunMs)
         val sessionVsAvgRatio = if (avgSessionMs >= 30_000L && effectiveCurrentSessionMs > 0L) {
             round2(effectiveCurrentSessionMs.toDouble() / avgSessionMs.toDouble())
         } else null
@@ -193,18 +264,34 @@ internal object ShortformPersonalStatsStore {
                 if (pkg == PKG_INSTAGRAM) "instagram" else "youtube"
             )
         }.getOrNull()
-        val todayMs = maxOf(liveToday?.ms ?: 0L, effectiveCurrentSessionMs)
+        val todayStartWallMs = LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val elapsedSinceMidnightMs = (nowWall - todayStartWallMs).coerceAtLeast(0L)
+        val currentSessionTodayMs = minOf(effectiveCurrentSessionMs, elapsedSinceMidnightMs)
+        val todayMs = maxOf(liveToday?.ms ?: 0L, currentSessionTodayMs)
+        val todayShortformMinutes = if (todayMs > 0L) round2(todayMs / 60_000.0) else null
         val avg7dMs = cached7dAvgByPkg[pkg] ?: 0L
+        val avg7dDailyMinutes = if (avg7dMs >= 60_000L) round2(avg7dMs / 60_000.0) else null
         val todayVs7dRatio = if (avg7dMs >= 60_000L && todayMs > 0L) {
             round2(todayMs.toDouble() / avg7dMs.toDouble())
         } else null
 
+        val fallbackSessionSpm = basisSessions.let { list ->
+            val sumMs = list.sumOf { it.durationMs }
+            val sumSwipes = list.sumOf { it.swipes }
+            if (sumMs >= 10_000L && sumSwipes > 0) round2(sumSwipes.toDouble() / (sumMs / 60_000.0)) else null
+        }
+        val personalAvgSpm = cachedPersonalAvgSpmByPkg[pkg] ?: fallbackSessionSpm
+
         return QuickPersonalMetrics(
             avgSessionMs = avgSessionMs,
+            avgSessionMinutes = avgSessionMinutes,
             sessionVsAvgRatio = sessionVsAvgRatio,
             todayDurationMs = todayMs,
+            todayShortformMinutes = todayShortformMinutes,
             avg7dDailyMs = avg7dMs,
-            todayVs7dRatio = todayVs7dRatio
+            avg7dDailyMinutes = avg7dDailyMinutes,
+            todayVs7dRatio = todayVs7dRatio,
+            personalAvgSpm = personalAvgSpm
         )
     }
 
@@ -256,6 +343,7 @@ internal object ShortformPersonalStatsStore {
         ensureInitialized(context)
         val pkg = pkgOf(app)
         val run = runs.getValue(pkg)
+        expireStaleRunIfNeeded(pkg, run, nowElapsed, nowWall)
         if (confirmed) {
             if (run.id.isEmpty()) {
                 run.id = UUID.randomUUID().toString()
@@ -304,6 +392,7 @@ internal object ShortformPersonalStatsStore {
         ensureInitialized(context)
         val pkg = pkgOf(app)
         val run = runs.getValue(pkg)
+        expireStaleRunIfNeeded(pkg, run, nowElapsed, nowWall)
         if (run.id.isEmpty()) {
             run.id = UUID.randomUUID().toString()
             run.startWallMs = nowWall
@@ -397,25 +486,31 @@ internal object ShortformPersonalStatsStore {
         val observed: Boolean
     )
 
-    suspend fun loadSummary(context: Context, todayUsageReport: Report?): PersonalizedSummary {
+    suspend fun loadSummary(
+        context: Context,
+        todayUsageReport: Report?,
+        periodUsageReport: Report? = todayUsageReport
+    ): PersonalizedSummary {
         val appCtx = context.applicationContext
         val allDbRows = ItvDatabase.get(appCtx).shortformDao().all("demo-guest")
         val igLiveToday = ShortformDailyStore.today(appCtx, "instagram")
         val ytLiveToday = ShortformDailyStore.today(appCtx, "youtube")
 
         val nowElapsed = SystemClock.elapsedRealtime()
+        val nowWall = System.currentTimeMillis()
         val snapshotSessions: List<SessionRecord>
         val igActiveSession: Pair<Long, Int>?
         val ytActiveSession: Pair<Long, Int>?
 
         synchronized(this) {
             ensureInitialized(appCtx)
-            // Flush any active run >= 5s so snapshot includes latest in-memory progress
+            // Expire any stale run from a previous day or > 15s ago, and flush active runs >= 5s
             for ((pkg, run) in runs) {
+                expireStaleRunIfNeeded(pkg, run, nowElapsed, nowWall)
                 if (run.id.isNotEmpty() && run.durationMs >= MIN_VALID_SESSION_MS &&
                     nowElapsed - run.lastConfirmedElapsed < SESSION_GRACE_MS
                 ) {
-                    upsertRunToHistory(pkg, run, System.currentTimeMillis())
+                    upsertRunToHistory(pkg, run, nowWall)
                 }
             }
             snapshotSessions = sessions.toList()
@@ -471,50 +566,82 @@ internal object ShortformPersonalStatsStore {
             )
         }
 
-        // Total app usage today from UsageReport
+        // Total app usage today from UsageReport (only active hours > 0)
         fun appUsageTodayMs(pkg: String): Long {
             val r = todayUsageReport ?: return 0L
-            val minutes = r.hourlyApps.asSequence().flatten().filter { it.packageName == pkg }.sumOf { it.minutes }
+            val minutes = r.hourlyApps.asSequence().flatten()
+                .filter { it.packageName == pkg && it.minutes > 0.0 }
+                .sumOf { it.minutes }
             return (minutes * 60_000.0).toLong()
         }
         val igParentTodayMs = appUsageTodayMs(PKG_INSTAGRAM)
         val ytParentTodayMs = appUsageTodayMs(PKG_YOUTUBE)
         val totalPhoneTodayMs = ((todayUsageReport?.total ?: 0.0) * 60_000.0).toLong()
 
+        // Period app usage & active-day phone usage (excluding 0-usage days/hours)
+        fun appUsagePeriodTotalMs(pkg: String): Long {
+            val r = periodUsageReport ?: return 0L
+            val avgMinutesPerDay = r.hourlyApps.asSequence().flatten()
+                .filter { it.packageName == pkg && it.minutes > 0.0 }
+                .sumOf { it.minutes }
+            return (avgMinutesPerDay * r.days.coerceAtLeast(1) * 60_000.0).toLong()
+        }
+        val igParentPeriodTotalMs = appUsagePeriodTotalMs(PKG_INSTAGRAM)
+        val ytParentPeriodTotalMs = appUsagePeriodTotalMs(PKG_YOUTUBE)
+        val periodDays = periodUsageReport?.days ?: 1
+        val activePhoneDaysInPeriod = periodUsageReport?.dailyTotals?.values?.count { it >= 1.0 }
+            ?.takeIf { it > 0 } ?: 1
+        val totalPhonePeriodActiveMs = periodUsageReport?.let { rep ->
+            val activeSum = rep.dailyTotals.values.filter { it >= 1.0 }.sum()
+            val minutes = if (activeSum > 0.0) activeSum else rep.total
+            (minutes * 60_000.0).toLong()
+        } ?: 0L
+        val avgPhonePeriodActiveDayMs = totalPhonePeriodActiveMs / activePhoneDaysInPeriod
+
         fun buildMetrics(
             filter: TargetFilter,
             dailyMap: Map<LocalDate, DailyAgg>,
             matchingSessions: List<SessionRecord>,
             activeSession: Pair<Long, Int>?,
-            parentAppMs: Long
+            parentAppMs: Long,
+            parentAppPeriodTotalMs: Long
         ): PersonalizedTargetMetrics {
             val todayAgg = dailyMap[todayDate]
             val todayMs = todayAgg?.durationMs ?: 0L
             val todaySwipes = todayAgg?.swipes ?: 0L
 
-            val days7 = dailyMap.values.filter { !it.date.isBefore(start7d) && !it.date.isAfter(todayDate) && (it.observed || it.durationMs > 0L) }
+            // Exclude 0-usage days (and < 5s accidental noise when valid >= 5s days exist) so averages are never diluted
+            val rawDays7 = dailyMap.values.filter { !it.date.isBefore(start7d) && !it.date.isAfter(todayDate) }
+            val days7 = rawDays7.filter { it.durationMs >= MIN_VALID_SESSION_MS }
+                .ifEmpty { rawDays7.filter { it.durationMs > 0L } }
             val observedDays7d = days7.size
             val total7dMs = days7.sumOf { it.durationMs }
             val avg7dDailyMs = if (observedDays7d > 0) total7dMs / observedDays7d else 0L
-            val todayVs7dRatio = if (avg7dDailyMs > 0L) todayMs.toDouble() / avg7dDailyMs.toDouble() else null
+            val todayVs7dRatio = if (avg7dDailyMs > 0L && todayMs > 0L) todayMs.toDouble() / avg7dDailyMs.toDouble() else null
 
             val total7dSwipes = days7.sumOf { it.swipes }
             val avg7dDailySwipes = if (observedDays7d > 0) total7dSwipes.toDouble() / observedDays7d else 0.0
-            val todayVs7dSwipesRatio = if (avg7dDailySwipes > 0.0) todaySwipes.toDouble() / avg7dDailySwipes else null
+            val todayVs7dSwipesRatio = if (avg7dDailySwipes > 0.0 && todaySwipes > 0L) todaySwipes.toDouble() / avg7dDailySwipes else null
 
-            val days30 = dailyMap.values.filter { !it.date.isBefore(start30d) && !it.date.isAfter(todayDate) && (it.observed || it.durationMs > 0L) }
+            val rawDays30 = dailyMap.values.filter { !it.date.isBefore(start30d) && !it.date.isAfter(todayDate) }
+            val days30 = rawDays30.filter { it.durationMs >= MIN_VALID_SESSION_MS }
+                .ifEmpty { rawDays30.filter { it.durationMs > 0L } }
             val observedDays30d = days30.size
             val total30dMs = days30.sumOf { it.durationMs }
             val avg30dDailyMs = if (observedDays30d > 0) total30dMs / observedDays30d else 0L
-            val todayVs30dRatio = if (avg30dDailyMs > 0L) todayMs.toDouble() / avg30dDailyMs.toDouble() else null
+            val todayVs30dRatio = if (avg30dDailyMs > 0L && todayMs > 0L) todayMs.toDouble() / avg30dDailyMs.toDouble() else null
+            val avg7dVs30dRatio = if (avg30dDailyMs > 0L && avg7dDailyMs > 0L) {
+                avg7dDailyMs.toDouble() / avg30dDailyMs.toDouble()
+            } else null
 
-            // Session metrics
-            val latestStored = matchingSessions.maxByOrNull { it.updatedWallMs }
+            // Valid sessions only (>= 5s actual shortform viewing)
+            val validSessions = matchingSessions.filter { it.durationMs >= MIN_VALID_SESSION_MS }
+            val latestStored = validSessions.maxByOrNull { it.updatedWallMs }
             val currentSessionLive = activeSession != null && activeSession.first > 0L
             val currentSessionMs = when {
                 activeSession != null && activeSession.first > 0L -> activeSession.first
                 latestStored != null -> latestStored.durationMs
-                todayMs > 0L -> todayMs
+                todayMs >= MIN_VALID_SESSION_MS -> todayMs
                 else -> 0L
             }
             val currentSessionSwipes = when {
@@ -524,46 +651,102 @@ internal object ShortformPersonalStatsStore {
             }
 
             val totalRecordedSessions = when {
-                matchingSessions.isNotEmpty() -> matchingSessions.size
-                todayMs > 0L -> 1
+                validSessions.isNotEmpty() -> validSessions.size
+                todayMs >= MIN_VALID_SESSION_MS -> 1
                 else -> 0
             }
             val avgSessionMs = when {
-                matchingSessions.isNotEmpty() -> matchingSessions.sumOf { it.durationMs } / matchingSessions.size
-                todayMs > 0L -> todayMs
+                validSessions.isNotEmpty() -> validSessions.sumOf { it.durationMs } / validSessions.size
+                todayMs >= MIN_VALID_SESSION_MS -> todayMs
                 else -> 0L
             }
             val maxSessionMs = when {
-                matchingSessions.isNotEmpty() -> maxOf(matchingSessions.maxOf { it.durationMs }, currentSessionMs)
+                validSessions.isNotEmpty() -> maxOf(validSessions.maxOf { it.durationMs }, currentSessionMs)
                 else -> currentSessionMs
             }
             val todayStr = todayDate.toString()
-            val todaySessionCount = matchingSessions.count { it.date == todayStr }.let {
-                if (it == 0 && todayMs > 0L) 1 else it
+            val todaySessionCount = validSessions.count { it.date == todayStr }.let {
+                if (it == 0 && todayMs >= MIN_VALID_SESSION_MS) 1 else it
             }
-            val sessions7d = matchingSessions.filter {
+
+            // 7-day session metrics (excluding unused days/times)
+            val sessions7d = validSessions.filter {
                 val d = runCatching { LocalDate.parse(it.date) }.getOrNull()
                 d != null && !d.isBefore(start7d) && !d.isAfter(todayDate)
             }
+            val sessionCount7d = when {
+                sessions7d.isNotEmpty() -> sessions7d.size
+                observedDays7d > 0 -> observedDays7d
+                else -> 0
+            }
+            val avg7dSessionMs = when {
+                sessions7d.isNotEmpty() -> sessions7d.sumOf { it.durationMs } / sessions7d.size
+                observedDays7d > 0 -> avg7dDailyMs
+                else -> 0L
+            }
+            val max7dSessionMs = when {
+                sessions7d.isNotEmpty() -> sessions7d.maxOf { it.durationMs }
+                else -> avg7dSessionMs
+            }
             val avg7dSessionCount = if (observedDays7d > 0) {
-                val count7d = sessions7d.size.coerceAtLeast(if (total7dMs > 0L) observedDays7d else 0)
-                count7d.toDouble() / observedDays7d
+                sessionCount7d.toDouble() / observedDays7d
+            } else 0.0
+
+            // 30-day session metrics (excluding unused days/times)
+            val sessions30d = validSessions.filter {
+                val d = runCatching { LocalDate.parse(it.date) }.getOrNull()
+                d != null && !d.isBefore(start30d) && !d.isAfter(todayDate)
+            }
+            val sessionCount30d = when {
+                sessions30d.isNotEmpty() -> sessions30d.size
+                observedDays30d > 0 -> observedDays30d
+                else -> 0
+            }
+            val avg30dSessionMs = when {
+                sessions30d.isNotEmpty() -> sessions30d.sumOf { it.durationMs } / sessions30d.size
+                observedDays30d > 0 -> avg30dDailyMs
+                else -> 0L
+            }
+            val max30dSessionMs = when {
+                sessions30d.isNotEmpty() -> sessions30d.maxOf { it.durationMs }
+                else -> avg30dSessionMs
+            }
+            val avg30dSessionCount = if (observedDays30d > 0) {
+                sessionCount30d.toDouble() / observedDays30d
             } else 0.0
 
             val currentVsAvgSessionRatio = if (avgSessionMs > 0L && currentSessionMs > 0L) {
                 currentSessionMs.toDouble() / avgSessionMs.toDouble()
             } else null
+            val session7dVs30dRatio = if (avg30dSessionMs > 0L && avg7dSessionMs > 0L) {
+                avg7dSessionMs.toDouble() / avg30dSessionMs.toDouble()
+            } else null
 
             val avgSwipesPerSession = when {
-                matchingSessions.isNotEmpty() -> matchingSessions.sumOf { it.swipes }.toDouble() / matchingSessions.size
+                validSessions.isNotEmpty() -> validSessions.sumOf { it.swipes }.toDouble() / validSessions.size
                 todaySwipes > 0L -> todaySwipes.toDouble()
+                else -> 0.0
+            }
+            val avg7dSwipesPerSession = when {
+                sessions7d.isNotEmpty() -> sessions7d.sumOf { it.swipes }.toDouble() / sessions7d.size
+                sessionCount7d > 0 -> total7dSwipes.toDouble() / sessionCount7d
+                else -> 0.0
+            }
+            val avg7dSpm = if (total7dMs >= 10_000L) {
+                total7dSwipes.toDouble() / (total7dMs / 60_000.0)
+            } else 0.0
+
+            val total30dSwipes = days30.sumOf { it.swipes }
+            val avg30dDailySwipes = if (observedDays30d > 0) total30dSwipes.toDouble() / observedDays30d else 0.0
+            val avg30dSwipesPerSession = when {
+                sessions30d.isNotEmpty() -> sessions30d.sumOf { it.swipes }.toDouble() / sessions30d.size
+                sessionCount30d > 0 -> total30dSwipes.toDouble() / sessionCount30d
                 else -> 0.0
             }
 
             val todayAvgSpm = if (todayMs >= 10_000L) todaySwipes.toDouble() / (todayMs / 60_000.0) else 0.0
             val personalAvgSpm = if (total30dMs >= 10_000L) {
-                val swipes30d = days30.sumOf { it.swipes }
-                swipes30d.toDouble() / (total30dMs / 60_000.0)
+                total30dSwipes.toDouble() / (total30dMs / 60_000.0)
             } else todayAvgSpm
 
             val effectiveParentMs = maxOf(parentAppMs, todayMs)
@@ -576,6 +759,26 @@ internal object ShortformPersonalStatsStore {
                 (todayMs.toDouble() / effectivePhoneMs.toDouble()).coerceIn(0.0, 1.0)
             } else null
 
+            val periodShortformTotalMs = when {
+                periodDays >= 30 -> total30dMs
+                periodDays >= 7 -> total7dMs
+                else -> todayMs
+            }
+            val periodShortformDailyAvgMs = when {
+                periodDays >= 30 -> avg30dDailyMs
+                periodDays >= 7 -> avg7dDailyMs
+                else -> todayMs
+            }
+            val effectivePeriodAppMs = maxOf(parentAppPeriodTotalMs, periodShortformTotalMs)
+            val periodShareOfAppRatio = if (effectivePeriodAppMs > 0L && periodShortformTotalMs > 0L) {
+                (periodShortformTotalMs.toDouble() / effectivePeriodAppMs.toDouble()).coerceIn(0.0, 1.0)
+            } else shortformShareOfAppRatio
+
+            val effectivePeriodPhoneDailyMs = maxOf(avgPhonePeriodActiveDayMs, periodShortformDailyAvgMs)
+            val periodShareOfPhoneRatio = if (effectivePeriodPhoneDailyMs > 0L && periodShortformDailyAvgMs > 0L) {
+                (periodShortformDailyAvgMs.toDouble() / effectivePeriodPhoneDailyMs.toDouble()).coerceIn(0.0, 1.0)
+            } else shortformShareOfPhoneRatio
+
             return PersonalizedTargetMetrics(
                 filter = filter,
                 todayDurationMs = todayMs,
@@ -587,6 +790,7 @@ internal object ShortformPersonalStatsStore {
                 observedDays30d = observedDays30d,
                 total30dDurationMs = total30dMs,
                 todayVs30dRatio = todayVs30dRatio,
+                avg7dVs30dRatio = avg7dVs30dRatio,
                 currentSessionMs = currentSessionMs,
                 currentSessionLive = currentSessionLive,
                 currentSessionSwipes = currentSessionSwipes,
@@ -594,18 +798,34 @@ internal object ShortformPersonalStatsStore {
                 maxSessionMs = maxSessionMs,
                 totalRecordedSessions = totalRecordedSessions,
                 todaySessionCount = todaySessionCount,
+                avg7dSessionMs = avg7dSessionMs,
+                max7dSessionMs = max7dSessionMs,
+                sessionCount7d = sessionCount7d,
                 avg7dSessionCount = avg7dSessionCount,
+                avg30dSessionMs = avg30dSessionMs,
+                max30dSessionMs = max30dSessionMs,
+                sessionCount30d = sessionCount30d,
+                avg30dSessionCount = avg30dSessionCount,
                 currentVsAvgSessionRatio = currentVsAvgSessionRatio,
+                session7dVs30dRatio = session7dVs30dRatio,
                 todaySwipes = todaySwipes,
+                total7dSwipes = total7dSwipes,
                 avg7dDailySwipes = avg7dDailySwipes,
                 todayVs7dSwipesRatio = todayVs7dSwipesRatio,
+                avg7dSwipesPerSession = avg7dSwipesPerSession,
+                avg7dSpm = avg7dSpm,
+                total30dSwipes = total30dSwipes,
+                avg30dDailySwipes = avg30dDailySwipes,
+                avg30dSwipesPerSession = avg30dSwipesPerSession,
                 avgSwipesPerSession = avgSwipesPerSession,
                 todayAvgSpm = todayAvgSpm,
                 personalAvgSpm = personalAvgSpm,
                 parentAppTodayMs = effectiveParentMs,
                 shortformShareOfAppRatio = shortformShareOfAppRatio,
                 totalPhoneTodayMs = effectivePhoneMs,
-                shortformShareOfPhoneRatio = shortformShareOfPhoneRatio
+                shortformShareOfPhoneRatio = shortformShareOfPhoneRatio,
+                periodShareOfAppRatio = periodShareOfAppRatio,
+                periodShareOfPhoneRatio = periodShareOfPhoneRatio
             )
         }
 
@@ -623,14 +843,16 @@ internal object ShortformPersonalStatsStore {
             dailyMap = igDaily,
             matchingSessions = igSessions,
             activeSession = igActiveSession,
-            parentAppMs = igParentTodayMs
+            parentAppMs = igParentTodayMs,
+            parentAppPeriodTotalMs = igParentPeriodTotalMs
         )
         val ytMetrics = buildMetrics(
             filter = TargetFilter.YOUTUBE,
             dailyMap = ytDaily,
             matchingSessions = ytSessions,
             activeSession = ytActiveSession,
-            parentAppMs = ytParentTodayMs
+            parentAppMs = ytParentTodayMs,
+            parentAppPeriodTotalMs = ytParentPeriodTotalMs
         )
         cached7dAvgByPkg = mapOf(
             PKG_INSTAGRAM to igMetrics.avg7dDailyMs,
@@ -643,7 +865,8 @@ internal object ShortformPersonalStatsStore {
                 dailyMap = combinedDaily,
                 matchingSessions = snapshotSessions,
                 activeSession = combinedActive,
-                parentAppMs = igParentTodayMs + ytParentTodayMs
+                parentAppMs = igParentTodayMs + ytParentTodayMs,
+                parentAppPeriodTotalMs = igParentPeriodTotalMs + ytParentPeriodTotalMs
             ),
             instagram = igMetrics,
             youtube = ytMetrics

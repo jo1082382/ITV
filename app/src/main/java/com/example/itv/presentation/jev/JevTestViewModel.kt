@@ -28,7 +28,7 @@ class JevTestViewModel(app: Application): AndroidViewModel(app) {
     }
     fun save(settings: JevSettings) = action {
         store.save(settings)
-        CoachingAutoStart.setEnabled(getApplication(),settings.enabled && settings.collectionConsent)
+        CoachingAutoStart.sync(getApplication())
         message.value="설정 저장 완료 · 새 판단부터 적용됩니다."
     }
     fun saveToken(value: String,onSaved: ()->Unit) = action { store.saveToken(value);onSaved();message.value="토큰 저장 완료" }

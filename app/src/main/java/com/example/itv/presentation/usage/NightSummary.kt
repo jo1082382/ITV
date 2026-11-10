@@ -61,6 +61,40 @@ internal fun NightSummary(report: NightReport?, error: String?, days: Int) {
         containerColor = RecordContentGreen, contentColor = Color(0xFF243025))) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("수면 길이 · 사용자 확인 우선", style = MaterialTheme.typography.titleLarge)
+            val bedtimeEstimate = remember(confirmations, report?.zone) {
+                SleepSummaryPolicy.estimateBedtimeWindow(confirmations, report?.zone ?: ZoneId.systemDefault())
+            }
+            if (bedtimeEstimate != null) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color.White.copy(alpha = 0.85f),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFC8DEC0)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("평소 추정 취침 시각", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color(0xFF1B4332))
+                            Spacer(Modifier.weight(1f))
+                            Text("확인된 기록 ${bedtimeEstimate.validCount}일", style = MaterialTheme.typography.labelSmall, color = Color(0xFF52796F))
+                        }
+                        Text(
+                            text = "평균 취침 %02d:%02d ~ 기상 %02d:%02d (평균 %d시간 %d분)".format(
+                                bedtimeEstimate.avgStartHour, bedtimeEstimate.avgStartMinute,
+                                bedtimeEstimate.avgEndHour, bedtimeEstimate.avgEndMinute,
+                                bedtimeEstimate.avgDurationMinutes / 60L, bedtimeEstimate.avgDurationMinutes % 60L
+                            ),
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF2D6A4F)
+                        )
+                        Text(
+                            text = "사용자가 직접 선택하거나 수정한 유효 수면 기록의 평균입니다. 평소 잠드는 시간 파악 및 누워서 시청하는 구간 추정에 활용됩니다.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFF52796F)
+                        )
+                    }
+                }
+            }
             if (days != 1) {
             val averageDays = if (days == 30) 30 else 7
             val recentMinutes = (1L..averageDays.toLong()).map { offset ->

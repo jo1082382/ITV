@@ -120,7 +120,7 @@ fun UsageRecordsContent(modifier: Modifier = Modifier) {
             val result = withContext(Dispatchers.IO) {
                 val period = context.queryUsageReport(days)
                 val todayRep = if (days == 1) period else context.queryUsageReport(1)
-                val sfSummary = runCatching { ShortformPersonalStatsStore.loadSummary(context, todayRep) }.getOrNull()
+                val sfSummary = runCatching { ShortformPersonalStatsStore.loadSummary(context, todayRep, period) }.getOrNull()
                 Triple(period, todayRep, sfSummary)
             }
             report = result.first
@@ -132,7 +132,7 @@ fun UsageRecordsContent(modifier: Modifier = Modifier) {
             report = null
             todayForComparison = null
             shortformSummary = withContext(Dispatchers.IO) {
-                runCatching { ShortformPersonalStatsStore.loadSummary(context, null) }.getOrNull()
+                runCatching { ShortformPersonalStatsStore.loadSummary(context, null, null) }.getOrNull()
             }
             error = e.message ?: "사용량을 불러오지 못했습니다."
         } finally {
@@ -256,7 +256,7 @@ item(key = "shortform_personal_toggle") {
 }
 if (shortformOpen) {
 item(key = "shortform_personal_section") {
-    ShortformPersonalUsageSection(shortformSummary)
+    ShortformPersonalUsageSection(shortformSummary, days)
 }
 }
 item(key = "hourly_toggle") {

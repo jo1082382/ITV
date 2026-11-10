@@ -27,8 +27,19 @@ import com.example.itv.domain.coaching.TestCoachingPolicy
 import com.example.itv.infrastructure.coaching.*
 
 class CoachingMonitorService : Service() {
+    companion object {
+        @Volatile
+        private var instanceRef: java.lang.ref.WeakReference<CoachingMonitorService>? = null
+
+        fun notifyUserActivity(reason: String) {
+            instanceRef?.get()?.let { service ->
+                service.handler.post { service.onUserActivity(reason) }
+            }
+        }
+    }
     private val jev by lazy { JevRuntime.get(this) }
-    private fun jevMode() = JevFeature.available() && jev.enabled
+    private fun testMode() = CoachingAutoStart.testModeEnabled(this)
+    private fun jevMode() = !testMode() && JevFeature.available() && jev.enabled
     private val jevUiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var feedbackView: View? = null
     private var feedbackQueryPending = false
@@ -54,30 +65,55 @@ class CoachingMonitorService : Service() {
     private val overlayFactory: CoachingOverlayFactory by lazy { CoachingOverlayFactory(this) }
     private var retryPending=false
     private var retryVisible=false
+    private var offerFromJev=false
     private var missionFromJev=false
+    private var lastJevMode: Boolean? = null
     private var missionJevSettings: JevSettings?=null
     private var missionJevContext: JevContext?=null
+    private fun reminderText(ms: Long): String {
+        val sec = ms / 1000L
+        return if (sec % 60L == 0L) "${sec / 60L}분" else "${sec}초"
+    }
     private fun onChoice(title: String, @Suppress("UNUSED_PARAMETER") message: String) {
         if(reactionInProgress)return
         if(retryVisible) {
-            if(title!="쉬기")return
             if(missionFromJev && !canContinueJevRetry()) { removeOverlay();return }
-            selectedAnimation("쉬기") {
-                removeOverlay()
-                startRestMission(java.util.UUID.randomUUID().toString().take(8))
+            when (title) {
+                "쉬기" -> {
+                    selectedAnimation("쉬기") {
+                        removeOverlay()
+                        startRestMission(java.util.UUID.randomUUID().toString().take(8))
+                    }
+                    com.example.itv.composition.CoachingAccess.state(this, "$title 선택 · 충분한 휴식 전까지 재제안 안 함")
+                }
+                "나중에" -> {
+                    val delayMs = TestCoachingPolicy.reminderMs(missionFromJev)
+                    responseController.suppressed = false
+                    responseController.offered = false
+                    responseController.retryAt = SystemClock.elapsedRealtime() + delayMs
+                    selectedAnimation("나중에") { removeOverlay() }
+                    com.example.itv.composition.CoachingAccess.state(this, "나중에 선택 · ${reminderText(delayMs)} 뒤 조건 재확인")
+                }
+                "닫기" -> {
+                    responseController.suppressed = true
+                    responseController.retryAt = null
+                    selectedAnimation("닫기") { removeOverlay() }
+                    com.example.itv.composition.CoachingAccess.state(this, "$title 선택 · 충분한 휴식 전까지 재제안 안 함")
+                }
             }
             return
         }
         val selectedId = responseController.offerId ?: return
-        val isJev = JevFeature.available() && jev.hasActiveOffer()
-        val outcome = responseController.choose(title, SystemClock.elapsedRealtime())
+        val isJev = offerFromJev && JevFeature.available() && jev.hasActiveOffer()
+        val reminderMs = TestCoachingPolicy.reminderMs(isJev)
+        val outcome = responseController.choose(title, SystemClock.elapsedRealtime(), reminderMs)
         if (isJev && outcome !in setOf(ResponseOutcome.IGNORED, ResponseOutcome.EXPIRED)) {
             jev.respond(when (outcome) {
                 ResponseOutcome.REST -> "REST"
                 ResponseOutcome.LATER -> "LATER"
                 else -> "DISMISS"
             })
-            if (outcome == ResponseOutcome.LATER) responseController.retryAt = SystemClock.elapsedRealtime() + jev.store.settings.value.laterSeconds * 1000L
+            if (outcome == ResponseOutcome.LATER) responseController.retryAt = SystemClock.elapsedRealtime() + reminderMs
         }
         when (outcome) {
             ResponseOutcome.IGNORED -> return
@@ -87,16 +123,17 @@ class CoachingMonitorService : Service() {
                 missionFromJev=isJev
                 missionJevSettings=if(isJev)jev.store.settings.value else null
                 missionJevContext=if(isJev)jev.state.value.context else null
+                startRestMission(selectedId)
                 selectedAnimation("쉬기") {
                     removeOverlay(); nm.cancel(7102)
-                    startRestMission(selectedId)
+                    missionController.refreshStartDeadline(SystemClock.elapsedRealtime(), missionFromJev)
                 }
                 com.example.itv.composition.CoachingAccess.state(this, "$title 선택 · 충분한 휴식 전까지 재제안 안 함")
             }
             ResponseOutcome.LATER -> {
                 handler.removeCallbacks(offerTimeout)
                 selectedAnimation("나중에") { removeOverlay(); nm.cancel(7102) }
-                com.example.itv.composition.CoachingAccess.state(this, if (isJev) "나중에 선택 · ${jev.store.settings.value.laterSeconds}초 뒤 조건 재확인" else "나중에 선택 · 5분 뒤 조건 재확인")
+                com.example.itv.composition.CoachingAccess.state(this, "나중에 선택 · ${reminderText(reminderMs)} 뒤 조건 재확인")
             }
             ResponseOutcome.DISMISS -> {
                 handler.removeCallbacks(offerTimeout)
@@ -108,9 +145,8 @@ class CoachingMonitorService : Service() {
     }
 
     private fun startRestMission(id: String) {
-        if(!running || !unlocked() || !com.example.itv.composition.CoachingAccess.ready(this))return
-        if(missionFromJev && !canContinueJevRetry())return
-        missionController.begin(id,SystemClock.elapsedRealtime())
+        if(!running || !com.example.itv.composition.CoachingAccess.ready(this))return
+        missionController.begin(id,SystemClock.elapsedRealtime(),missionFromJev)
     }
     private fun canContinueJevRetry(): Boolean {
         val original=missionJevContext ?: return false
@@ -130,8 +166,11 @@ class CoachingMonitorService : Service() {
         if(reactionInProgress)return
         reactionInProgress=true
         overlayFactory.disableControls(root)
-        val reminder=if(jevMode())jev.store.settings.value.laterSeconds.toLong() else TestCoachingPolicy.REMINDER_MS/1000L
-        overlayFactory.playReaction(root,title,reminder) {
+        val useJev=if(retryVisible)missionFromJev else offerFromJev
+        val reminderSec=TestCoachingPolicy.reminderMs(useJev)/1000L
+        val prepSec=TestCoachingPolicy.missionStartMs(useJev)/1000L
+        val restSec=TestCoachingPolicy.restMs(useJev)/1000L
+        overlayFactory.playReaction(root,title,reminderSec,prepSec,restSec) {
             if(overlay===root && running) {
                 reactionInProgress=false
                 finished()
@@ -169,12 +208,14 @@ class CoachingMonitorService : Service() {
     private var completionView: View? = null
     private val offerTimeout: Runnable = Runnable {
         if (responseController.offerId != null && overlay != null) {
-            val isJev = JevFeature.available() && jev.hasActiveOffer()
+            val isJev = offerFromJev && JevFeature.available() && jev.hasActiveOffer()
+            val responseMs = TestCoachingPolicy.responseMs(isJev)
+            val reminderMs = TestCoachingPolicy.reminderMs(isJev)
             if (isJev) jev.respond("NO_RESPONSE")
-            responseController.timeout(SystemClock.elapsedRealtime())
-            if (isJev) responseController.retryAt = SystemClock.elapsedRealtime() + jev.store.settings.value.laterSeconds * 1000L
+            responseController.timeout(SystemClock.elapsedRealtime(), responseMs, reminderMs)
+            if (isJev) responseController.retryAt = SystemClock.elapsedRealtime() + reminderMs
             removeOverlay(); nm.cancel(7102)
-            com.example.itv.composition.CoachingAccess.state(this, if (isJev) "무응답 · ${jev.store.settings.value.laterSeconds}초 뒤 조건 재확인" else "무응답 · 5분 뒤 조건 재확인")
+            com.example.itv.composition.CoachingAccess.state(this, "무응답 · ${reminderText(reminderMs)} 뒤 조건 재확인")
         }
     }
     private fun finishOffer(outcome: String) {
@@ -191,10 +232,7 @@ class CoachingMonitorService : Service() {
         if (!missionController.state.pending || !unlocked() || completionView != null) return
         if (!com.example.itv.composition.CoachingAccess.ready(this) || !Settings.canDrawOverlays(this)) return
         val reason = WritingGuard.blockReason()
-        // The ITV internal fast-path deliberately blocks coaching, not a requested mission result.
-        if (reason != null && !(WritingGuard.connected &&
-            SystemClock.elapsedRealtime() - WritingGuard.checkedAt <= 3000L &&
-            reason == "ITV 내부 화면 · 구조 탐색 생략 / 개입 보류")) return
+        if (reason != null && reason != "ITV 내부 화면 · 구조 탐색 생략 / 개입 보류") return
         if (missionController.state.id == null) return
         val (box, params) = overlayFactory.completion(::dismissCompletion)
         try {
@@ -252,8 +290,16 @@ class CoachingMonitorService : Service() {
                 com.example.itv.composition.CoachingAccess.state(this@CoachingMonitorService, "동의 또는 권한이 해제되어 중지됨")
                 running = false; stopSelf(); return
             }
+            val currentJevMode = jevMode()
+            if (lastJevMode != null && lastJevMode != currentJevMode) {
+                if (overlay == null && missionController.state.id == null) {
+                    usageClock.clear()
+                    resetOfferState()
+                }
+            }
+            lastJevMode = currentJevMode
             checkMission()
-            val using = if (jevMode()) unlocked() else observeUsage()
+            val using = if (currentJevMode) unlocked() else observeUsage()
             val observation = observer.snapshot()
             val nowElapsed = SystemClock.elapsedRealtime()
             val fgPkg = JevObservationHub.foregroundPackage.takeIf { nowElapsed - JevObservationHub.checkedAt in 0..1500 }
@@ -308,12 +354,14 @@ class CoachingMonitorService : Service() {
             else -> "조건 재확인/표시 처리 중"
         }
         DeveloperStatus.value = DeveloperSnapshot(now, running, usageClock.usedMs,
-            usageClock.restMs, interventionMs, 30_000L,
+            usageClock.restMs, interventionMs, TestCoachingPolicy.REST_MS,
             ((responseController.retryAt ?: now) - now).coerceAtLeast(0L), screen, decision)
     }
     override fun onBind(intent: Intent?) = null
     override fun onCreate() {
-        super.onCreate(); com.example.itv.composition.CoachingAccess.channels(this)
+        super.onCreate()
+        instanceRef = java.lang.ref.WeakReference(this)
+        com.example.itv.composition.CoachingAccess.channels(this)
         MissionStats.recoverInterrupted(this)
         ReelsProbe.onTransition = { onReelsTransition() }
         YoutubeProbe.coachingObservation = true
@@ -328,6 +376,7 @@ class CoachingMonitorService : Service() {
             registerReceiver(receiver, filter)
         }
         receiverRegistered = true
+        com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this).start()
     }
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == "STOP") {
@@ -342,7 +391,7 @@ class CoachingMonitorService : Service() {
             val notification = Notification.Builder(this, com.example.itv.composition.CoachingAccess.MONITOR)
                 .setSmallIcon(R.drawable.ic_coaching_notification)
                 .setContentTitle("강아지 휴식 제안 켜짐")
-                .setContentText(if (jevMode()) "숏폼 관측 · Jev 조건 판단 · 눌러서 관리" else "휴식 이후 누적 사용 ${interventionMs / 60_000L}분 감지 · 눌러서 관리")
+                .setContentText(if (jevMode()) "숏폼 관측 · Jev 조건 판단 · 눌러서 관리" else "휴식 이후 누적 사용 ${interventionMs / 1000L}초 감지 · 눌러서 관리")
                 .setContentIntent(open).setOngoing(true)
                 .addAction(Notification.Action.Builder(null, "감시 중지", stop).build()).build()
             if (Build.VERSION.SDK_INT >= 34) startForeground(7101, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
@@ -358,6 +407,7 @@ class CoachingMonitorService : Service() {
     }
 
     private fun onYoutubeTransition() {
+        onUserActivity("YouTube 쇼츠 전환")
         if(retryPending) {checkRetry(true);return}
         if (jevMode()) {
             val targetPkg = jev.state.value.context?.packageName ?: jev.approvedPackage()
@@ -374,6 +424,7 @@ class CoachingMonitorService : Service() {
         showPuppy(transition = true)
     }
     private fun onReelsTransition() {
+        onUserActivity("Instagram 릴스 전환")
         if(retryPending) {checkRetry(true);return}
         if (jevMode()) {
             val targetPkg = jev.state.value.context?.packageName ?: jev.approvedPackage()
@@ -401,11 +452,25 @@ class CoachingMonitorService : Service() {
         }
         if (feedbackView != null || completionView != null || missionController.state.id != null || overlay != null || !unlocked() || !com.example.itv.composition.CoachingAccess.ready(this) || !Settings.canDrawOverlays(this)) return
         val jevOfferId = if (isJev) jev.approvedId() else null
-        val (root, params) = overlayFactory.offer(::onChoice)
+        val responseMs = TestCoachingPolicy.responseMs(isJev)
+        val shortformApp = when {
+            YoutubeProbe.screenState() == 1 -> "YouTube 쇼츠"
+            ReelsProbe.screenState() == 1 -> "Instagram 릴스"
+            else -> null
+        }
+        val ambient = com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this).snapshot.value
+        val reasons = com.example.itv.domain.coaching.InterventionReasonResolver.resolveReasons(
+            isJev = isJev,
+            jevContext = if (isJev) jev.state.value.context else null,
+            continuousUsedMs = usageClock.usedMs,
+            ambient = ambient,
+            shortformAppName = shortformApp
+        )
+        val (root, params) = overlayFactory.offer(::onChoice, reasons)
         try {
-            wm.addView(root, params); overlay = root
+            wm.addView(root, params); overlay = root; offerFromJev = isJev
             displayedPackage = JevObservationHub.foregroundPackage.takeIf { SystemClock.elapsedRealtime() - JevObservationHub.checkedAt in 0..1500 }
-            overlayFactory.attachControls(root); responseController.offered = true; waitingTransition = false; waitingYoutube = false; responseController.retryAt = null
+            responseController.offered = true; waitingTransition = false; waitingYoutube = false; responseController.retryAt = null
             responseController.offerId = jevOfferId ?: java.util.UUID.randomUUID().toString().take(8)
             journal.engine=if(isJev)"JEV" else "RULE"
             journal.policyVersion=if(isJev)"jev-candidate-v1" else "test-coaching-v2"
@@ -415,13 +480,24 @@ class CoachingMonitorService : Service() {
             } else null
             journal.structured(responseController.offerId!!,"OFFER_SHOWN")
             if (isJev) jev.shown()
-            responseController.deadline = SystemClock.elapsedRealtime() + TestCoachingPolicy.RESPONSE_MS
+            responseController.deadline = SystemClock.elapsedRealtime() + 7400L + responseMs
             InterventionJournal.add(this, responseController.offerId!!, "개입 표시 성공 · " + when {
                 YoutubeProbe.screenState() == 1 -> "쇼츠"
                 ReelsProbe.screenState() == 1 -> "릴스"
                 else -> "일반 화면"
             })
-            handler.removeCallbacks(offerTimeout); handler.postDelayed(offerTimeout, TestCoachingPolicy.RESPONSE_MS)
+            handler.removeCallbacks(offerTimeout); handler.postDelayed(offerTimeout, 7400L + responseMs)
+            overlayFactory.attachControls(
+                root = root,
+                onReady = {
+                    if (overlay === root && responseController.offerId != null) {
+                        resetOfferTimeout("등장 애니메이션 완료")
+                    }
+                },
+                onInteraction = { isInteracting ->
+                    onPuppyInteractionStateChanged(isInteracting)
+                }
+            )
             com.example.itv.composition.CoachingAccess.state(this, "강아지 제안 표시됨 · 선택 대기")
             val open = PendingIntent.getActivity(this, 7102, Intent(this, com.example.itv.presentation.permissions.PermissionSettingsActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
             try { nm.notify(7102, Notification.Builder(this, com.example.itv.composition.CoachingAccess.ALERT)
@@ -488,7 +564,35 @@ class CoachingMonitorService : Service() {
         overlay = null;displayedPackage=null;retryVisible=false;reactionInProgress=false
         previousOverlay?.let { overlayFactory.removeControls(it); try { wm.removeView(it) } catch (_: Exception) {} }
     }
+    private var puppyInteracting = false
+    private fun onPuppyInteractionStateChanged(isInteracting: Boolean) {
+        puppyInteracting = isInteracting
+        if (isInteracting) {
+            handler.removeCallbacks(offerTimeout)
+        } else {
+            if (overlay != null && !reactionInProgress && responseController.offerId != null) {
+                resetOfferTimeout("강아지 조작 종료")
+            }
+        }
+    }
+    fun onUserActivity(reason: String) {
+        if (overlay == null || reactionInProgress || responseController.offerId == null) return
+        if (puppyInteracting) return
+        resetOfferTimeout(reason)
+    }
+    private fun resetOfferTimeout(reason: String = "") {
+        if (overlay == null || reactionInProgress || responseController.offerId == null) return
+        val isJev = offerFromJev && JevFeature.available() && jev.hasActiveOffer()
+        val responseMs = TestCoachingPolicy.responseMs(isJev)
+        responseController.deadline = SystemClock.elapsedRealtime() + responseMs
+        handler.removeCallbacks(offerTimeout)
+        handler.postDelayed(offerTimeout, responseMs)
+        if (reason.isNotEmpty() && responseController.offerId != null) {
+            InterventionJournal.add(this, responseController.offerId ?: "-", "무응답 타이머 연장 · $reason")
+        }
+    }
     override fun onDestroy() {
+        if (instanceRef?.get() === this) instanceRef = null
         closingCause = "표시 중단 · 서비스 종료"
         if (JevFeature.available()) jev.stop()
         dismissJevFeedback(); jevUiScope.cancel()
@@ -499,6 +603,7 @@ class CoachingMonitorService : Service() {
         YoutubeProbe.coachingObservation = false
         running = false; handler.removeCallbacksAndMessages(null); removeOverlay(); nm.cancel(7102)
         if (receiverRegistered) { unregisterReceiver(receiver); receiverRegistered = false }
+        com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this).stop()
         val status = com.example.itv.composition.CoachingAccess.status(this)
         if (!status.contains("실패") && !status.contains("해제")) com.example.itv.composition.CoachingAccess.state(this, "중지됨")
         publishDiagnostics()

@@ -41,7 +41,7 @@ class CompanionPreviewActivity:Activity() {
         val scene=when(mode){
             "retry"->factory.retryOffer{title,_->choose(title,true)}
             "complete"->factory.completion{}
-            else->factory.offer{title,_->choose(title,false)}
+            else->factory.offer({title,_->choose(title,false)}, listOf("취침 목표 시간보다 15분 지났어!", "주변이 어두운데 화면을 보고 있어!", "쉬지 않고 20분 넘게 영상을 보고 있어!"))
         }
         current=scene.first;factory.attachPreview(scene.first,scene.second)
         if(mode=="complete")handler.postDelayed({clear()},10_000L)
@@ -55,7 +55,7 @@ class CompanionPreviewActivity:Activity() {
             if(current===root) {
                 clear()
                 // Test-only deadline simulation; no service/history/database changes.
-                if(title=="쉬기")handler.postDelayed({show("retry")},15_000L)
+                if(title=="쉬기")handler.postDelayed({show("retry")},com.example.itv.domain.coaching.TestCoachingPolicy.MISSION_START_MS)
             }
         }
     }

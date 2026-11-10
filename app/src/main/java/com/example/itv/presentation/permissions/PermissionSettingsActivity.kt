@@ -254,7 +254,7 @@ item {
                                         DevCard("권한 요약") {
                                             Text("수집 동의 ${permissionText(consent)} · 사용정보 ${permissionText(usage)}")
                                             Text("오버레이 ${permissionText(overlay)} · 제안 알림 ${permissionText(notifications)}")
-                                            Text("접근성 연결 ${permissionText(guardConnected)} · 자동 개입 ${if (autoEnabled) "켜짐" else "꺼짐"}")
+                                            Text("접근성 연결 ${permissionText(guardConnected)} · 테스트 모드 ${if (autoEnabled) "켜짐" else "꺼짐"}")
                                             TextButton(onClick = { selectedPage = 1 }) { Text("권한 관리 열기") }
                                         }
 
@@ -262,14 +262,14 @@ item {
                                     }
                                     1 -> {item {
 
-                                        DevCard("강아지 자동 개입 · 개발용") {
+                                        DevCard("테스트 모드") {
                                             Row {
-                                                Text(if (autoEnabled) "켜짐" else "꺼짐", Modifier.weight(1f))
+                                                Text(if (autoEnabled) "켜짐 (빠른 확인 수치)" else "꺼짐 (Jev 개입 설정 사용)", Modifier.weight(1f))
                                                 Switch(checked = autoEnabled, enabled = !screenState.loading, onCheckedChange = {
                                                     settingsService.setAutoEnabled(it)
                                                 })
                                             }
-                                            Text("이 기기의 테스트 코칭 실행 스위치입니다. Room의 사용자별 정식 코칭 설정과는 별개입니다. 기존 누적 사용·휴식·전환 대기 규칙을 유지하며, 끄기는 모든 기록의 일괄 중지를 뜻하지 않습니다.")
+                                            Text("테스트 모드를 켜면 30초 시청 개입 · 무응답 10초 · 나중에 30초 뒤 재판단 · 10초 내 15초 휴식으로 빠르게 동작합니다. 테스트 모드를 끄고 Jev 개입을 켜면 무응답 45초 · 나중에 5분 · 10초 내 30초 휴식으로 동작합니다.")
                                         }
 
 }
@@ -310,6 +310,16 @@ item {
 }
                                     }
                                     2 -> {item {
+                                        DevCard("테스트 모드") {
+                                            Row {
+                                                Text(if (autoEnabled) "켜짐 (30초 개입 · 10초 무응답 · 30초 재판단 · 15초 휴식)" else "꺼짐 (Jev 개입 시 45초 무응답 · 5분 재판단 · 30초 휴식)", Modifier.weight(1f))
+                                                Switch(checked = autoEnabled, enabled = !screenState.loading, onCheckedChange = {
+                                                    settingsService.setAutoEnabled(it)
+                                                })
+                                            }
+                                        }
+
+                                        AmbientLightBrightnessTestCard()
 
                                         Text("캐릭터 · 구조 테스트", style = MaterialTheme.typography.titleLarge)
                                         Button(onClick = {
@@ -352,14 +362,15 @@ item {
                                                 val pending = (missionCounts.assigned - missionCounts.success - missionCounts.failed - missionCounts.interrupted).coerceAtLeast(0L)
                                                 Text("진행 중/결과 미확정 ${pending}회")
                                                 Text("성공률 = 성공 ÷ 전체 부여 × 100. 진행 중·관측 중단도 부여 횟수에 포함됩니다.")
-                                                Text("15초 안에 화면을 끄기 시작하지 않으면 실패. 시작 후 연속 30초 꺼짐이 완료 조건입니다.")
+                                                Text("테스트 모드: 10초 내 화면 끄기 시작, 연속 15초 꺼짐 시 완료 (무응답 10초 · 나중에 30초)")
+                                                Text("Jev 개입 모드: 10초 내 화면 끄기 시작, 연속 30초 꺼짐 시 완료 (무응답 45초 · 나중에 5분)")
                                                 Text("이 수정본 적용 이후부터 누적합니다. 아래 최근 이벤트 삭제와는 별도로 보존합니다.", style = MaterialTheme.typography.bodySmall)
                                             }
                                         }
                                         item {
                                             Text("개입 결과 · 최근 200건", style = MaterialTheme.typography.titleLarge)
                                             Text("표시 성공·선택·무응답·휴식 미션을 시간순으로 확인합니다. 같은 제안 ID로 연결됩니다.")
-                                            Text("무응답: 표시 후 10초 동안 선택 없음. 화면 꺼짐/보호로 먼저 닫히면 표시 중단으로 구분합니다.")
+                                            Text("무응답: 테스트 모드 10초 / Jev 개입 모드 45초 동안 선택 없음. 화면 꺼짐/보호로 먼저 닫히면 표시 중단으로 구분합니다.")
                                         }
                                         item {
                                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -589,4 +600,93 @@ private fun SwipeDynamicsDevSection() {
         }
     }
 }
+
+@Composable
+private fun AmbientLightBrightnessTestCard() {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val tracker = remember(context) { com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(context) }
+    val snapshot by tracker.snapshot.collectAsState()
+
+    DisposableEffect(tracker) {
+        tracker.start()
+        onDispose { tracker.stop() }
+    }
+
+    DevCard("조도 센서 · 근접 센서 · 화면 밝기 측정") {
+        Text(
+            text = "• 상태 감별: ${snapshot.stateLabel}",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+            color = when {
+                snapshot.isOccluded -> MaterialTheme.colorScheme.error
+                snapshot.stateLabel.contains("취침") -> MaterialTheme.colorScheme.primary
+                else -> MaterialTheme.colorScheme.onSurface
+            }
+        )
+        Text(
+            text = snapshot.explanation,
+            style = MaterialTheme.typography.bodyMedium
+        )
+        HorizontalDivider(Modifier.padding(vertical = 6.dp))
+        Text(
+            text = "• 센서 절전 상태: ${if (snapshot.isSampling) "측정 중 (샘플링 윈도우 수신 중...)" else "절전 대기 중 (센서 완전 해제됨)"}",
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+            color = if (snapshot.isSampling) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            text = "• 최근 감지 계기: ${snapshot.lastTriggerReason}",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        HorizontalDivider(Modifier.padding(vertical = 6.dp))
+        Text(
+            text = "• 조도 센서(주변 밝기): ${snapshot.lux?.let { "%.1f lux".format(it) } ?: "센서 대기/없음"}",
+            style = MaterialTheme.typography.bodyMedium
+        )
+        val proximityState = when {
+            snapshot.proximityDistanceCm == null -> "센서 대기/없음"
+            snapshot.isOccluded -> "${snapshot.proximityDistanceCm} cm [손/물체 가림 의심!]"
+            snapshot.isNear -> "${snapshot.proximityDistanceCm} cm [상단 근접 상태]"
+            else -> "${snapshot.proximityDistanceCm} cm [원거리 / 가림 없음]"
+        }
+        Text(
+            text = "• 근접 센서(상단 거리): $proximityState",
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = if (snapshot.isOccluded) androidx.compose.ui.text.font.FontWeight.Bold else androidx.compose.ui.text.font.FontWeight.Normal,
+            color = if (snapshot.isOccluded) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+        )
+        val brightnessPct = snapshot.screenBrightness?.let { (it / 255.0 * 100).toInt() }
+        Text(
+            text = "• 화면 밝기: ${snapshot.screenBrightness?.let { "$it / 255 ($brightnessPct%)" } ?: "조회 불가"}",
+            style = MaterialTheme.typography.bodyMedium
+        )
+        Text(
+            text = "• 야간 화면 모드(다크 모드): ${if (snapshot.nightModeActive) "적용 중 (다크 모드 ON)" else "미적용 (라이트 모드)"}",
+            style = MaterialTheme.typography.bodyMedium
+        )
+        Text(
+            text = "※ 배터리 절전을 위해 상시 스트리밍하지 않으며, 화면 켜짐 · 앱 전환 · 밝기 조절 · 5분 주기 시에만 약 3초간 센서를 켜서 샘플링 후 자동 해제(절전)합니다.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            text = "※ 스마트폰 화면을 끄면 센서는 즉시 완전 해제되어 배터리를 전혀 소모하지 않습니다.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            text = "※ 안드로이드 기기 근접 센서는 스마트폰 상단(수화부)을 손으로 덮으면 0.0cm(근접), 손을 떼면 최대치(5.0cm)로 동작하는 2단계 센서입니다.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        OutlinedButton(
+            onClick = { tracker.refresh() },
+            modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
+        ) {
+            Text("센서 및 화면 밝기 새로고침 (3초간 샘플링)")
+        }
+    }
+}
+
 

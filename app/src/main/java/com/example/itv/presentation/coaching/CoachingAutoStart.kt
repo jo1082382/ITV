@@ -4,7 +4,15 @@ import android.content.Context
 import android.content.Intent
 
 internal object CoachingAutoStart {
-    fun enabled(c: Context) = com.example.itv.composition.CoachingAccess.developerAutoEnabled(c)
+    fun testModeEnabled(c: Context): Boolean =
+        com.example.itv.composition.CoachingAccess.developerAutoEnabled(c)
+
+    fun jevEnabled(c: Context): Boolean =
+        com.example.itv.infrastructure.jev.JevFeature.available() &&
+            com.example.itv.infrastructure.jev.JevRuntime.get(c).enabled
+
+    fun enabled(c: Context): Boolean = testModeEnabled(c) || jevEnabled(c)
+
     fun sync(c: Context) {
         com.example.itv.composition.CoachingAccess.channels(c)
         val intent = Intent(c, CoachingMonitorService::class.java)

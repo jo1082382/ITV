@@ -44,16 +44,23 @@ export function createWorker({ upstreamFetch = globalThis.fetch, now = Date.now,
       returns_in_last_10_minutes:c.returns_10m,returns_observation_coverage_seconds:c.returns_observed_seconds,bedtime_goal_enabled:c.bedtime_goal_enabled,
       minutes_after_bedtime_goal:c.bedtime_passed_minutes
     };
+    if (c.personal_avg_session_minutes !== undefined) state.personal_avg_session_minutes = c.personal_avg_session_minutes;
     if (c.session_vs_personal_avg_ratio !== undefined) state.session_vs_personal_avg_ratio = c.session_vs_personal_avg_ratio;
+    if (c.today_shortform_minutes !== undefined) state.today_shortform_minutes = c.today_shortform_minutes;
+    if (c.avg_7d_daily_shortform_minutes !== undefined) state.avg_7d_daily_shortform_minutes = c.avg_7d_daily_shortform_minutes;
     if (c.today_vs_7d_avg_ratio !== undefined) state.today_vs_7d_avg_ratio = c.today_vs_7d_avg_ratio;
     if (c.effective_spm_1m !== undefined) state.effective_swipes_per_minute_1m = c.effective_spm_1m;
+    if (c.effective_session_spm !== undefined) state.effective_session_swipes_per_minute = c.effective_session_spm;
+    if (c.personal_avg_spm !== undefined) state.personal_avg_swipes_per_minute = c.personal_avg_spm;
+    if (c.current_vs_personal_avg_spm_ratio !== undefined) state.current_vs_personal_avg_spm_ratio = c.current_vs_personal_avg_spm_ratio;
     if (c.swipe_accel_1m !== undefined) state.swipe_acceleration_1m = c.swipe_accel_1m;
     if (c.fast_swipe_streak !== undefined) state.consecutive_fast_swipe_streak = c.fast_swipe_streak;
+    if (c.swipe_overheated !== undefined) state.swipe_overheated = c.swipe_overheated;
     const payload = {
      model:env.JEV_MODEL || "jev-1.14.0",
      state,
      questions:{intervene:{type:"noul",
-      instructions:"Based only on these reported short-form viewing measures, would offering an optional short break now be appropriate? Consider sustained viewing, repeated app returns, and an enabled bedtime goal, as well as optional personal usage ratios and swipe-speed dynamics when present. A disabled bedtime goal provides no evidence. This is appropriateness of timing, not a diagnosis or a prediction that the user will comply. Prefer no when the evidence is insufficient.",
+      instructions:"Based only on these reported short-form viewing measures, would offering an optional short break now be appropriate? Consider sustained viewing, repeated app returns, and an enabled bedtime goal, as well as optional personal usage baselines/ratios (current session vs personal average session, today's cumulative short-form usage vs 7-day daily average) and swipe-speed dynamics (ad-filtered effective swipes per minute, session and personal average SPM, swipe acceleration, consecutive fast-swipe streak, and swipe overheat state) when present. A disabled bedtime goal provides no evidence. This is appropriateness of timing, not a diagnosis or a prediction that the user will comply. Prefer no when the evidence is insufficient.",
       criteria:{true:"The observed pattern supports a timely, voluntary break suggestion.",false:"The pattern is brief or insufficient to justify a break suggestion now."}}}
     };
     let outcome;

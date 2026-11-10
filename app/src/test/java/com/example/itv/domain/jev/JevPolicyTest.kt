@@ -121,4 +121,21 @@ class JevPolicyTest {
         assertEquals(0.80, JevCandidatePolicy.effectiveThreshold(disabledSettings, overheated), 0.0001)
         assertTrue(JevCandidatePolicy.reasons(overheated, disabledSettings).isEmpty())
     }
+    @Test fun resetSessionClearsAccumulatedTotalsAndStartsFreshSession() {
+        var seq=0
+        val tracker=JevSessionTracker {"session-${++seq}"}
+        tracker.observe(0,JevSettings.INSTAGRAM,JevSettings.INSTAGRAM)
+        tracker.observe(1000,JevSettings.INSTAGRAM,JevSettings.INSTAGRAM)
+        assertEquals("session-1",tracker.states.getValue(JevSettings.INSTAGRAM).id)
+        assertEquals(1000L,tracker.states.getValue(JevSettings.INSTAGRAM).totalMs)
+
+        tracker.resetSession(JevSettings.INSTAGRAM)
+        tracker.observe(700_000,JevSettings.INSTAGRAM,JevSettings.INSTAGRAM)
+        tracker.observe(701_000,JevSettings.INSTAGRAM,JevSettings.INSTAGRAM)
+        val afterReset=tracker.states.getValue(JevSettings.INSTAGRAM)
+        assertNotEquals("session-1",afterReset.id)
+        assertEquals(1000L,afterReset.totalMs)
+        assertEquals(1000L,afterReset.continuousMs)
+        assertEquals(0,afterReset.returns.size)
+    }
 }

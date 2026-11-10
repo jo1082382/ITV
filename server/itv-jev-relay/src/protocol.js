@@ -62,6 +62,9 @@ export function optionalMetric(value, min = 0, max = 1000, integer = false) {
   if (!Number.isFinite(value) || value < min || value > max || (integer && !Number.isInteger(value))) return undefined;
   return value;
 }
+export function optionalBoolean(value) {
+  return typeof value === "boolean" ? value : undefined;
+}
 export function evaluation(data, uuid) {
   const who = identity(data, uuid);
   const bedtimeEnabled = data.bedtime_goal_enabled !== false;
@@ -79,16 +82,30 @@ export function evaluation(data, uuid) {
     throw new HttpError(400, "INVALID_SETTINGS");
   const context = { session_minutes: minutes, continuous_minutes: continuous, returns_10m: returns,
     bedtime_passed_minutes: bedtime, bedtime_goal_enabled: bedtimeEnabled, returns_observed_seconds: coverage };
+  const personalAvgSession = optionalMetric(data.personal_avg_session_minutes, 0, 1440);
   const sessionRatio = optionalMetric(data.session_vs_personal_avg_ratio, 0, 100);
+  const todayShortform = optionalMetric(data.today_shortform_minutes, 0, 1440);
+  const avg7dShortform = optionalMetric(data.avg_7d_daily_shortform_minutes, 0, 1440);
   const today7dRatio = optionalMetric(data.today_vs_7d_avg_ratio, 0, 100);
   const effectiveSpm = optionalMetric(data.effective_spm_1m, 0, 600);
+  const effectiveSessionSpm = optionalMetric(data.effective_session_spm, 0, 600);
+  const personalAvgSpm = optionalMetric(data.personal_avg_spm, 0, 600);
+  const spmRatio = optionalMetric(data.current_vs_personal_avg_spm_ratio, 0, 100);
   const swipeAccel = optionalMetric(data.swipe_accel_1m, -600, 600);
   const fastStreak = optionalMetric(data.fast_swipe_streak, 0, 1000, true);
+  const swipeOverheated = optionalBoolean(data.swipe_overheated);
+  if (personalAvgSession !== undefined) context.personal_avg_session_minutes = personalAvgSession;
   if (sessionRatio !== undefined) context.session_vs_personal_avg_ratio = sessionRatio;
+  if (todayShortform !== undefined) context.today_shortform_minutes = todayShortform;
+  if (avg7dShortform !== undefined) context.avg_7d_daily_shortform_minutes = avg7dShortform;
   if (today7dRatio !== undefined) context.today_vs_7d_avg_ratio = today7dRatio;
   if (effectiveSpm !== undefined) context.effective_spm_1m = effectiveSpm;
+  if (effectiveSessionSpm !== undefined) context.effective_session_spm = effectiveSessionSpm;
+  if (personalAvgSpm !== undefined) context.personal_avg_spm = personalAvgSpm;
+  if (spmRatio !== undefined) context.current_vs_personal_avg_spm_ratio = spmRatio;
   if (swipeAccel !== undefined) context.swipe_accel_1m = swipeAccel;
   if (fastStreak !== undefined) context.fast_swipe_streak = fastStreak;
+  if (swipeOverheated !== undefined) context.swipe_overheated = swipeOverheated;
   return { ...who, context,
     settings, trigger: text(data.trigger_reason, "trigger_reason", 200, true),
     packageName: text(data.package_name, "package_name", 100, true),

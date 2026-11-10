@@ -16,6 +16,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import org.json.JSONObject
 import java.time.Duration
+import java.time.LocalDate
 import java.time.ZonedDateTime
 import java.util.UUID
 import kotlin.time.Duration.Companion.seconds
@@ -25,7 +26,14 @@ object JevObservationHub {
         private set
     @Volatile var checkedAt: Long=0
         private set
-    fun foreground(pkg: String?) { foregroundPackage=pkg;checkedAt=SystemClock.elapsedRealtime() }
+    fun foreground(pkg: String?) {
+        val changed = foregroundPackage != pkg
+        foregroundPackage = pkg
+        checkedAt = SystemClock.elapsedRealtime()
+        if (changed) {
+            com.example.itv.infrastructure.observation.LightAndBrightnessTracker.notifyAppSwitched()
+        }
+    }
 }
 data class JevLiveState(val status: String="Jev 꺼짐",val context: JevContext?=null,val probability: Double?=null,val pending: Boolean=false)
 
@@ -41,6 +49,8 @@ class JevRuntime private constructor(context: Context) {
     private data class Attempt(var at: Long=0,var total: Long=0,var asked: Boolean=false,var suppressedSession: String?=null,
                                var deferUntil: Long=0,var lastSession: String?=null)
     private val controls=mutableMapOf<String,Attempt>()
+    private val lastActiveWallMs=mutableMapOf<String,Long>()
+    private val lastActiveDate=mutableMapOf<String,String>()
     private data class Approval(val trial: JevTrial,val settings: JevSettings,val captured: JevContext,val requestedAt: Long)
     private var approval: Approval?=null
     private var displayedApproval: Approval?=null
@@ -66,16 +76,30 @@ class JevRuntime private constructor(context: Context) {
             withContext(Dispatchers.IO) {
                 val json=runCatching { JSONObject(store.readControl("runtime") ?: "{}") }.getOrDefault(JSONObject())
                 withContext(Dispatchers.Main.immediate) {
+                    val nowWall=System.currentTimeMillis()
+                    val todayStr=LocalDate.now().toString()
                     for(pkg in listOf(JevSettings.INSTAGRAM,JevSettings.YOUTUBE)) {
                         val a=json.optJSONObject(pkg) ?: continue
-                        tracker.restore(pkg,a.optString("session",UUID.randomUUID().toString()),a.optLong("total"),a.optBoolean("entered"))
-                        val sameBoot=bootId>=0 && json.optInt("boot",-2)==bootId
-                        controls[pkg]=Attempt(if(sameBoot)a.optLong("at") else SystemClock.elapsedRealtime(),a.optLong("attemptTotal"),
-                            a.optBoolean("asked"),a.optString("suppressed").takeIf { it.isNotEmpty() },
-                            if(sameBoot)a.optLong("deferUntil") else if(a.optLong("deferUntil")>0)Long.MAX_VALUE else 0,
-                            a.optString("attemptSession",a.optString("session")))
+                        val savedDate=a.optString("lastActiveDate","")
+                        val savedWall=a.optLong("lastActiveWallMs",0L)
+                        val activeAcrossMidnight=savedWall>0L && (nowWall-savedWall) in 0L until 15_000L
+                        val sessionStillRecent=savedWall>0L && (nowWall-savedWall) in 0L until 600_000L &&
+                            (savedDate==todayStr || activeAcrossMidnight)
+                        if(sessionStillRecent) {
+                            lastActiveDate[pkg]=todayStr
+                            lastActiveWallMs[pkg]=savedWall
+                            tracker.restore(pkg,a.optString("session",UUID.randomUUID().toString()),a.optLong("total"),a.optBoolean("entered"))
+                            val sameBoot=bootId>=0 && json.optInt("boot",-2)==bootId
+                            controls[pkg]=Attempt(if(sameBoot)a.optLong("at") else SystemClock.elapsedRealtime(),a.optLong("attemptTotal"),
+                                a.optBoolean("asked"),a.optString("suppressed").takeIf { it.isNotEmpty() },
+                                if(sameBoot)a.optLong("deferUntil") else if(a.optLong("deferUntil")>0)Long.MAX_VALUE else 0,
+                                a.optString("attemptSession",a.optString("session")))
+                        } else {
+                            tracker.resetSession(pkg)
+                        }
                     }
                     loaded=true
+                    persist()
                 }
             }
         }
@@ -112,17 +136,32 @@ class JevRuntime private constructor(context: Context) {
         val personal = ShortformPersonalStatsStore.quickContextMetrics(
             context = appContext,
             pkg = base.packageName,
-            currentSessionMs = base.sessionMs,
             currentContinuousMs = base.continuousMs
         )
         val shortformApp = if (base.packageName == JevSettings.INSTAGRAM) ShortformApp.INSTAGRAM else ShortformApp.YOUTUBE
         val swipeSnap = SwipeDynamicsTracker.snapshot(shortformApp, nowElapsed, base.observedAt)
+        val effSpm1m = swipeSnap.effectiveSpm1m.takeIf { swipeSnap.totalSwipesInRun > 0 || it > 0.0 }
+        val effSessionSpm = swipeSnap.effectiveSessionSpm.takeIf { swipeSnap.totalSwipesInRun > 0 || it > 0.0 }
+        val personalSpm = personal.personalAvgSpm?.takeIf { it > 0.0 }
+        val spmRatio = if (effSpm1m != null && personalSpm != null && personalSpm >= 1.0) {
+            kotlin.math.round((effSpm1m / personalSpm) * 100.0) / 100.0
+        } else null
+        val accel1m = swipeSnap.effectiveAccel1m.takeIf { swipeSnap.totalSwipesInRun > 0 || it != 0.0 }
+        val streak = swipeSnap.currentFastStreak
+        val overheated = (streak >= 3 && (effSpm1m ?: 0.0) >= 10.0) || ((effSpm1m ?: 0.0) >= 12.0 && (accel1m ?: 0.0) >= 3.0)
         return base.copy(
+            personalAvgSessionMinutes = personal.avgSessionMinutes,
             sessionVsAvgRatio = personal.sessionVsAvgRatio,
+            todayShortformMinutes = personal.todayShortformMinutes,
+            avg7dDailyMinutes = personal.avg7dDailyMinutes,
             todayVs7dRatio = personal.todayVs7dRatio,
-            effectiveSpm1m = swipeSnap.effectiveSpm1m.takeIf { swipeSnap.totalSwipesInRun > 0 || it > 0.0 },
-            swipeAccel1m = swipeSnap.effectiveAccel1m.takeIf { swipeSnap.totalSwipesInRun > 0 || it != 0.0 },
-            fastSwipeStreak = swipeSnap.currentFastStreak
+            effectiveSpm1m = effSpm1m,
+            effectiveSessionSpm = effSessionSpm,
+            personalAvgSpm = personalSpm,
+            currentVsPersonalSpmRatio = spmRatio,
+            swipeAccel1m = accel1m,
+            fastSwipeStreak = streak,
+            swipeOverheated = overheated
         )
     }
     fun tick(unlocked: Boolean, missionActive: Boolean, offerVisible: Boolean) {
@@ -130,6 +169,8 @@ class JevRuntime private constructor(context: Context) {
         if(!enabled || !store.ready || !loaded)return
         val s=store.settings.value
         val now=SystemClock.elapsedRealtime()
+        val nowWall=System.currentTimeMillis()
+        val todayStr=LocalDate.now().toString()
         if(revision!=s.revision) {
             approval?.let { suppress(it.trial,"SETTINGS_CHANGED") };approval=null
             if(revision!=-1L) {
@@ -138,6 +179,29 @@ class JevRuntime private constructor(context: Context) {
             revision=s.revision;safeSince=null
         }
         val pkg=if(!unlocked)"LOCKED" else JevObservationHub.foregroundPackage.takeIf { now-JevObservationHub.checkedAt in 0..1500 }
+        for(targetPkg in listOf(JevSettings.INSTAGRAM,JevSettings.YOUTUBE)) {
+            val prevDate=lastActiveDate[targetPkg]
+            val prevWall=lastActiveWallMs[targetPkg] ?: 0L
+            val currentlyActive=(unlocked && pkg==targetPkg) ||
+                ((tracker.states[targetPkg]?.continuousMs ?: 0L)>0L) ||
+                (prevWall>0L && (nowWall-prevWall) in 0L until 15_000L)
+            val dateChangedWhileAway=prevDate!=null && prevDate!=todayStr && !currentlyActive
+            val inactiveExpired=prevWall>0L && (nowWall-prevWall>=600_000L || nowWall<prevWall)
+            if(dateChangedWhileAway || inactiveExpired) {
+                tracker.resetSession(targetPkg)
+                controls.remove(targetPkg)
+                lastActiveDate.remove(targetPkg)
+                lastActiveWallMs.remove(targetPkg)
+                if(lastObservedContext?.packageName==targetPkg)lastObservedContext=null
+            } else if(prevDate!=null && prevDate!=todayStr) {
+                // Actively watching across 00:00 midnight: preserve the ongoing session without resetting
+                lastActiveDate[targetPkg]=todayStr
+            }
+        }
+        if(unlocked && pkg!=null && s.targets(pkg)) {
+            lastActiveWallMs[pkg]=nowWall
+            lastActiveDate[pkg]=todayStr
+        }
         val screen=when(pkg) {
             JevSettings.INSTAGRAM -> ReelsProbe.screenState()
             JevSettings.YOUTUBE -> YoutubeProbe.screenState()
@@ -148,7 +212,7 @@ class JevRuntime private constructor(context: Context) {
         val effectivePkg=if(guard!=null && pkg!="com.example.itv")"GUARD_BLOCKED" else pkg
         tracker.observe(now,effectivePkg,confirmed)
         val sameAppSafe=pkg!=null && s.targets(pkg) && guard==null && unlocked && screen>=0
-        val c=pkg?.takeIf(s::targets)?.let { tracker.context(it,now,System.currentTimeMillis(),bedtime(s)) }
+        val c=pkg?.takeIf(s::targets)?.let { tracker.context(it,now,nowWall,bedtime(s)) }
             ?.let { enrichContext(it, now) }
             ?.let { if(confirmed==pkg)it else it.copy(quality="INSUFFICIENT") }
         if(c?.quality=="VALID")lastObservedContext=c
@@ -261,6 +325,73 @@ class JevRuntime private constructor(context: Context) {
             JevCandidatePolicy.canContinueDisplayed(displayed.settings.revision,store.settings.value,
                 displayed.captured,currentContext)
     }
+
+    fun displayBlockingReason(): String? {
+        val s = store.settings.value
+        val now = SystemClock.elapsedRealtime()
+
+        if (com.example.itv.presentation.coaching.CoachingAutoStart.testModeEnabled(appContext)) {
+            return "테스트 모드가 켜져 있어 Jev 대신 고정값 규칙으로 개입함 (설정에서 테스트 모드 끄기 필요)"
+        }
+        if (!com.example.itv.presentation.coaching.CoachingAutoStart.enabled(appContext)) {
+            return "코칭 서비스가 꺼져 있음 (서비스 켜기 필요)"
+        }
+        if (!s.actualIntervention) {
+            return "‘확률 통과 시 실제 개입’ 설정이 꺼져 있어 판단만 기록됨 (설정에서 켜기 필요)"
+        }
+        if (!enabled) {
+            return "Jev 자동 관측·판단 설정이 꺼져 있음"
+        }
+        if (!android.provider.Settings.canDrawOverlays(appContext)) {
+            return "‘다른 앱 위에 표시’ 권한이 허용되지 않음"
+        }
+        val a = approval
+        if (a == null) {
+            val lastReason = lastSuppressionReason
+            return when (lastReason) {
+                "OBSERVE_ONLY" -> "‘확률 통과 시 실제 개입’ 설정이 꺼져 있어 개입이 보류됨 (설정에서 켜기 필요)"
+                "STALE_CONTEXT_OR_SETTINGS" -> "설정 변경 또는 앱 전환으로 이전 확률이 만료됨"
+                "BELOW_PROBABILITY_THRESHOLD" -> "개입 기준 확률 미달"
+                "MONITOR_STOPPED" -> "모니터링 서비스 중지로 승인 취소됨"
+                else -> null
+            }
+        }
+        val pkg = a.captured.packageName
+        val control = controls[pkg]
+        val probe = when (pkg) {
+            JevSettings.INSTAGRAM -> ReelsProbe.screenState()
+            JevSettings.YOUTUBE -> YoutubeProbe.screenState()
+            else -> 0
+        }
+        val sameForeground = JevObservationHub.foregroundPackage == pkg && now - JevObservationHub.checkedAt in 0..1500
+        if (!sameForeground) {
+            return "현재 화면이 대상 앱(${if (pkg == JevSettings.YOUTUBE) "YouTube" else "Instagram"})이 아님"
+        }
+        if (control?.suppressedSession == a.captured.sessionId) {
+            return "현재 사용 구간에서 이미 사용자가 응답하여 재개입 보류 중"
+        }
+        if ((control?.deferUntil ?: 0) > now) {
+            val remainSec = ((control?.deferUntil ?: 0) - now) / 1000
+            return "‘나중에’를 선택하여 일시 보류 중 (남은 시간: ${remainSec}초)"
+        }
+        val block = WritingGuard.blockReason()
+        if (block != null) {
+            return "글 작성/키보드 활성화로 개입 보류 ($block)"
+        }
+        val safeAt = safeSince
+        if (safeAt == null || now - safeAt < 5000) {
+            return "화면 안전 상태 확인 중 (최대 5초 대기)"
+        }
+        if (probe == 1 && (now - a.requestedAt < 15_000L)) {
+            val remainSec = (15_000L - (now - a.requestedAt)) / 1000L
+            return "다음 숏폼 전환 대기 중 (시청 방해를 줄이기 위해 다음 영상으로 넘기거나 ${remainSec}초 대기 필요)"
+        }
+        if (active != null) {
+            return "이미 화면에 개입 캐릭터가 표시 중"
+        }
+        return null
+    }
+
     fun shown() {
         val a=approval ?: return
         active=a.trial;displayedApproval=a;approval=null
@@ -275,7 +406,7 @@ class JevRuntime private constructor(context: Context) {
         val pkg=JSONObject(trial.payload).optString("package_name")
         val control=controls.getOrPut(pkg){Attempt()}
         val session=JSONObject(trial.payload).optString("session_id")
-        if(action in setOf("LATER","NO_RESPONSE")) control.deferUntil=SystemClock.elapsedRealtime()+store.settings.value.laterSeconds*1000L
+        if(action in setOf("LATER","NO_RESPONSE")) control.deferUntil=SystemClock.elapsedRealtime()+com.example.itv.domain.coaching.TestCoachingPolicy.JEV_REMINDER_MS
         else if(action in setOf("REST","DISMISS"))control.suppressedSession=session
         persist()
         val receipt=displayReceipt
@@ -307,9 +438,22 @@ class JevRuntime private constructor(context: Context) {
             }.onFailure { store.notice.value="미션 기록 저장 실패" }
         }
     }
+    @Volatile var lastSuppressionReason: String? = null
+        private set
+    @Volatile var lastSuppressionAt: Long = 0L
+        private set
+
     private fun suppress(trial: JevTrial,reason: String) {
-        scope.launch { runCatching { repository.event(trial,"suppressed",JSONObject().put("reason",reason)) }
-            .onFailure { store.notice.value="보류 기록 저장 실패" } }
+        lastSuppressionReason = reason
+        lastSuppressionAt = System.currentTimeMillis()
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    store.dao.saveTrial(trial.copy(state = "SUPPRESSED:$reason"))
+                    repository.event(trial, "suppressed", JSONObject().put("reason", reason))
+                }.onFailure { store.notice.value = "보류 기록 저장 실패" }
+            }
+        }
     }
     private fun persist() {
         savedAt=SystemClock.elapsedRealtime()
@@ -317,6 +461,7 @@ class JevRuntime private constructor(context: Context) {
         for((pkg,frame) in tracker.states) {
             val c=controls[pkg] ?: Attempt()
             json.put(pkg,JSONObject().put("session",frame.id).put("total",frame.totalMs).put("entered",frame.entered)
+                .put("lastActiveWallMs",lastActiveWallMs[pkg] ?: 0L).put("lastActiveDate",lastActiveDate[pkg] ?: "")
                 .put("at",c.at).put("attemptTotal",c.total).put("asked",c.asked)
                 .put("suppressed",c.suppressedSession ?: "").put("deferUntil",c.deferUntil).put("attemptSession",c.lastSession ?: frame.id))
         }
@@ -330,7 +475,7 @@ class JevRuntime private constructor(context: Context) {
     /** Explicit operator action for a test run, never automatic on restart or settings edits. */
     fun resetTestObservation() {
         approval?.let { suppress(it.trial,"OPERATOR_RESET") };approval=null
-        tracker.states.clear();controls.clear();safeSince=null;lastObservedContext=null;persist()
+        tracker.states.clear();controls.clear();lastActiveWallMs.clear();lastActiveDate.clear();safeSince=null;lastObservedContext=null;persist()
         mutableState.value=JevLiveState("테스트 관측 상태 초기화 · 재관측 필요")
     }
     companion object {

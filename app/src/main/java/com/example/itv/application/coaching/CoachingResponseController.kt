@@ -12,22 +12,30 @@ internal class CoachingResponseController(private val journal: CoachingJournal) 
     fun finish(outcome: String) {
         offerId?.let { journal.add(it, outcome) }; offerId = null; deadline = 0L
     }
-    fun choose(title: String, now: Long): ResponseOutcome {
+    fun choose(
+        title: String,
+        now: Long,
+        reminderMs: Long = TestCoachingPolicy.REMINDER_MS
+    ): ResponseOutcome {
         if (offerId == null) return ResponseOutcome.IGNORED
         if (now >= deadline) return ResponseOutcome.EXPIRED
         offerId?.let { journal.structured(it, when(title) { "쉬기" -> "ACCEPTED"; "나중에" -> "LATER"; else -> "DISMISSED" }) }
         finish("선택 · $title")
         return if (title == "나중에") {
-            offered = false; retryAt = now + TestCoachingPolicy.REMINDER_MS
+            offered = false; retryAt = now + reminderMs
             ResponseOutcome.LATER
         } else {
             suppressed = true; retryAt = null
             if (title == "쉬기") ResponseOutcome.REST else ResponseOutcome.DISMISS
         }
     }
-    fun timeout(now: Long) {
+    fun timeout(
+        now: Long,
+        responseMs: Long = TestCoachingPolicy.RESPONSE_MS,
+        reminderMs: Long = TestCoachingPolicy.REMINDER_MS
+    ) {
         offerId?.let { journal.structured(it,"NO_RESPONSE") }
-        finish("무응답 · ${TestCoachingPolicy.RESPONSE_MS / 1000L}초 동안 선택 없음")
-        offered = false; retryAt = now + TestCoachingPolicy.REMINDER_MS
+        finish("무응답 · ${responseMs / 1000L}초 동안 선택 없음")
+        offered = false; retryAt = now + reminderMs
     }
 }

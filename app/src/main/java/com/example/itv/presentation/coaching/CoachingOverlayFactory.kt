@@ -45,7 +45,12 @@ internal class CoachingOverlayFactory(private val context:Context,private val pr
     private val sessions=mutableMapOf<View,Session>()
     private val handler=Handler(Looper.getMainLooper())
     private fun dp(v:Int)=(v*context.resources.displayMetrics.density).toInt()
-    private inner class Session(val root:View,val welcome:Boolean,val choice:((String,String)->Unit)?) {
+    private inner class Session(
+        val root: View,
+        val welcome: Boolean,
+        val choice: ((String, String) -> Unit)?,
+        var reasons: List<String> = emptyList()
+    ) {
         val windows=mutableListOf<View>()
         var animator:ValueAnimator?=null
         var hold:Runnable?=null
@@ -62,6 +67,7 @@ internal class CoachingOverlayFactory(private val context:Context,private val pr
         var speechParams:WindowManager.LayoutParams?=null
         var reaction:Runnable?=null
         var reactionFinished:(()->Unit)?=null
+        var onReady:(()->Unit)?=null
         var fence:ImageView?=null
         var fenceParams:WindowManager.LayoutParams?=null
         lateinit var dog:ImageView
@@ -70,7 +76,8 @@ internal class CoachingOverlayFactory(private val context:Context,private val pr
         lateinit var house:Rect
         lateinit var cage:Rect
         var homeX=0;var homeY=0
-        fun cleanup(){stopped=true;bubbleFollow?.let{handler.removeCallbacks(it)};shake?.cancel();reaction?.let{handler.removeCallbacks(it)};reactionFinished=null;animator?.cancel();hold?.let{handler.removeCallbacks(it)};windows.toList().forEach{try{wm.removeView(it)}catch(_:Exception){}};windows.clear()}
+        var onInteraction: ((Boolean) -> Unit)? = null
+        fun cleanup(){stopped=true;onInteraction?.invoke(false);bubbleFollow?.let{handler.removeCallbacks(it)};shake?.cancel();reaction?.let{handler.removeCallbacks(it)};reactionFinished=null;onReady=null;animator?.cancel();hold?.let{handler.removeCallbacks(it)};windows.toList().forEach{try{wm.removeView(it)}catch(_:Exception){}};windows.clear()}
     }
     private fun params(w:Int,h:Int,x:Int,y:Int,touch:Boolean)=WindowManager.LayoutParams(w,h,
         WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -80,14 +87,18 @@ internal class CoachingOverlayFactory(private val context:Context,private val pr
         alpha=1f
     }
     private fun label(text:String)=TextView(context).apply {
-        this.text=text;textSize=17f;setTypeface(null,android.graphics.Typeface.BOLD);gravity=Gravity.CENTER;setTextColor(Color.rgb(18,25,16))
-        setPadding(dp(8),dp(6),dp(8),dp(6))
+        this.text=text;textSize=14f;setTypeface(null,android.graphics.Typeface.BOLD);gravity=Gravity.CENTER;setTextColor(Color.rgb(18,25,16))
+        setLineSpacing(dp(2).toFloat(), 1.15f)
         background=com.example.itv.presentation.character.PuppyBubbleDrawable()
-        setPadding(dp(23),dp(12),dp(23),dp(24))
+        setPadding(dp(20),dp(10),dp(20),dp(20))
     }
-    private fun root(welcome:Boolean,choice:((String,String)->Unit)?):Pair<LinearLayout,WindowManager.LayoutParams> {
+    private fun root(
+        welcome: Boolean,
+        choice: ((String, String) -> Unit)?,
+        reasons: List<String> = emptyList()
+    ): Pair<LinearLayout, WindowManager.LayoutParams> {
         val root=LinearLayout(context)
-        sessions[root]=Session(root,welcome,choice)
+        sessions[root]=Session(root,welcome,choice,reasons)
         root.addOnAttachStateChangeListener(object:View.OnAttachStateChangeListener {
             override fun onViewAttachedToWindow(v:View) {if(welcome) attachControls(v)}
             override fun onViewDetachedFromWindow(v:View){removeControls(v)}
@@ -99,15 +110,20 @@ internal class CoachingOverlayFactory(private val context:Context,private val pr
         sessions[result.first]?.retry=true
         return result
     }
-    fun offer(onChoice:(String,String)->Unit)=root(false,onChoice)
+    fun offer(
+        onChoice: (String, String) -> Unit,
+        reasons: List<String> = emptyList()
+    ) = root(false, onChoice, reasons)
     fun completion(onDismiss:()->Unit):Pair<LinearLayout,WindowManager.LayoutParams> {
         val result=root(true,null)
         sessions[result.first]?.onRewardDismiss=onDismiss
         return result
     }
-    fun attachControls(root:View) {
+    fun attachControls(root:View,onReady:(()->Unit)?=null,onInteraction:((Boolean)->Unit)?=null) {
         val s=sessions[root]?:return
         if(s.windows.isNotEmpty() || s.stopped)return
+        s.onReady=onReady
+        s.onInteraction=onInteraction
         val metrics=context.resources.displayMetrics
         val width=previewHost?.width?.takeIf{it>0} ?: metrics.widthPixels
         val height=previewHost?.height?.takeIf{it>0} ?: (metrics.heightPixels-dp(48))
@@ -128,7 +144,7 @@ internal class CoachingOverlayFactory(private val context:Context,private val pr
             s.speech.visibility=View.INVISIBLE
             s.speechParams=params(minOf(dp(300),width-dp(20)),dp(160),(width-minOf(dp(300),width-dp(20)))/2,dp(8),false)
             add(s.speech,s.speechParams!!)
-            if(!s.welcome && !s.retry) {
+            if(!s.welcome) {
                 val pen=ImageView(context).apply {setImageResource(R.drawable.itv_pen_fence);contentDescription="닫기: 철창 펜스";visibility=View.INVISIBLE}
                 val penParams=params(cageSize,cageSize,s.cage.left,s.cage.top,false)
                 s.fence=pen;s.fenceParams=penParams
@@ -176,14 +192,17 @@ internal class CoachingOverlayFactory(private val context:Context,private val pr
 
                     try{wm.updateViewLayout(s.dog,s.dogParams)}catch(_:Exception){}
                     if(raw>=0.999f) {
+                        val firstReady=!s.ready
                         s.ready=true;s.speech.visibility=View.VISIBLE
-                        s.speech.text=if(s.welcome) "잘 쉬었어! 간식을 눌러 보상을 받아 줘!" else "나랑 같이 잠깐 쉬자!\n길게 눌러 옮겨 줘\n집: 쉬기\n좌우·아래 가장자리: 나중에\n철창: 닫기"
+                        if(firstReady){val cb=s.onReady;s.onReady=null;cb?.invoke()}
+                        s.speech.text=if(s.welcome) "잘 쉬었어! 간식을 눌러 보상을 받아 줘!" else formatReasonsSpeech(s.reasons)
                         s.speechParams?.let {sp -> sp.y=(s.dogParams.y+s.dogParams.height+dp(8)).coerceAtMost(height-sp.height);try{wm.updateViewLayout(s.speech,sp)}catch(_:Exception){}}
                     }
                 };start()
             }
             if(s.retry) {
-                s.animator?.cancel();houseView.visibility=View.VISIBLE;s.ready=true
+                s.animator?.cancel();houseView.visibility=View.VISIBLE;s.fence?.visibility=View.VISIBLE;s.ready=true
+                val cb=s.onReady;s.onReady=null;cb?.invoke()
                 s.dogParams.x=s.homeX;s.dogParams.y=s.homeY
                 s.dog.rotation=0f;s.dog.scaleX=1f;s.dog.scaleY=1f
                 s.dog.setImageResource(R.drawable.itv_motion_angry)
@@ -214,6 +233,13 @@ internal class CoachingOverlayFactory(private val context:Context,private val pr
     private fun stopBubbleFollow(s:Session) {
         s.bubbleFollow?.let {handler.removeCallbacks(it)}
         s.bubbleFollow=null
+    }
+    private fun formatReasonsSpeech(reasons: List<String>): String {
+        val items = reasons.take(3)
+        if (items.isEmpty()) {
+            return "잠깐만! 내가 온 이유야 🐾\n• 쉬지 않고 영상을 계속 보고 있어!\n• 잠깐 눈을 쉬어주자!"
+        }
+        return "잠깐만! 내가 온 이유야 🐾\n" + items.joinToString("\n") { "• $it" }
     }
     fun feedback(onSubmit: (Int?) -> Unit): Pair<LinearLayout, WindowManager.LayoutParams> {
         val root = LinearLayout(context).apply {
@@ -274,14 +300,16 @@ internal class CoachingOverlayFactory(private val context:Context,private val pr
             if(s.committed || s.stopped || !s.ready)return@setOnTouchListener true
             when(event.actionMasked) {
                 android.view.MotionEvent.ACTION_DOWN -> {
+                    s.onInteraction?.invoke(true)
                     downX=event.rawX;downY=event.rawY;startX=s.dogParams.x;startY=s.dogParams.y;dragging=false
-                    s.hold=Runnable {if(!s.stopped && !s.committed) {dragging=true;startBubbleFollow(s,width,height);startY-=dp(50);s.dogParams.y=startY.coerceAtLeast(0);try{wm.updateViewLayout(s.dog,s.dogParams)}catch(_:Exception){};s.animator?.cancel();s.dog.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);s.speech.text="집: 쉬기\n좌우·아래 가장자리: 나중에\n철창: 닫기"}}
+                    s.hold=Runnable {if(!s.stopped && !s.committed) {dragging=true;s.onInteraction?.invoke(true);startBubbleFollow(s,width,height);startY-=dp(50);s.dogParams.y=startY.coerceAtLeast(0);try{wm.updateViewLayout(s.dog,s.dogParams)}catch(_:Exception){};s.animator?.cancel();s.dog.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);s.speech.text="집: 쉬기\n좌우·아래 가장자리: 나중에\n철창: 닫기"}}
                     handler.postDelayed(s.hold!!,ViewConfiguration.getLongPressTimeout().toLong())
                 }
                 android.view.MotionEvent.ACTION_MOVE -> {
                     val dx=event.rawX-downX;val dy=event.rawY-downY
                     if(!dragging && (kotlin.math.abs(dx)>slop || kotlin.math.abs(dy)>slop))s.hold?.let{handler.removeCallbacks(it)}
                     if(dragging){
+                        s.onInteraction?.invoke(true)
                         s.dogParams.x=(startX+dx).toInt().coerceIn(0,(width-size).coerceAtLeast(0));s.dogParams.y=(startY+dy).toInt().coerceIn(0,(height-size).coerceAtLeast(0))
                         val over=s.cage.contains(s.dogParams.x+size/2,s.dogParams.y+size/2)
                         val home=s.house.contains(s.dogParams.x+size/2,s.dogParams.y+size/2)
@@ -296,7 +324,7 @@ internal class CoachingOverlayFactory(private val context:Context,private val pr
                             } else if(zone=="edge") {
                                 s.shake?.cancel();s.dog.rotation=0f;s.dog.setImageResource(R.drawable.itv_motion_sad)
                                 s.speech.text="진짜 안 쉴거야?"
-                            } else if(zone=="none") {s.dog.setImageResource(R.drawable.itv_motion_turn);s.speech.text="나랑 같이 쉬자!"}
+                            } else if(zone=="none") {s.dog.setImageResource(if(s.retry)R.drawable.itv_motion_angry else R.drawable.itv_motion_turn);s.speech.text=if(s.retry)"쉬러 가기로 했잖아!" else "나랑 같이 쉬자!"}
                         }
                         if(over!=s.hoveringPen) {
                             s.hoveringPen=over;s.shake?.cancel();s.dog.rotation=0f
@@ -313,7 +341,7 @@ internal class CoachingOverlayFactory(private val context:Context,private val pr
                                     com.example.itv.presentation.character.CompanionHover.sleepy(s.dog);s.speech.text="Zzz....졸려..."
                                 } else if(s.hoverZone=="edge") {
                                     s.dog.setImageResource(R.drawable.itv_motion_sad);s.speech.text="진짜 안 쉴거야?"
-                                } else {s.dog.setImageResource(R.drawable.itv_motion_turn);s.speech.text="나랑 같이 쉬자!"}
+                                } else {s.dog.setImageResource(if(s.retry)R.drawable.itv_motion_angry else R.drawable.itv_motion_turn);s.speech.text=if(s.retry)"쉬러 가기로 했잖아!" else "나랑 같이 쉬자!"}
                             }
                         }
                         try{wm.updateViewLayout(s.dog,s.dogParams)}catch(_:Exception){}
@@ -322,37 +350,45 @@ internal class CoachingOverlayFactory(private val context:Context,private val pr
                 android.view.MotionEvent.ACTION_UP -> {
                     s.hold?.let{handler.removeCallbacks(it)}
                     s.shake?.cancel();s.dog.rotation=0f;s.hoveringPen=false
+                    s.onInteraction?.invoke(false)
                     if(dragging) {
                         val cx=s.dogParams.x+size/2;val cy=s.dogParams.y+size/2;val edge=dp(48)
                         val title=when {
-                            !s.retry && s.cage.contains(cx,cy)->"닫기"
+                            s.cage.contains(cx,cy)->"닫기"
                             s.house.contains(cx,cy)->"쉬기"
-                            !s.retry && (s.dogParams.x<=edge || s.dogParams.x+size>=width-edge || s.dogParams.y+size>=height-edge)->"나중에"
+                            (s.dogParams.x<=edge || s.dogParams.x+size>=width-edge || s.dogParams.y+size>=height-edge)->"나중에"
                             else->null
                         }
-                        if(title!=null){s.committed=true;s.choice?.invoke(title,when(title){"쉬기"->"휴식 미션: 15초 안에 화면을 끄고 연속 30초 쉬어 주세요.";"나중에"->"알겠어. 다음에 다시 찾아올게!";else->"닫았어요."})}
+                        val prepSec=com.example.itv.domain.coaching.TestCoachingPolicy.MISSION_START_MS/1000L
+                        val restSec=com.example.itv.domain.coaching.TestCoachingPolicy.REST_MS/1000L
+                        if(title!=null){s.committed=true;s.choice?.invoke(title,when(title){"쉬기"->"휴식 미션: ${prepSec}초 안에 화면을 끄고 연속 ${restSec}초 쉬어 주세요.";"나중에"->"알겠어. 다음에 다시 찾아올게!";else->"닫았어요."})}
                         else {s.dogParams.x=s.homeX;s.dogParams.y=s.homeY;try{wm.updateViewLayout(s.dog,s.dogParams)}catch(_:Exception){};s.speech.text="목표 영역에 놓아 주세요."}
                     }
                     dragging=false
                 }
-                android.view.MotionEvent.ACTION_CANCEL -> {s.hold?.let{handler.removeCallbacks(it)};dragging=false;s.dogParams.x=s.homeX;s.dogParams.y=s.homeY;try{wm.updateViewLayout(s.dog,s.dogParams)}catch(_:Exception){}}
+                android.view.MotionEvent.ACTION_CANCEL -> {s.hold?.let{handler.removeCallbacks(it)};dragging=false;s.onInteraction?.invoke(false);s.dogParams.x=s.homeX;s.dogParams.y=s.homeY;try{wm.updateViewLayout(s.dog,s.dogParams)}catch(_:Exception){}}
             }
             true
         }
     }
-    fun playReaction(root:View,title:String,reminderSeconds:Long=com.example.itv.domain.coaching.TestCoachingPolicy.REMINDER_MS/1000L,finished:()->Unit) {
+    fun playReaction(
+        root:View,
+        title:String,
+        reminderSeconds:Long=com.example.itv.domain.coaching.TestCoachingPolicy.REMINDER_MS/1000L,
+        prepareSeconds:Long=com.example.itv.domain.coaching.TestCoachingPolicy.MISSION_START_MS/1000L,
+        restSeconds:Long=com.example.itv.domain.coaching.TestCoachingPolicy.REST_MS/1000L,
+        finished:()->Unit
+    ) {
         val s=sessions[root]
         if(s==null || s.stopped){finished();return}
         s.committed=true;s.shake?.cancel();s.dog.rotation=0f;s.animator?.cancel();s.hold?.let{handler.removeCallbacks(it)}
         s.reactionFinished=finished
-        val prepare=com.example.itv.domain.coaching.TestCoachingPolicy.MISSION_START_MS
-        val rest=com.example.itv.domain.coaching.TestCoachingPolicy.REST_MS
         when(title) {
             "쉬기" -> {
                 s.dogParams.x=s.house.centerX()-s.dogParams.width/2
                 s.dogParams.y=s.house.bottom-s.dogParams.height*2/3
                 s.dog.setImageResource(R.drawable.itv_motion_sleep)
-                s.speech.text=if(s.retry) "이번엔 진짜지?\n창이 사라지면 ${prepare/1000}초 안에 끄고\n${rest/1000}초 이상 쉬자!" else "Zzz… 이 창이 사라지면 ${prepare/1000}초 안에\n폰을 끄고 ${rest/1000}초 이상 같이 쉬자!"
+                s.speech.text=if(s.retry) "이번엔 진짜지?\n창이 사라지면 ${prepareSeconds}초 안에 끄고\n${restSeconds}초 이상 쉬자!" else "Zzz… 이 창이 사라지면 ${prepareSeconds}초 안에\n폰을 끄고 ${restSeconds}초 이상 같이 쉬자!"
                 // A gentle finite breathing cycle, not a permanently running animator.
                 s.animator=ValueAnimator.ofFloat(1f,1.035f,1f,1.035f,1f).apply {
                     duration=2700

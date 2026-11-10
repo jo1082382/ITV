@@ -101,6 +101,44 @@ private fun TestSection(title: String,content: @Composable ColumnScope.()->Unit)
     }
 }
 @Composable
+private fun CompactCheckGroup(title: String, content: @Composable ColumnScope.() -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
+        border = BorderStroke(1.dp, ItvLine)
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(title, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold, color = ItvGreen)
+            content()
+        }
+    }
+}
+@Composable
+private fun CompactCheckRow(label: String, value: String, highlight: Boolean = false) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.Top
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(end = 8.dp)
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Bold,
+            color = if (highlight) ItvGreen else MaterialTheme.colorScheme.onSurface
+        )
+    }
+}
+@Composable
 private fun Toggle(label: String,value: Boolean,onChange: (Boolean)->Unit,enabled: Boolean=true) {
     Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
         Text(label,Modifier.weight(1f))
@@ -146,6 +184,8 @@ private fun ConnectionPage(vm: JevTestViewModel,s: JevSettings,busy: Boolean) {
 }
 @Composable
 private fun SettingsPage(vm: JevTestViewModel,s: JevSettings,busy: Boolean) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var testMode by remember { mutableStateOf(com.example.itv.presentation.coaching.CoachingAutoStart.testModeEnabled(context)) }
     var enabled by rememberSaveable(s.revision){mutableStateOf(s.enabled)}
     var actual by rememberSaveable(s.revision){mutableStateOf(s.actualIntervention)}
     var ig by rememberSaveable(s.revision){mutableStateOf(s.instagram)}
@@ -166,9 +206,13 @@ private fun SettingsPage(vm: JevTestViewModel,s: JevSettings,busy: Boolean) {
     var daily by rememberSaveable(s.revision){mutableStateOf(s.dailyLimit.toString())}
     var error by remember {mutableStateOf<String?>(null)}
     TestSection("실행 모드") {
+        Toggle("테스트 모드 (30초 시청 개입 · 10초 무응답 · 30초 재판단 · 10초 내 15초 휴식)",testMode,{
+            testMode=it
+            com.example.itv.presentation.coaching.CoachingAutoStart.setEnabled(context,it)
+        },!busy)
         Toggle("Jev 자동 관측·판단 사용",enabled,{enabled=it},!busy)
         Toggle("확률 통과 시 실제 개입 (끄면 판단만 기록)",actual,{actual=it},!busy)
-        Text("최초에는 실제 개입이 꺼져 있습니다. 자동 관측에는 기존 수집 동의·사용 정보·접근성·감시 알림 등 필요한 권한도 허용해야 합니다.",style=MaterialTheme.typography.bodySmall)
+        Text("테스트 모드를 켜면 빠른 확인용 고정값으로 개입합니다. 테스트 모드를 끄고 Jev 개입을 켜면 Jev 기준(무응답 45초 · 나중에 5분 · 10초 내 30초 휴식)으로 동작합니다.",style=MaterialTheme.typography.bodySmall)
         Toggle("Instagram",ig,{ig=it},!busy);Toggle("YouTube",yt,{yt=it},!busy)
     }
     TestSection("1단계 · Jev 호출 후보") {
@@ -264,9 +308,11 @@ private fun ManualPage(vm: JevTestViewModel,s: JevSettings,busy: Boolean) {
         val settingsObj=JSONObject(a.trial.payload).getJSONObject("settings")
         val baseThreshold=settingsObj.optDouble("probabilityThreshold")
         val effThreshold=settingsObj.optDouble("effectiveProbabilityThreshold",baseThreshold)
+        val diffPct=(effThreshold-baseThreshold)*100.0
+        val diffText=if(kotlin.math.abs(diffPct)>=0.05)"${if(diffPct>0)"+" else ""}${"%.1f".format(diffPct)}%p 변화" else "변화 0.0%p"
         TestSection("최근 수동·재확인 결과") {
             Text("개입 적절 확률: ${"%.1f".format(a.probability*100)}%")
-            Text("요청 당시 기준: ${"%.1f".format(effThreshold*100)}% (기본 ${"%.1f".format(baseThreshold*100)}%) · ${if(a.probability>=effThreshold)"통과" else "미달"}")
+            Text("요청 당시 기준: ${"%.1f".format(effThreshold*100)}% (기본 ${"%.1f".format(baseThreshold*100)}% · $diffText) · ${if(a.probability>=effThreshold)"통과" else "미달"}")
             Text("모델: ${a.trial.model} · 입력 ${a.trial.inputTokens ?: "미제공"} 토큰")
             Text("응답: ${a.trial.latencyMs}ms · 실제 개입 없음")
         }
@@ -287,9 +333,10 @@ private fun RecordsPage(vm: JevTestViewModel,busy: Boolean) {
         live.context?.let { c ->
             val effThreshold = JevCandidatePolicy.effectiveThreshold(s, c)
             Text("전면 대상: ${c.packageName}\n연속 ${c.continuousMs/1000}초 · 구간 ${c.sessionMs/1000}초\n최근 10분 재진입 ${c.returns10m}회 · 현재 관측 범위 ${c.returnsObservedSeconds}초")
-            Text("개인화: 평균 세션 대비 ${c.sessionVsAvgRatio?.let { "${(it * 100).roundToInt()}%" } ?: "집계 중"} · 7일 일평균 대비 ${c.todayVs7dRatio?.let { "${(it * 100).roundToInt()}%" } ?: "집계 중"}")
-            Text("스와이프: 1분 유효 SPM ${c.effectiveSpm1m ?: 0.0} · 가속도 ${c.swipeAccel1m ?: 0.0} · 고속 연속 ${c.fastSwipeStreak}회")
-            Text("품질: ${c.quality} · 취침 초과: ${c.bedtimePassedMinutes?.let { "$it 분" } ?: "미적용"} · 적용 확률 기준: ${"%.1f".format(effThreshold * 100)}%")
+            Text("개인화: 평균 세션(${c.personalAvgSessionMinutes?.let { "${it}분" } ?: "-"}) 대비 ${c.sessionVsAvgRatio?.let { "${(it * 100).roundToInt()}%" } ?: "집계 중"} · 7일 일평균(${c.avg7dDailyMinutes?.let { "${it}분" } ?: "-"}) 대비 오늘(${c.todayShortformMinutes?.let { "${it}분" } ?: "-"}) ${c.todayVs7dRatio?.let { "${(it * 100).roundToInt()}%" } ?: "집계 중"}")
+            Text("스와이프: 1분 유효 SPM ${c.effectiveSpm1m ?: 0.0} (세션 평균 ${c.effectiveSessionSpm ?: 0.0} / 개인 평균 ${c.personalAvgSpm ?: 0.0}) · 가속도 ${c.swipeAccel1m ?: 0.0} · 고속 연속 ${c.fastSwipeStreak}회 · 과열 ${if (c.swipeOverheated) "감지됨" else "정상"}")
+            Text("품질: ${c.quality} · 취침 초과: ${c.bedtimePassedMinutes?.let { "$it 분" } ?: "미적용"}")
+            Text("적용 개입 확률 기준: ${"%.1f".format(effThreshold * 100)}% (${JevCandidatePolicy.thresholdBreakdown(s, c)})")
         } ?: Text("ITV 화면에서는 숏폼 관측을 중단합니다. 대상 앱을 사용한 뒤 돌아와 요청 기록을 확인하세요.")
         Text("전송 대기 $pending 건 · 확인이 필요한 실패 $failed 건")
         OutlinedButton(onClick={vm.retryUploads()},enabled=!busy,modifier=Modifier.fillMaxWidth()) {Text("기록 전송 재시도")}
@@ -336,7 +383,9 @@ private data class ProbabilitySnapshot(
     val returns: Int, val bedtime: Int?, val takenAt: Long,
     val enrichedContext: JevContext,
     val liveProbability: Double?, val latestTrialProbability: Double?, val latestTrialSource: String?,
-    val latestLiveProbability: Double?, val latestLiveCreatedAt: Long?
+    val latestLiveProbability: Double?, val latestLiveCreatedAt: Long?,
+    val latestLiveTrial: JevTrial?,
+    val displayBlockingReason: String?
 ) {
     fun context() = enrichedContext
 }
@@ -357,6 +406,7 @@ private fun takeProbabilitySnapshot(vm: JevTestViewModel, app: String, trials: L
     val takenAt = System.currentTimeMillis()
     val baseContext = JevContext(sessionId, app, totalMs, continuousMs, returns, 600, bedtime, takenAt)
     val enriched = vm.runtime.enrichContext(baseContext)
+    val blockingReason = vm.runtime.displayBlockingReason()
     return ProbabilitySnapshot(
         app = app,
         sessionId = sessionId,
@@ -374,8 +424,46 @@ private fun takeProbabilitySnapshot(vm: JevTestViewModel, app: String, trials: L
         latestTrialProbability = latestTrial?.probability,
         latestTrialSource = latestTrial?.source,
         latestLiveProbability = vm.runtime.state.value.probability ?: latestLiveTrial?.probability,
-        latestLiveCreatedAt = latestLiveTrial?.createdAt
+        latestLiveCreatedAt = latestLiveTrial?.createdAt,
+        latestLiveTrial = latestLiveTrial,
+        displayBlockingReason = blockingReason
     )
+}
+
+private fun resolveNotShownReason(
+    trial: JevTrial?,
+    isActualIntervention: Boolean,
+    isTestMode: Boolean,
+    isJevEnabled: Boolean,
+    canDrawOverlays: Boolean
+): String {
+    if (isTestMode) {
+        return "테스트 모드가 켜져 있어 Jev 대신 고정값 규칙으로 개입함 (설정에서 테스트 모드 끄기 필요)"
+    }
+    if (!isActualIntervention) {
+        return "‘확률 통과 시 실제 개입’ 설정이 꺼져 있어 판단만 기록됨 (설정에서 켜기 필요)"
+    }
+    if (!isJevEnabled) {
+        return "Jev 자동 관측·판단 설정이 꺼져 있음"
+    }
+    if (!canDrawOverlays) {
+        return "‘다른 앱 위에 표시’ 권한이 허용되지 않음"
+    }
+    val state = trial?.state
+    if (state != null && state.startsWith("SUPPRESSED:")) {
+        val code = state.removePrefix("SUPPRESSED:")
+        return when (code) {
+            "OBSERVE_ONLY" -> "‘확률 통과 시 실제 개입’ 설정이 꺼져 있어 개입이 보류됨 (설정에서 켜기 필요)"
+            "STALE_CONTEXT_OR_SETTINGS" -> "설정 변경 또는 앱 전환으로 이전 확률이 만료됨"
+            "BELOW_PROBABILITY_THRESHOLD" -> "개입 기준 확률 미달"
+            "MONITOR_STOPPED" -> "모니터링 서비스 중지로 취소됨"
+            "SETTINGS_CHANGED" -> "설정 변경으로 취소됨"
+            "STALE_CONTEXT_OR_RESULT" -> "상황 변화로 결과 만료됨"
+            "DISPLAY_FAILED" -> "화면 표시 실패"
+            else -> "보류됨 ($code)"
+        }
+    }
+    return "다음 숏폼 전환 대기 중 (시청 방해를 줄이기 위해 다음 영상으로 넘기거나 최대 15초 경과 시 표시)"
 }
 
 @Composable
@@ -412,8 +500,11 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
     val lastObserved = vm.runtime.lastObservedContext
 
     TestSection("판단 설정 기준 및 개입 확률 확인") {
-        val thresholdPct = s.probabilityThreshold * 100.0
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             FilterChip(
                 selected = targetApp == JevSettings.YOUTUBE,
                 onClick = { targetApp = JevSettings.YOUTUBE },
@@ -426,6 +517,12 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
                 label = { Text("Instagram") },
                 enabled = !busy
             )
+            Spacer(Modifier.weight(1f))
+            snapshot?.let {
+                val takenAt = Instant.ofEpochMilli(it.takenAt).atZone(ZoneId.systemDefault())
+                    .format(DateTimeFormatter.ofPattern("HH:mm:ss"))
+                Text("갱신 $takenAt", style = MaterialTheme.typography.labelSmall)
+            }
         }
         OutlinedButton(
             onClick = {
@@ -434,7 +531,7 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
             },
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("측정값 및 최근 기록(LIVE) 확률 갱신 (토큰 사용 없음)")
+            Text("측정값 갱신 (토큰 사용 없음)")
         }
 
         val snap = snapshot
@@ -444,56 +541,147 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
             val ctx = snap.context()
             val matchedReasons = JevCandidatePolicy.reasons(ctx, s)
             val effThresholdPct = JevCandidatePolicy.effectiveThreshold(s, ctx) * 100.0
-            val takenAt = Instant.ofEpochMilli(snap.takenAt).atZone(ZoneId.systemDefault())
-                .format(DateTimeFormatter.ofPattern("HH:mm:ss"))
-            Text("• 측정값 갱신 시각: $takenAt", style = MaterialTheme.typography.bodySmall)
-            Text("• 현재 판단 설정 기준 대비 측정값:", fontWeight = FontWeight.Bold)
-            Text("  - 연속 시청: ${"%.1f".format(snap.continuousMs / 1000.0)}초 ${if (snap.continuousLive) "(시청 중)" else "(직전 시청 기록)"} / 기준 ${if (s.continuousEnabled) "${s.continuousSeconds}초 이상" else "꺼짐"}")
-            Text("  - 실시간 스와이프: ${snap.swipes}회 ${if (snap.swipesLive) "(시청 중)" else "(직전 시청 기록)"} (1분 유효 SPM ${ctx.effectiveSpm1m ?: 0.0} · 가속도 ${ctx.swipeAccel1m ?: 0.0} · 연속 고속 ${ctx.fastSwipeStreak}회)")
-            Text("  - 개인화 비율: 평균 세션 대비 ${ctx.sessionVsAvgRatio?.let { "${(it * 100).roundToInt()}%" } ?: "기준 수집 중"} · 최근 7일 일평균 대비 ${ctx.todayVs7dRatio?.let { "${(it * 100).roundToInt()}%" } ?: "기준 수집 중"}")
-            Text("  - 누적 시청: ${"%.1f".format(snap.totalMs / 1000.0)}초")
-            Text("  - 10분 내 재진입: ${snap.returns}회 / 기준 ${if (s.returnsEnabled) "${s.returnsThreshold}회 이상" else "꺼짐"}")
-            Text("  - 실제 개입 확률 기준: 적용 ${"%.1f".format(effThresholdPct)}% 이상 (기본 설정 ${"%.1f".format(thresholdPct)}%${if (s.personalizedEnabled) " · 개인화·스와이프 보정 켜짐" else ""})")
-            Text(
-                "  - 호출 조건 충족 여부: ${if (matchedReasons.isNotEmpty()) "충족 (${matchedReasons.joinToString(", ")})" else "미충족"}",
-                fontWeight = FontWeight.SemiBold,
-                color = if (matchedReasons.isNotEmpty()) ItvGreen else MaterialTheme.colorScheme.error
-            )
+            val reasonKor = matchedReasons.map { r ->
+                when (r) {
+                    "CONTINUOUS" -> "연속시청"
+                    "REPEATED_RETURNS" -> "반복재진입"
+                    "BEDTIME" -> "취침시간"
+                    "PERSONAL_SESSION_EXCEEDED" -> "평균세션초과"
+                    "RAPID_SWIPE_OVERHEAT" -> "스와이프과열"
+                    else -> r
+                }
+            }
 
-            HorizontalDivider(Modifier.padding(vertical = 4.dp))
+            // 1. 시청 & 재진입 요약 박스
+            CompactCheckGroup("1. 시청 시간 · 재진입") {
+                CompactCheckRow(
+                    label = "연속 시청",
+                    value = "${"%.1f".format(snap.continuousMs / 1000.0)}초 / 기준 ${if (s.continuousEnabled) "${s.continuousSeconds}초" else "꺼짐"}"
+                )
+                CompactCheckRow(
+                    label = "구간 누적 · 재진입",
+                    value = "누적 ${"%.1f".format(snap.totalMs / 1000.0)}초 · 재진입 ${snap.returns}회 (기준 ${if (s.returnsEnabled) "${s.returnsThreshold}회" else "꺼짐"})"
+                )
+            }
 
-            val liveProb = snap.latestLiveProbability
-            if (liveProb != null) {
-                val passed = JevCandidatePolicy.passes(liveProb, s, ctx)
-                val timeLabel = snap.latestLiveCreatedAt?.let {
-                    " · " + Instant.ofEpochMilli(it).atZone(ZoneId.systemDefault())
-                        .format(DateTimeFormatter.ofPattern("HH:mm:ss"))
-                }.orEmpty()
-                Text(
-                    "• 최근 기록(LIVE) 개입 확률: ${"%.1f".format(liveProb * 100)}% (적용 기준 ${"%.1f".format(effThresholdPct)}% · ${if (passed) "통과" else "미달"}$timeLabel)",
-                    fontWeight = FontWeight.Bold,
-                    color = if (passed) ItvGreen else MaterialTheme.colorScheme.onSurface
+            // 2. 개인화 비율 & 스와이프 요약 박스
+            CompactCheckGroup("2. 개인화 비율 · 스와이프") {
+                val sessionRatioStr = ctx.sessionVsAvgRatio?.let { "${(it * 100).roundToInt()}%" } ?: "집계 중"
+                val avgSessionStr = ctx.personalAvgSessionMinutes?.let { "평균 ${it}분" } ?: "평균 수집 중"
+                CompactCheckRow(
+                    label = "이번 세션 비율",
+                    value = "$sessionRatioStr ($avgSessionStr)"
                 )
-            } else if (snap.latestTrialProbability != null) {
-                val p = snap.latestTrialProbability
-                val passed = JevCandidatePolicy.passes(p, s, ctx)
-                Text(
-                    "• 최근 기록(${snap.latestTrialSource ?: "MANUAL"}) 개입 확률: ${"%.1f".format(p * 100)}% (적용 기준 ${"%.1f".format(effThresholdPct)}% · ${if (passed) "통과" else "미달"})",
-                    fontWeight = FontWeight.Bold,
-                    color = if (passed) ItvGreen else MaterialTheme.colorScheme.onSurface
+                val todayRatioStr = ctx.todayVs7dRatio?.let { "${(it * 100).roundToInt()}%" } ?: "집계 중"
+                val todayDetailStr = "오늘 ${ctx.todayShortformMinutes ?: 0.0}분 / 7일평균 ${ctx.avg7dDailyMinutes?.let { "${it}분" } ?: "-"}"
+                CompactCheckRow(
+                    label = "오늘 사용 비율",
+                    value = "$todayRatioStr ($todayDetailStr)"
                 )
-            } else {
-                Text("• 최근 기록(LIVE) 개입 확률: 아직 없음")
+                val spmStr = "분당 ${ctx.effectiveSpm1m ?: 0.0}회 (평소 ${ctx.personalAvgSpm ?: 0.0})"
+                val overheatStr = if (ctx.swipeOverheated) "과열 감지(-5%p)" else "정상"
+                CompactCheckRow(
+                    label = "스와이프 (${snap.swipes}회)",
+                    value = "$spmStr · $overheatStr",
+                    highlight = ctx.swipeOverheated
+                )
+            }
+
+            // 3. 개입 확률 기준 & 판정 결과 박스
+            CompactCheckGroup("3. 개입 기준 · 확률 결과") {
+                CompactCheckRow(
+                    label = "적용 개입 기준",
+                    value = "${"%.0f".format(effThresholdPct)}% 이상 · ${JevCandidatePolicy.thresholdBreakdown(s, ctx)}",
+                    highlight = kotlin.math.abs(effThresholdPct - s.probabilityThreshold * 100.0) >= 0.1
+                )
+                CompactCheckRow(
+                    label = "호출 조건",
+                    value = if (reasonKor.isNotEmpty()) "충족 (${reasonKor.joinToString(", ")})" else "미충족",
+                    highlight = reasonKor.isNotEmpty()
+                )
+
+                val liveProb = snap.latestLiveProbability
+                val latestLiveTrial = snap.latestLiveTrial
+                if (liveProb != null) {
+                    val passed = JevCandidatePolicy.passes(liveProb, s, ctx)
+                    val timeLabel = snap.latestLiveCreatedAt?.let {
+                        " · " + Instant.ofEpochMilli(it).atZone(ZoneId.systemDefault())
+                            .format(DateTimeFormatter.ofPattern("HH:mm:ss"))
+                    }.orEmpty()
+                    CompactCheckRow(
+                        label = "최근 LIVE 확률",
+                        value = "${"%.1f".format(liveProb * 100)}% (${if (passed) "기준 통과" else "기준 미달"}$timeLabel)",
+                        highlight = passed
+                    )
+
+                    if (passed) {
+                        val displayedAt = latestLiveTrial?.displayedAt
+                        val isDisplayed = displayedAt != null
+                        val displayStatusText = if (isDisplayed) {
+                            val dispTime = Instant.ofEpochMilli(displayedAt)
+                                .atZone(ZoneId.systemDefault())
+                                .format(DateTimeFormatter.ofPattern("HH:mm:ss"))
+                            "화면에 표시 완료 ($dispTime)"
+                        } else {
+                            "미표시 (화면에 뜨지 않음)"
+                        }
+
+                        CompactCheckRow(
+                            label = "개입 표시 여부",
+                            value = displayStatusText,
+                            highlight = !isDisplayed
+                        )
+
+                        if (!isDisplayed) {
+                            val notShownReason = snap.displayBlockingReason ?: resolveNotShownReason(
+                                trial = latestLiveTrial,
+                                isActualIntervention = s.actualIntervention,
+                                isTestMode = com.example.itv.presentation.coaching.CoachingAutoStart.testModeEnabled(context),
+                                isJevEnabled = s.enabled,
+                                canDrawOverlays = android.provider.Settings.canDrawOverlays(context)
+                            )
+                            CompactCheckRow(
+                                label = "미표시 사유",
+                                value = notShownReason,
+                                highlight = true
+                            )
+                        }
+                    }
+                } else if (snap.latestTrialProbability != null) {
+                    val p = snap.latestTrialProbability
+                    val passed = JevCandidatePolicy.passes(p, s, ctx)
+                    CompactCheckRow(
+                        label = "최근 요청 확률",
+                        value = "${"%.1f".format(p * 100)}% (${if (passed) "기준 통과" else "기준 미달"})",
+                        highlight = passed
+                    )
+                } else {
+                    CompactCheckRow(label = "최근 개입 확률", value = "아직 기록 없음")
+                }
             }
         }
 
         answer?.let { a ->
             val passed = JevCandidatePolicy.passes(a.probability, s, snap?.context())
-            Text(
-                "• 방금 요청한 개입 확률: ${"%.1f".format(a.probability * 100)}% (${if (passed) "개입 기준 통과" else "기준 미달"} · ${a.trial.latencyMs}ms)",
-                fontWeight = FontWeight.Bold,
-                color = if (passed) ItvGreen else MaterialTheme.colorScheme.error
-            )
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Text(
+                    "방금 요청 결과: ${"%.1f".format(a.probability * 100)}% (${if (passed) "개입 기준 통과" else "기준 미달"} · ${a.trial.latencyMs}ms)",
+                    fontWeight = FontWeight.Bold,
+                    color = if (passed) ItvGreen else MaterialTheme.colorScheme.error
+                )
+                if (passed) {
+                    val disp = a.trial.displayedAt != null
+                    val r = if (disp) "화면에 표시 완료" else (snap?.displayBlockingReason ?: resolveNotShownReason(a.trial, s.actualIntervention, com.example.itv.presentation.coaching.CoachingAutoStart.testModeEnabled(context), s.enabled, android.provider.Settings.canDrawOverlays(context)))
+                    Text(
+                        "• 개입 표시: ${if (disp) "표시됨" else "미표시"} ($r)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (disp) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                    )
+                }
+            }
         }
 
         Button(
@@ -501,7 +689,7 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
             onClick = { snap?.let { vm.manual(it.context()) } },
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("위 측정값으로 Jev 개입 확률 요청 (토큰 1회 사용)")
+            Text("현재 측정값으로 Jev 확률 요청 (토큰 1회)")
         }
     }
 

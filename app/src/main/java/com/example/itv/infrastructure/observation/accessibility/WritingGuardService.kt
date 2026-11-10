@@ -41,9 +41,7 @@ open class WritingGuardService : AccessibilityService() {
             if (root == null) null else try { root.packageName?.toString() }
             finally { @Suppress("DEPRECATION") root.recycle() }
         } catch (_: Exception) { null }
-        if (com.example.itv.infrastructure.jev.JevFeature.available()) {
-            com.example.itv.infrastructure.jev.JevObservationHub.foreground(pkg)
-        }
+        com.example.itv.infrastructure.jev.JevObservationHub.foreground(pkg)
         if (pkg == packageName) {
             if (!ownScreen) {
                 // Pause once on entry; do not repeatedly write stores on scroll events.
@@ -74,6 +72,13 @@ open class WritingGuardService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         // Reels event counters/callbacks are kept synchronous; payload text is not read.
         observers.onEvent(event)
+        val eventType = event?.eventType
+        if (eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED ||
+            eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+            eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED ||
+            eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
+            com.example.itv.presentation.coaching.CoachingMonitorService.notifyUserActivity("accessibility_$eventType")
+        }
         val now = SystemClock.elapsedRealtime()
         val pkg = event?.packageName?.toString()
         if (ownScreen && pkg == packageName &&

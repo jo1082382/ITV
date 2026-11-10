@@ -42,10 +42,28 @@ private val CardInk = Color(0xFF1E2433)
 private val CardSubInk = Color(0xFF505A74)
 
 @Composable
-internal fun ShortformPersonalUsageSection(summary: PersonalizedSummary?) {
+internal fun ShortformPersonalUsageSection(summary: PersonalizedSummary?, days: Int = 1) {
     var selectedFilterName by rememberSaveable { mutableStateOf(TargetFilter.COMBINED.name) }
     val selectedFilter = remember(selectedFilterName) {
         runCatching { TargetFilter.valueOf(selectedFilterName) }.getOrDefault(TargetFilter.COMBINED)
+    }
+    val periodTitle = when {
+        days >= 30 -> "최근 1달(30일) 평균 세션·일평균 비율"
+        days >= 7 -> "최근 1주일(7일) 평균 세션·일평균 비율"
+        else -> "오늘 개인화 숏폼 사용량·평균 및 비율"
+    }
+    val periodDescription = when {
+        days >= 30 -> "최근 1달 내 실제 사용한 날·유효 시청 세션만 반영한 1달 평균 세션 길이와 1달 일평균 비율입니다. (무사용 날·시간 제외)"
+        days >= 7 -> "최근 1주일 내 실제 사용한 날·유효 시청 세션만 반영한 1주일 평균 세션 길이와 1주일 일평균 비율입니다. (무사용 날·시간 제외)"
+        else -> "아이콘을 눌러 오늘의 인스타 릴스, 유튜브 쇼츠, 통합(릴스+쇼츠) 사용량과 개인 평균 대비 비율을 확인하세요."
+    }
+    fun tabSubtitle(m: PersonalizedTargetMetrics?): String {
+        if (m == null) return "—"
+        return when {
+            days >= 30 -> "1달 일평균 ${formatShortDuration(m.avg30dDailyMs)}"
+            days >= 7 -> "1주일 일평균 ${formatShortDuration(m.avg7dDailyMs)}"
+            else -> "오늘 ${formatShortDuration(m.todayDurationMs)}"
+        }
     }
 
     OutlinedCard(
@@ -55,9 +73,9 @@ internal fun ShortformPersonalUsageSection(summary: PersonalizedSummary?) {
         colors = CardDefaults.outlinedCardColors(containerColor = RecordContentGreen, contentColor = CardInk)
     ) {
         Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            Text("개인화 숏폼 사용량 · 평균 및 비율", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text(periodTitle, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Text(
-                "아이콘을 눌러 인스타 릴스, 유튜브 쇼츠, 통합(릴스+쇼츠) 기준의 개인 평균 대비 비율을 확인하세요.",
+                periodDescription,
                 style = MaterialTheme.typography.bodySmall,
                 color = CardSubInk
             )
@@ -71,7 +89,7 @@ internal fun ShortformPersonalUsageSection(summary: PersonalizedSummary?) {
                     filter = TargetFilter.INSTAGRAM,
                     selected = selectedFilter == TargetFilter.INSTAGRAM,
                     accent = InstaAccent,
-                    subtitle = summary?.instagram?.let { formatShortDuration(it.todayDurationMs) } ?: "—",
+                    subtitle = tabSubtitle(summary?.instagram),
                     onClick = { selectedFilterName = TargetFilter.INSTAGRAM.name },
                     modifier = Modifier.weight(1f)
                 ) {
@@ -81,7 +99,7 @@ internal fun ShortformPersonalUsageSection(summary: PersonalizedSummary?) {
                     filter = TargetFilter.YOUTUBE,
                     selected = selectedFilter == TargetFilter.YOUTUBE,
                     accent = YoutubeAccent,
-                    subtitle = summary?.youtube?.let { formatShortDuration(it.todayDurationMs) } ?: "—",
+                    subtitle = tabSubtitle(summary?.youtube),
                     onClick = { selectedFilterName = TargetFilter.YOUTUBE.name },
                     modifier = Modifier.weight(1f)
                 ) {
@@ -91,7 +109,7 @@ internal fun ShortformPersonalUsageSection(summary: PersonalizedSummary?) {
                     filter = TargetFilter.COMBINED,
                     selected = selectedFilter == TargetFilter.COMBINED,
                     accent = CombinedAccent,
-                    subtitle = summary?.combined?.let { formatShortDuration(it.todayDurationMs) } ?: "—",
+                    subtitle = tabSubtitle(summary?.combined),
                     onClick = { selectedFilterName = TargetFilter.COMBINED.name },
                     modifier = Modifier.weight(1f)
                 ) {
@@ -110,7 +128,7 @@ internal fun ShortformPersonalUsageSection(summary: PersonalizedSummary?) {
                     TargetFilter.YOUTUBE -> YoutubeAccent
                     TargetFilter.COMBINED -> CombinedAccent
                 }
-                PersonalizedMetricsContent(metrics, accent)
+                PersonalizedMetricsContent(metrics, accent, days)
             }
         }
     }
@@ -153,7 +171,7 @@ private fun ShortformTargetIconTab(
                 maxLines = 1
             )
             Text(
-                text = "오늘 $subtitle",
+                text = subtitle,
                 style = MaterialTheme.typography.labelSmall,
                 color = CardSubInk,
                 textAlign = TextAlign.Center,
@@ -297,99 +315,249 @@ private fun loadInstalledAppBitmap(context: android.content.Context, packageName
     }.getOrNull()
 
 @Composable
-private fun PersonalizedMetricsContent(m: PersonalizedTargetMetrics, accent: Color) {
+private fun PersonalizedMetricsContent(m: PersonalizedTargetMetrics, accent: Color, days: Int) {
     val targetTitle = when (m.filter) {
         TargetFilter.INSTAGRAM -> "Instagram 릴스"
         TargetFilter.YOUTUBE -> "YouTube 쇼츠"
         TargetFilter.COMBINED -> "통합 숏폼 (릴스 + 쇼츠)"
     }
-
-    // Card 1: 개인 평균 세션 길이 대비 현재 비율
-    PersonalSubCard(title = "1. 개인 평균 세션 길이 대비 현재 비율 ($targetTitle)", accent = accent) {
-        val sessionRatio = m.currentVsAvgSessionRatio
-        val sessionStatusText = when {
-            sessionRatio == null -> "아직 비교할 세션 기록이 없습니다."
-            sessionRatio >= 1.3 -> "평소 평균 1회 시청 시간보다 ${formatPercent(sessionRatio - 1.0)} 더 길게 시청 중 (집중 개입 구간)"
-            sessionRatio >= 0.9 -> "평소 평균 1회 시청 길이와 비슷한 수준 (${formatRatioBadge(sessionRatio)})"
-            else -> "평소 평균 세션 길이보다 짧은 시청 (${formatRatioBadge(sessionRatio)})"
-        }
-        RatioHighlightRow(
-            label = if (m.currentSessionLive) "현재 진행 세션 / 개인 평균 세션" else "직전(최근) 세션 / 개인 평균 세션",
-            ratio = sessionRatio,
-            accent = accent
-        )
-        Text(sessionStatusText, style = MaterialTheme.typography.bodySmall, color = CardSubInk)
-        HorizontalDivider(color = ItvLine)
-        MetricKeyValueRow(
-            leftLabel = if (m.currentSessionLive) "현재 세션 시청 시간 (진행 중)" else "최근 1회 세션 시청 시간",
-            leftValue = formatFullDuration(m.currentSessionMs),
-            rightLabel = "개인 평균 세션 길이",
-            rightValue = "${formatFullDuration(m.avgSessionMs)} (${m.totalRecordedSessions}회 평균)"
-        )
-        MetricKeyValueRow(
-            leftLabel = "오늘 시청 세션 횟수",
-            leftValue = "${m.todaySessionCount}회 (7일 평균 ${String.format(Locale.KOREA, "%.1f", m.avg7dSessionCount)}회/일)",
-            rightLabel = "개인 최장 세션 기록",
-            rightValue = formatFullDuration(m.maxSessionMs)
-        )
+    val appShareLabel = when (m.filter) {
+        TargetFilter.INSTAGRAM -> "Instagram 전체 사용 중 릴스 비율"
+        TargetFilter.YOUTUBE -> "YouTube 전체 사용 중 쇼츠 비율"
+        TargetFilter.COMBINED -> "인스타+유튜브 사용 중 숏폼 비율"
     }
 
-    // Card 2: 오늘 누적시간과 최근 7일 일평균 시청 시간 비율
-    PersonalSubCard(title = "2. 오늘 누적시간 vs 최근 7일 일평균 비율 ($targetTitle)", accent = accent) {
-        val dailyRatio = m.todayVs7dRatio
-        val dailyStatusText = when {
-            dailyRatio == null -> "최근 7일 관측 기록이 쌓이면 일평균 대비 비율이 표시됩니다."
-            dailyRatio >= 1.25 -> "최근 7일 일평균보다 ${formatPercent(dailyRatio - 1.0)} 초과 시청 중 (일일 과사용 주의)"
-            dailyRatio >= 0.85 -> "최근 7일 일평균 수준에 근접 (${formatRatioBadge(dailyRatio)})"
-            else -> "최근 7일 일평균 대비 여유 있음 (${formatRatioBadge(dailyRatio)})"
-        }
-        RatioHighlightRow(
-            label = "오늘 누적 시청 / 최근 7일 일평균",
-            ratio = dailyRatio,
-            accent = accent
-        )
-        Text(dailyStatusText, style = MaterialTheme.typography.bodySmall, color = CardSubInk)
-        HorizontalDivider(color = ItvLine)
-        MetricKeyValueRow(
-            leftLabel = "오늘 누적 시청 시간",
-            leftValue = formatFullDuration(m.todayDurationMs),
-            rightLabel = "최근 7일 일평균 시청",
-            rightValue = "${formatFullDuration(m.avg7dDailyMs)} (관측 ${m.observedDays7d}일)"
-        )
-        MetricKeyValueRow(
-            leftLabel = "최근 7일 총 누적 시간",
-            leftValue = formatFullDuration(m.total7dDurationMs),
-            rightLabel = "최근 30일 일평균 (오늘 비율)",
-            rightValue = "${formatFullDuration(m.avg30dDailyMs)} (${m.todayVs30dRatio?.let { formatPercent(it) } ?: "—"})"
-        )
-    }
+    when {
+        days >= 30 -> {
+            // 1달 (30일) 뷰: 1달 내 평균 세션 길이 & 1달 일평균 비율 (무사용일·시간 제외)
+            PersonalSubCard(title = "1. 1달 내 평균 세션 길이 ($targetTitle)", accent = accent) {
+                val ratio = m.session7dVs30dRatio ?: m.currentVsAvgSessionRatio
+                val statusText = when {
+                    m.sessionCount30d == 0 -> "최근 1달 내 유효 숏폼 시청 세션 기록이 없습니다."
+                    ratio == null -> "1달 내 실사용 세션 ${m.sessionCount30d}회 기준으로 집계되었습니다. (무사용 시간 제외)"
+                    else -> "최근 1주일 평균 세션이 1달 평균 세션의 ${formatRatioBadge(ratio)} 수준입니다."
+                }
+                RatioHighlightRow(
+                    label = "최근 1주일 평균 세션 / 1달 평균 세션",
+                    ratio = ratio,
+                    accent = accent
+                )
+                Text(statusText, style = MaterialTheme.typography.bodySmall, color = CardSubInk)
+                HorizontalDivider(color = ItvLine)
+                MetricKeyValueRow(
+                    leftLabel = "1달 내 평균 세션 길이 (무사용 제외)",
+                    leftValue = "${formatFullDuration(m.avg30dSessionMs)} (${m.sessionCount30d}회 평균)",
+                    rightLabel = "1달 내 최장 세션 기록",
+                    rightValue = formatFullDuration(m.max30dSessionMs)
+                )
+                MetricKeyValueRow(
+                    leftLabel = "1달 일평균 세션 횟수 (실사용일 기준)",
+                    leftValue = "${String.format(Locale.KOREA, "%.1f", m.avg30dSessionCount)}회/일 (실사용 ${m.observedDays30d}일)",
+                    rightLabel = "1주일 내 평균 세션 길이",
+                    rightValue = "${formatFullDuration(m.avg7dSessionMs)} (${m.sessionCount7d}회)"
+                )
+            }
 
-    // Card 3: 스와이프(전환) 평균 및 앱 내 숏폼 시청 비중
-    PersonalSubCard(title = "3. 스와이프 평균 및 숏폼 시청 비중 ($targetTitle)", accent = accent) {
-        MetricKeyValueRow(
-            leftLabel = "오늘 누적 전환(스와이프)",
-            leftValue = "${m.todaySwipes}회",
-            rightLabel = "최근 7일 일평균 스와이프",
-            rightValue = "${String.format(Locale.KOREA, "%.1f", m.avg7dDailySwipes)}회 (${m.todayVs7dSwipesRatio?.let { formatRatioBadge(it) } ?: "—"})"
-        )
-        MetricKeyValueRow(
-            leftLabel = "세션당 평균 스와이프",
-            leftValue = "${String.format(Locale.KOREA, "%.1f", m.avgSwipesPerSession)}회/세션",
-            rightLabel = "분당 평균 스와이프 (오늘 / 평소)",
-            rightValue = "${String.format(Locale.KOREA, "%.1f", m.todayAvgSpm)} / ${String.format(Locale.KOREA, "%.1f", m.personalAvgSpm)} 회/분"
-        )
-        HorizontalDivider(color = ItvLine)
-        val appLabel = when (m.filter) {
-            TargetFilter.INSTAGRAM -> "Instagram 전체 사용 중 릴스 비중"
-            TargetFilter.YOUTUBE -> "YouTube 전체 사용 중 쇼츠 비중"
-            TargetFilter.COMBINED -> "인스타+유튜브 사용 중 숏폼 비중"
+            PersonalSubCard(title = "2. 1달 일평균 비율 및 누적 사용량 ($targetTitle)", accent = accent) {
+                val ratio = m.avg7dVs30dRatio ?: m.todayVs30dRatio
+                val statusText = when {
+                    m.observedDays30d == 0 -> "최근 1달 내 숏폼 사용일이 없습니다. (무사용일은 평균에서 제외)"
+                    ratio == null -> "최근 1달 중 실제 시청한 ${m.observedDays30d}일 기준 일평균입니다."
+                    else -> "사용이 없던 날을 제외한 최근 1달 일평균 대비 최근 1주일 일평균 비율은 ${formatRatioBadge(ratio)}입니다."
+                }
+                RatioHighlightRow(
+                    label = "최근 1주일 일평균 / 1달 일평균 비율",
+                    ratio = ratio,
+                    accent = accent
+                )
+                Text(statusText, style = MaterialTheme.typography.bodySmall, color = CardSubInk)
+                HorizontalDivider(color = ItvLine)
+                MetricKeyValueRow(
+                    leftLabel = "1달 일평균 시청 (무사용일 제외)",
+                    leftValue = "${formatFullDuration(m.avg30dDailyMs)} (실사용 ${m.observedDays30d}일)",
+                    rightLabel = "1달 총 누적 시청 시간",
+                    rightValue = formatFullDuration(m.total30dDurationMs)
+                )
+                MetricKeyValueRow(
+                    leftLabel = "오늘 시청 / 1달 일평균 비율",
+                    leftValue = m.todayVs30dRatio?.let { formatRatioBadge(it) } ?: "오늘 기록 없음",
+                    rightLabel = "1달 일평균 휴대폰 사용 중 비율",
+                    rightValue = m.periodShareOfPhoneRatio?.let { formatPercent(it) } ?: "—"
+                )
+            }
+
+            PersonalSubCard(title = "3. 1달 스와이프 평균 및 앱 내 일평균 비율 ($targetTitle)", accent = accent) {
+                MetricKeyValueRow(
+                    leftLabel = "1달 일평균 스와이프 (실사용일 기준)",
+                    leftValue = "${String.format(Locale.KOREA, "%.1f", m.avg30dDailySwipes)}회/일 (총 ${m.total30dSwipes}회)",
+                    rightLabel = "1달 세션당 평균 스와이프",
+                    rightValue = "${String.format(Locale.KOREA, "%.1f", m.avg30dSwipesPerSession)}회/세션"
+                )
+                MetricKeyValueRow(
+                    leftLabel = "1달 분당 평균 스와이프 (유효 시청시간)",
+                    leftValue = "${String.format(Locale.KOREA, "%.1f", m.personalAvgSpm)} 회/분",
+                    rightLabel = appShareLabel,
+                    rightValue = m.periodShareOfAppRatio?.let { formatPercent(it) } ?: "—"
+                )
+            }
         }
-        MetricKeyValueRow(
-            leftLabel = appLabel,
-            leftValue = m.shortformShareOfAppRatio?.let { formatPercent(it) } ?: "—",
-            rightLabel = "오늘 휴대폰 전체 사용 중 비중",
-            rightValue = m.shortformShareOfPhoneRatio?.let { formatPercent(it) } ?: "—"
-        )
+
+        days >= 7 -> {
+            // 1주일 (7일) 뷰: 1주일 내 평균 세션 길이 & 1주일 일평균 비율 (무사용일·시간 제외)
+            PersonalSubCard(title = "1. 1주일 내 평균 세션 길이 ($targetTitle)", accent = accent) {
+                val ratio = m.session7dVs30dRatio ?: m.currentVsAvgSessionRatio
+                val statusText = when {
+                    m.sessionCount7d == 0 -> "최근 1주일 내 유효 숏폼 시청 세션 기록이 없습니다."
+                    ratio == null -> "최근 1주일 실사용 세션 ${m.sessionCount7d}회 기준으로 집계되었습니다. (무사용 시간 제외)"
+                    else -> "1주일 내 평균 세션 길이는 평소(1달) 평균 세션 대비 ${formatRatioBadge(ratio)}입니다."
+                }
+                RatioHighlightRow(
+                    label = "1주일 내 평균 세션 / 평소(1달) 평균 세션",
+                    ratio = ratio,
+                    accent = accent
+                )
+                Text(statusText, style = MaterialTheme.typography.bodySmall, color = CardSubInk)
+                HorizontalDivider(color = ItvLine)
+                MetricKeyValueRow(
+                    leftLabel = "1주일 내 평균 세션 길이 (무사용 제외)",
+                    leftValue = "${formatFullDuration(m.avg7dSessionMs)} (${m.sessionCount7d}회 평균)",
+                    rightLabel = "1주일 내 최장 세션 기록",
+                    rightValue = formatFullDuration(m.max7dSessionMs)
+                )
+                MetricKeyValueRow(
+                    leftLabel = "1주일 일평균 세션 횟수 (실사용일 기준)",
+                    leftValue = "${String.format(Locale.KOREA, "%.1f", m.avg7dSessionCount)}회/일 (실사용 ${m.observedDays7d}일)",
+                    rightLabel = "평소(1달) 평균 세션 길이",
+                    rightValue = "${formatFullDuration(m.avg30dSessionMs)} (${m.sessionCount30d}회)"
+                )
+            }
+
+            PersonalSubCard(title = "2. 1주일 일평균 비율 및 누적 사용량 ($targetTitle)", accent = accent) {
+                val ratio = m.avg7dVs30dRatio ?: m.todayVs7dRatio
+                val statusText = when {
+                    m.observedDays7d == 0 -> "최근 1주일 내 숏폼 사용일이 없습니다. (무사용일은 평균에서 제외)"
+                    ratio == null -> "최근 1주일 중 실제 시청한 ${m.observedDays7d}일 기준 일평균입니다."
+                    else -> "사용이 없던 날을 제외한 1주일 일평균은 평소(1달) 일평균 대비 ${formatRatioBadge(ratio)}입니다."
+                }
+                RatioHighlightRow(
+                    label = "1주일 일평균 / 평소(1달) 일평균 비율",
+                    ratio = ratio,
+                    accent = accent
+                )
+                Text(statusText, style = MaterialTheme.typography.bodySmall, color = CardSubInk)
+                HorizontalDivider(color = ItvLine)
+                MetricKeyValueRow(
+                    leftLabel = "1주일 일평균 시청 (무사용일 제외)",
+                    leftValue = "${formatFullDuration(m.avg7dDailyMs)} (실사용 ${m.observedDays7d}일)",
+                    rightLabel = "1주일 총 누적 시청 시간",
+                    rightValue = formatFullDuration(m.total7dDurationMs)
+                )
+                MetricKeyValueRow(
+                    leftLabel = "오늘 시청 / 1주일 일평균 비율",
+                    leftValue = m.todayVs7dRatio?.let { formatRatioBadge(it) } ?: "오늘 기록 없음",
+                    rightLabel = "1주일 일평균 휴대폰 사용 중 비율",
+                    rightValue = m.periodShareOfPhoneRatio?.let { formatPercent(it) } ?: "—"
+                )
+            }
+
+            PersonalSubCard(title = "3. 1주일 스와이프 평균 및 앱 내 일평균 비율 ($targetTitle)", accent = accent) {
+                MetricKeyValueRow(
+                    leftLabel = "1주일 일평균 스와이프 (실사용일 기준)",
+                    leftValue = "${String.format(Locale.KOREA, "%.1f", m.avg7dDailySwipes)}회/일 (총 ${m.total7dSwipes}회)",
+                    rightLabel = "1주일 세션당 평균 스와이프",
+                    rightValue = "${String.format(Locale.KOREA, "%.1f", m.avg7dSwipesPerSession)}회/세션"
+                )
+                MetricKeyValueRow(
+                    leftLabel = "1주일 분당 평균 스와이프 (유효 시청시간)",
+                    leftValue = "${String.format(Locale.KOREA, "%.1f", m.avg7dSpm)} 회/분",
+                    rightLabel = appShareLabel,
+                    rightValue = m.periodShareOfAppRatio?.let { formatPercent(it) } ?: "—"
+                )
+            }
+        }
+
+        else -> {
+            // 오늘 (1일) 뷰: 지금처럼 오늘의 사용량 및 개인 평균 대비 비율 표시
+            PersonalSubCard(title = "1. 개인 평균 세션 길이 대비 현재 비율 ($targetTitle)", accent = accent) {
+                val sessionRatio = m.currentVsAvgSessionRatio
+                val sessionStatusText = when {
+                    sessionRatio == null -> "아직 비교할 세션 기록이 없습니다."
+                    sessionRatio >= 1.3 -> "평소 평균 1회 시청 시간보다 ${formatPercent(sessionRatio - 1.0)} 더 길게 시청 중 (집중 개입 구간)"
+                    sessionRatio >= 0.9 -> "평소 평균 1회 시청 길이와 비슷한 수준 (${formatRatioBadge(sessionRatio)})"
+                    else -> "평소 평균 세션 길이보다 짧은 시청 (${formatRatioBadge(sessionRatio)})"
+                }
+                RatioHighlightRow(
+                    label = if (m.currentSessionLive) "현재 진행 세션 / 개인 평균 세션" else "직전(최근) 세션 / 개인 평균 세션",
+                    ratio = sessionRatio,
+                    accent = accent
+                )
+                Text(sessionStatusText, style = MaterialTheme.typography.bodySmall, color = CardSubInk)
+                HorizontalDivider(color = ItvLine)
+                MetricKeyValueRow(
+                    leftLabel = if (m.currentSessionLive) "현재 세션 시청 시간 (진행 중)" else "최근 1회 세션 시청 시간",
+                    leftValue = formatFullDuration(m.currentSessionMs),
+                    rightLabel = "개인 평균 세션 길이 (무사용 제외)",
+                    rightValue = "${formatFullDuration(m.avgSessionMs)} (${m.totalRecordedSessions}회 평균)"
+                )
+                MetricKeyValueRow(
+                    leftLabel = "오늘 시청 세션 횟수",
+                    leftValue = "${m.todaySessionCount}회 (7일 평균 ${String.format(Locale.KOREA, "%.1f", m.avg7dSessionCount)}회/일)",
+                    rightLabel = "개인 최장 세션 기록",
+                    rightValue = formatFullDuration(m.maxSessionMs)
+                )
+            }
+
+            PersonalSubCard(title = "2. 오늘 누적시간 vs 최근 7일 일평균 비율 ($targetTitle)", accent = accent) {
+                val dailyRatio = m.todayVs7dRatio
+                val dailyStatusText = when {
+                    dailyRatio == null -> "오늘 시청 기록과 최근 7일 실사용 기록이 쌓이면 일평균 대비 비율이 표시됩니다."
+                    dailyRatio >= 1.25 -> "최근 7일 일평균보다 ${formatPercent(dailyRatio - 1.0)} 초과 시청 중 (일일 과사용 주의)"
+                    dailyRatio >= 0.85 -> "최근 7일 일평균 수준에 근접 (${formatRatioBadge(dailyRatio)})"
+                    else -> "최근 7일 일평균 대비 여유 있음 (${formatRatioBadge(dailyRatio)})"
+                }
+                RatioHighlightRow(
+                    label = "오늘 누적 시청 / 최근 7일 일평균",
+                    ratio = dailyRatio,
+                    accent = accent
+                )
+                Text(dailyStatusText, style = MaterialTheme.typography.bodySmall, color = CardSubInk)
+                HorizontalDivider(color = ItvLine)
+                MetricKeyValueRow(
+                    leftLabel = "오늘 누적 시청 시간",
+                    leftValue = formatFullDuration(m.todayDurationMs),
+                    rightLabel = "최근 7일 일평균 (무사용일 제외)",
+                    rightValue = "${formatFullDuration(m.avg7dDailyMs)} (실사용 ${m.observedDays7d}일)"
+                )
+                MetricKeyValueRow(
+                    leftLabel = "최근 7일 총 누적 시간",
+                    leftValue = formatFullDuration(m.total7dDurationMs),
+                    rightLabel = "최근 30일 일평균 (오늘 비율)",
+                    rightValue = "${formatFullDuration(m.avg30dDailyMs)} (${m.todayVs30dRatio?.let { formatPercent(it) } ?: "—"})"
+                )
+            }
+
+            PersonalSubCard(title = "3. 오늘 스와이프 평균 및 숏폼 시청 비중 ($targetTitle)", accent = accent) {
+                MetricKeyValueRow(
+                    leftLabel = "오늘 누적 전환(스와이프)",
+                    leftValue = "${m.todaySwipes}회",
+                    rightLabel = "최근 7일 일평균 스와이프",
+                    rightValue = "${String.format(Locale.KOREA, "%.1f", m.avg7dDailySwipes)}회 (${m.todayVs7dSwipesRatio?.let { formatRatioBadge(it) } ?: "—"})"
+                )
+                MetricKeyValueRow(
+                    leftLabel = "세션당 평균 스와이프",
+                    leftValue = "${String.format(Locale.KOREA, "%.1f", m.avgSwipesPerSession)}회/세션",
+                    rightLabel = "분당 평균 스와이프 (오늘 / 평소)",
+                    rightValue = "${String.format(Locale.KOREA, "%.1f", m.todayAvgSpm)} / ${String.format(Locale.KOREA, "%.1f", m.personalAvgSpm)} 회/분"
+                )
+                HorizontalDivider(color = ItvLine)
+                MetricKeyValueRow(
+                    leftLabel = appShareLabel,
+                    leftValue = m.shortformShareOfAppRatio?.let { formatPercent(it) } ?: "—",
+                    rightLabel = "오늘 휴대폰 전체 사용 중 비중",
+                    rightValue = m.shortformShareOfPhoneRatio?.let { formatPercent(it) } ?: "—"
+                )
+            }
+        }
     }
 }
 

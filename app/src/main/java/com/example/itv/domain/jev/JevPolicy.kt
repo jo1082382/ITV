@@ -51,11 +51,18 @@ data class JevContext(
     val bedtimePassedMinutes: Int?,
     val observedAt: Long,
     val quality: String = "VALID",
+    val personalAvgSessionMinutes: Double? = null,
     val sessionVsAvgRatio: Double? = null,
+    val todayShortformMinutes: Double? = null,
+    val avg7dDailyMinutes: Double? = null,
     val todayVs7dRatio: Double? = null,
     val effectiveSpm1m: Double? = null,
+    val effectiveSessionSpm: Double? = null,
+    val personalAvgSpm: Double? = null,
+    val currentVsPersonalSpmRatio: Double? = null,
     val swipeAccel1m: Double? = null,
-    val fastSwipeStreak: Int = 0
+    val fastSwipeStreak: Int = 0,
+    val swipeOverheated: Boolean = false
 )
 
 object JevCandidatePolicy {
@@ -110,6 +117,27 @@ object JevCandidatePolicy {
         val minBound = minOf(s.probabilityThreshold, 0.30)
         val maxBound = maxOf(s.probabilityThreshold, 0.95)
         return (kotlin.math.round((s.probabilityThreshold + clampedDelta).coerceIn(minBound, maxBound) * 1000.0) / 1000.0)
+    }
+
+    /** Concise, human-readable summary of how and why the effective probability threshold changed. */
+    fun thresholdBreakdown(s: JevSettings, c: JevContext? = null): String {
+        val basePct = s.probabilityThreshold * 100.0
+        if (!s.personalizedEnabled) return "기본 ${"%.0f".format(basePct)}% (보정 꺼짐)"
+        if (c == null) return "기본 ${"%.0f".format(basePct)}% (관측 대기)"
+        val effPct = effectiveThreshold(s, c) * 100.0
+        val diffPct = effPct - basePct
+        val factors = mutableListOf<String>()
+        if ((c.todayVs7dRatio ?: 0.0) >= 1.30) factors.add("오늘비율 -5%p")
+        if ((c.sessionVsAvgRatio ?: 0.0) >= 1.25) factors.add("세션비율 -5%p")
+        if (isSwipeOverheated(c)) factors.add("스와이프과열 -5%p")
+        if (factors.isEmpty() && diffPct > 0.04) factors.add("짧은시청·안정 +5%p")
+        return if (kotlin.math.abs(diffPct) >= 0.05 || factors.isNotEmpty()) {
+            val sign = if (diffPct > 0) "+" else ""
+            val detail = if (factors.isNotEmpty()) " · ${factors.joinToString(", ")}" else ""
+            "기본 ${"%.0f".format(basePct)}% → ${"%.0f".format(effPct)}% (${sign}${"%.0f".format(diffPct)}%p$detail)"
+        } else {
+            "기본 ${"%.0f".format(basePct)}% (변화 0%p)"
+        }
     }
 
     fun passes(probability: Double, s: JevSettings, c: JevContext? = null): Boolean {
@@ -201,5 +229,11 @@ class JevSessionTracker(private val newId: () -> String) {
     /** Restore totals only. Never restore continuity or absence from a wall-clock difference. */
     fun restore(pkg: String, id: String, totalMs: Long, entered: Boolean) {
         states[pkg] = AppState(id,totalMs.coerceAtLeast(0),entered=entered)
+    }
+    /** Reset session state for a package when a new calendar day starts or >= 10 minutes of real absence elapsed. */
+    fun resetSession(pkg: String) {
+        states[pkg] = AppState(newId())
+        if (previousPkg == pkg) previousPkg = null
+        if (previousConfirmed == pkg) previousConfirmed = null
     }
 }
