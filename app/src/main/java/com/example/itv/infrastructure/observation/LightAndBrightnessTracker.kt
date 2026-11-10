@@ -26,6 +26,27 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.time.LocalDate
+import java.time.LocalTime
+
+enum class BedtimePhase {
+    ACTIVE_HOURS,   // 평소 취침 시간과 먼 일상 활동 시간대
+    APPROACHING,    // 평소 취침 시각 120분 이내 (취침 임박)
+    PAST_BEDTIME,   // 평소 취침 시각 경과 (심야 수면 시간대)
+    UNKNOWN         // 추정 취침 시각 정보 없음
+}
+
+enum class UserEnvironmentState {
+    OUTDOOR_BRIGHT,       // 야외/강한 햇빛
+    INDOOR_ACTIVE,        // 주간/실내 일상 활동
+    INDOOR_DARK_ACTIVE,   // 일상 시간대 암실 사용
+    PRE_SLEEP_REST,       // 취침 전 불 끄고 수면 준비 (어두운 조도 + 어두운 화면)
+    BEDTIME_DELAY_WATCH,  // 취침 시간대 수면 지연 (어두운 조도 + 밝은 화면 응시)
+    NIGHT_ACTIVE,         // 취침 시간대이나 조명 켜고 활동 중
+    SENSOR_OCCLUDED,      // 센서 가림 (손/침구류 차단)
+    UNKNOWN
+}
 
 data class AmbientSnapshot(
     val lux: Float?,
@@ -38,7 +59,13 @@ data class AmbientSnapshot(
     val stateLabel: String,
     val explanation: String,
     val isSampling: Boolean = false, // 현재 센서 측정 중(윈도우 동작) 여부
-    val lastTriggerReason: String = "초기 상태"
+    val lastTriggerReason: String = "초기 상태",
+    val estimatedBedtimeHour: Int? = null,
+    val estimatedBedtimeMinute: Int? = null,
+    val bedtimeDistanceMinutes: Int? = null,
+    val bedtimePhase: BedtimePhase = BedtimePhase.UNKNOWN,
+    val userEnvironmentState: UserEnvironmentState = UserEnvironmentState.INDOOR_ACTIVE,
+    val estimatedBedtimeSource: String = "미측정"
 )
 
 class LightAndBrightnessTracker(context: Context) : SensorEventListener {
@@ -50,16 +77,6 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
-    private val _snapshot = MutableStateFlow(
-        readCurrent(
-            lux = null,
-            proximity = null,
-            isSampling = false,
-            triggerReason = "초기 상태"
-        )
-    )
-    val snapshot = _snapshot.asStateFlow()
-
     private var currentLux: Float? = null
     private var currentProximity: Float? = null
 
@@ -70,6 +87,20 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
     private var sampleJob: Job? = null
     private var periodicJob: Job? = null
     private var lastObservedBrightness: Int? = null
+
+    private var estimatedStartHour: Int? = null
+    private var estimatedStartMinute: Int? = null
+    private var estimatedSource: String = "미측정"
+
+    private val _snapshot = MutableStateFlow(
+        readCurrent(
+            lux = null,
+            proximity = null,
+            isSampling = false,
+            triggerReason = "초기 상태"
+        )
+    )
+    val snapshot = _snapshot.asStateFlow()
 
     companion object {
         @Volatile
@@ -139,6 +170,7 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
 
         // 3. 현재 화면 상태 체크
         isScreenOn = powerManager?.isInteractive ?: true
+        loadBedtimeEstimates()
         if (isScreenOn) {
             triggerSampleWindow(durationMs = 3500L, reason = "감지 시작 (초기 샘플링)", force = true)
             schedulePeriodicSampling()
@@ -169,7 +201,50 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
     }
 
     fun refresh() {
+        loadBedtimeEstimates()
         triggerSampleWindow(durationMs = 3500L, reason = "수동 새로고침", force = true)
+    }
+
+    private fun loadBedtimeEstimates() {
+        scope.launch(Dispatchers.IO) {
+            try {
+                val db = com.example.itv.data.local.ItvDatabase.get(appContext)
+                val today = LocalDate.now()
+                val dates = (0L..30L).map { today.minusDays(it).toString() }
+                val confirmationStore = com.example.itv.infrastructure.records.RoomSleepConfirmationStore(db, "demo-guest")
+                val confirmations = dates.mapNotNull { d -> confirmationStore.read(d)?.let { d to it } }.toMap()
+                val window = com.example.itv.domain.records.SleepSummaryPolicy.estimateBedtimeWindow(confirmations)
+
+                var h: Int? = null
+                var m: Int? = null
+                var src = "기본값 (23:30)"
+
+                if (window != null) {
+                    h = window.avgStartHour
+                    m = window.avgStartMinute
+                    src = "수면 확인 기록 (${window.validCount}일 평균)"
+                } else {
+                    val goal = db.dao().goal("demo-guest", "BEDTIME")
+                    val goalDetail = goal?.goalId?.let { db.dao().bedtimeGoal(it) }
+                    if (goal?.enabled == true && goalDetail != null) {
+                        h = goalDetail.localMinuteOfDay / 60
+                        m = goalDetail.localMinuteOfDay % 60
+                        src = "설정된 취침 목표"
+                    } else {
+                        h = 23
+                        m = 30
+                        src = "기본 기준 시각 (23:30)"
+                    }
+                }
+
+                withContext(Dispatchers.Main) {
+                    estimatedStartHour = h
+                    estimatedStartMinute = m
+                    estimatedSource = src
+                    update(force = true, isSampling = _snapshot.value.isSampling, triggerReason = "취침 추정 정보 갱신")
+                }
+            } catch (_: Exception) {}
+        }
     }
 
     fun onAppSwitched() {
@@ -286,8 +361,10 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         // 3. 근접 상태 변경 (원거리 ↔ 근접)
         if (old.isNear != new.isNear) return true
 
-        // 4. 환경 상태 판별 라벨 변경 (취침 전, 야간 시청, 일반 실내, 주간 활동 등)
+        // 4. 환경 상태 판별 라벨 또는 세부 상태 변경
         if (old.stateLabel != new.stateLabel) return true
+        if (old.userEnvironmentState != new.userEnvironmentState) return true
+        if (old.bedtimePhase != new.bedtimePhase) return true
 
         // 5. 다크 모드 또는 화면 밝기 대폭 변경
         if (old.nightModeActive != new.nightModeActive) return true
@@ -296,7 +373,6 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         ) return true
 
         // 6. 조도 센서: 판단이 바뀌지 않는 미세 변동(예: 2~5 lux 플리커링)은 초기값 유지
-        // 환경이 실질적으로 변했다고 볼 수 있는 큰 폭의 조도 변화(30 lux 이상 및 50% 이상 변화) 시에만 갱신
         val oldLux = old.lux
         val newLux = new.lux
         if (oldLux != null && newLux != null) {
@@ -316,6 +392,13 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         } catch (_: Exception) {
             0
         }
+    }
+
+    private fun circularMinuteDiff(currentMinute: Int, targetMinute: Int): Int {
+        var diff = (currentMinute - targetMinute) % 1440
+        if (diff > 720) diff -= 1440
+        if (diff < -720) diff += 1440
+        return diff
     }
 
     private fun readCurrent(
@@ -338,26 +421,155 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         val isOccluded = isNear && (lux == null || lux <= 10f)
 
         val isDarkAmbient = lux != null && lux <= 15f
-        val isBrightAmbient = lux != null && lux > 200f
+        val isBrightAmbient = lux != null && lux > 150f
+        val isVeryBrightAmbient = lux != null && lux > 1000f
         val isDarkScreen = brightness != null && brightness <= 75
         val isBrightScreen = brightness != null && brightness > 180
 
-        val (label, explanation) = when {
-            isOccluded -> "센서 가림 감지 (손/물체 차단 의심)" to
-                "근접 센서가 근접 상태(${proximity}cm)이고 조도가 극도로 낮습니다(${lux?.toInt() ?: 0} lux). 손이나 이불, 거치대 등으로 상단 센서가 가려져 조도가 낮게 측정되었을 가능성이 높습니다."
-            isNear && !isDarkAmbient -> "근접 감지 (물체 접근 중)" to
-                "상단에 물체/손이 근접해 있으나(${proximity}cm) 주변 조도(${lux?.toInt() ?: 0} lux)가 남아있는 상태입니다."
-            lux == null -> "조도 센서 대기 중" to "센서 샘플링 대기 중이거나 측정값을 수신하는 중입니다."
-            isDarkAmbient && isDarkScreen -> "취침 전 상태 (어두운 조도 + 어두운 화면)" to
-                "상단 가림 없이 주변이 어둡고(조도 ${lux.toInt()} lux) 화면 밝기도 낮아(${brightness}/255, ${if (nightMode) "다크모드 ON" else "다크모드 OFF"}), 불을 끄고 누워 있거나 취침 준비 중일 가능성이 높습니다."
-            isDarkAmbient && !isDarkScreen -> "야간 시청 상태 (어두운 조도 + 보통/밝은 화면)" to
-                "상단 가림 없이 주변은 어두우나(조도 ${lux.toInt()} lux) 화면이 밝습니다. 눈의 피로도가 높고 수면 지연 중일 가능성이 있습니다."
-            isBrightAmbient && isBrightScreen -> "주간/밝은 활동 상태 (밝은 조도 + 밝은 화면)" to
-                "주변 조도가 밝고(${lux.toInt()} lux) 화면도 밝아 활발한 일상 활동 상태입니다."
-            !isDarkAmbient && !isBrightAmbient -> "일반 실내 활동 상태 (보통 조도)" to
-                "실내 조명 환경(조도 ${lux.toInt()} lux, 밝기 ${brightness ?: "-"} / 255)에서의 일반적인 사용 상태입니다."
-            else -> "일반 사용 상태" to
-                "조도 ${lux.toInt()} lux, 화면 밝기 ${brightness ?: "-"} / 255, ${if (nightMode) "다크모드 ON" else "다크모드 OFF"}"
+        // 평소 추정 취침 시각 연계 계산
+        val nowTime = LocalTime.now()
+        val currentMinuteOfDay = nowTime.hour * 60 + nowTime.minute
+
+        val h = estimatedStartHour
+        val m = estimatedStartMinute
+        val hasBedtime = h != null && m != null
+        val targetMinuteOfDay = if (hasBedtime) (h!! * 60 + m!!) else (23 * 60 + 30)
+        val diffMinutes = circularMinuteDiff(currentMinuteOfDay, targetMinuteOfDay)
+
+        val bedtimePhase = when {
+            !hasBedtime -> BedtimePhase.UNKNOWN
+            diffMinutes in -120..-1 -> BedtimePhase.APPROACHING
+            diffMinutes in 0..360 -> BedtimePhase.PAST_BEDTIME
+            else -> BedtimePhase.ACTIVE_HOURS
+        }
+
+        val bedtimeText = if (hasBedtime) "%02d:%02d".format(h, m) else "23:30(기준)"
+        val bedtimeDistanceText = when {
+            diffMinutes < 0 -> {
+                val remTotal = -diffMinutes
+                val remH = remTotal / 60
+                val remM = remTotal % 60
+                if (remH > 0) "${remH}시간 ${remM}분 전" else "${remM}분 전"
+            }
+            diffMinutes == 0 -> "지금이 취침 시각"
+            else -> {
+                val passedH = diffMinutes / 60
+                val passedM = diffMinutes % 60
+                if (passedH > 0) "${passedH}시간 ${passedM}분 경과" else "${passedM}분 경과"
+            }
+        }
+
+        val (state, label, explanation) = when {
+            // [CASE 0] 상단 센서 가림 (물체/손/침구류 차단)
+            isOccluded -> {
+                val detail = if (bedtimePhase == BedtimePhase.PAST_BEDTIME || bedtimePhase == BedtimePhase.APPROACHING) {
+                    "취침 시간대(평소 취침 $bedtimeText, $bedtimeDistanceText)에 근접 센서(${proximity}cm)와 조도 센서가 동시에 가려져 있습니다. 스마트폰이 침대/이불에 엎어져 있거나 손으로 상단을 덮고 있을 가능성이 높습니다."
+                } else {
+                    "활동 시간대(평소 취침 ${bedtimeText}까지 $bedtimeDistanceText)이나 근접 센서가 근접 상태(${proximity}cm)이고 조도가 극도로 낮습니다(${lux?.toInt() ?: 0} lux). 손이나 물체에 의해 상단 센서가 가려져 있을 가능성이 높습니다."
+                }
+                Triple(
+                    UserEnvironmentState.SENSOR_OCCLUDED,
+                    "센서 가림 감지 (손/침구류 차단 의심)",
+                    detail
+                )
+            }
+
+            // 센서 대기 상태
+            lux == null -> {
+                Triple(
+                    UserEnvironmentState.UNKNOWN,
+                    "조도 센서 대기 중",
+                    "센서 샘플링 대기 중이거나 측정값을 수신하는 중입니다. (평소 추정 취침: $bedtimeText)"
+                )
+            }
+
+            // [CASE 1] 평소 추정 취침 시각과 가깝거나 그 이후 (APPROACHING 또는 PAST_BEDTIME)
+            bedtimePhase == BedtimePhase.APPROACHING || bedtimePhase == BedtimePhase.PAST_BEDTIME -> {
+                val timePrefix = if (bedtimePhase == BedtimePhase.PAST_BEDTIME) {
+                    "평소 추정 취침 시각($bedtimeText)을 $bedtimeDistanceText 넘긴 심야 시간대입니다."
+                } else {
+                    "평소 추정 취침 시각($bedtimeText)이 ${bedtimeDistanceText}으로 임박한 취침 준비 시간대입니다."
+                }
+
+                when {
+                    // 1-1. 어두운 방 + 어두운 화면 (취침 준비 / 수면 전 누워서 사용)
+                    isDarkAmbient && isDarkScreen -> {
+                        Triple(
+                            UserEnvironmentState.PRE_SLEEP_REST,
+                            "취침 전 수면 준비 상태 (어두운 조도 + 어두운 화면)",
+                            "$timePrefix 방 조명을 끄고(조도 ${lux.toInt()} lux) 화면 밝기도 낮춘(${brightness}/255, ${if (nightMode) "다크모드 ON" else "다크모드 OFF"}) 상태로, 곧 잠자리에 들 준비 중일 가능성이 높습니다."
+                        )
+                    }
+                    // 1-2. 어두운 방 + 보통/밝은 화면 (수면 지연 / 베드타임 프로크래스티네이션)
+                    isDarkAmbient && !isDarkScreen -> {
+                        Triple(
+                            UserEnvironmentState.BEDTIME_DELAY_WATCH,
+                            "취침 지연 과몰입 상태 (어두운 조명 + 밝은 화면 응시)",
+                            "$timePrefix 불을 끈 어두운 방(조도 ${lux.toInt()} lux)에서 밝은 화면(${brightness}/255)을 계속 응시하고 있어, 눈 피로도 증가와 멜라토닌 분비 억제로 인한 수면 지연(취침 미루기) 위험이 큽니다."
+                        )
+                    }
+                    // 1-3. 조명 켜짐 (취침 시간대이나 실내 불을 켜두고 활동 중)
+                    else -> {
+                        Triple(
+                            UserEnvironmentState.NIGHT_ACTIVE,
+                            "야간 활동 유지 상태 (취침 시간대 실내 조명 켜짐)",
+                            "$timePrefix 아직 실내 조명(조도 ${lux.toInt()} lux)이 켜져 있고 화면(${brightness ?: "-"} / 255)을 사용 중으로, 잠자리에 들지 않고 야간 활동을 이어가고 있습니다."
+                        )
+                    }
+                }
+            }
+
+            // [CASE 2] 평소 추정 취침 시각과 멀 때 (ACTIVE_HOURS)
+            else -> {
+                val timePrefix = if (diffMinutes < 0) {
+                    "평소 추정 취침 시각($bedtimeText)까지 아직 $bedtimeDistanceText 남아있는 일상 활동 시간대입니다."
+                } else {
+                    "평소 추정 취침 시각($bedtimeText)으로부터 $bedtimeDistanceText 지난 일상 활동 시간대입니다."
+                }
+
+                when {
+                    // 2-1. 야외 / 매우 밝은 직사광선 환경
+                    isVeryBrightAmbient && isBrightScreen -> {
+                        Triple(
+                            UserEnvironmentState.OUTDOOR_BRIGHT,
+                            "야외 활동 상태 (직사광선/밝은 야외 + 고화면 밝기)",
+                            "$timePrefix 주변 조도가 매우 밝은(${lux.toInt()} lux) 야외 환경이며, 화면 밝기(${brightness}/255)도 높아 활발한 야외 활동 상태입니다."
+                        )
+                    }
+                    // 2-2. 주간 / 밝은 실내 환경
+                    isBrightAmbient -> {
+                        Triple(
+                            UserEnvironmentState.INDOOR_ACTIVE,
+                            "주간/밝은 실내 활동 상태 (밝은 조도 + 활동형 화면)",
+                            "$timePrefix 주변 환경이 밝고(${lux.toInt()} lux) 화면도 적정 밝기(${brightness ?: "-"} / 255)인 정상적인 주간 활동 상태입니다."
+                        )
+                    }
+                    // 2-3. 보통 실내 조명 환경
+                    !isDarkAmbient -> {
+                        Triple(
+                            UserEnvironmentState.INDOOR_ACTIVE,
+                            "실내 일상 활동 상태 (실내 조명 + 일반 화면)",
+                            "$timePrefix 실내 조명 조도(${lux.toInt()} lux) 환경에서 일반적인 화면 밝기(${brightness ?: "-"} / 255, ${if (nightMode) "다크모드 ON" else "다크모드 OFF"})로 활동 중인 상태입니다."
+                        )
+                    }
+                    // 2-4. 활동 시간대이나 어두운 실내 (암실 시청)
+                    !isDarkScreen -> {
+                        Triple(
+                            UserEnvironmentState.INDOOR_DARK_ACTIVE,
+                            "활동 시간대 암실 시청 상태 (어두운 실내 + 밝은 화면 응시)",
+                            "$timePrefix 주변 조명이 어두우나(${lux.toInt()} lux) 밝은 화면(${brightness}/255)을 응시하고 있어 눈 피로도가 증가할 수 있습니다."
+                        )
+                    }
+                    // 2-5. 활동 시간대 어두운 실내 절전
+                    else -> {
+                        Triple(
+                            UserEnvironmentState.INDOOR_DARK_ACTIVE,
+                            "활동 시간대 암실 절전 상태 (어두운 실내 + 어두운 화면)",
+                            "$timePrefix 어두운 실내 공간(조도 ${lux.toInt()} lux)에서 화면 밝기를 낮추어(${brightness}/255) 사용 중인 절전 활동 상태입니다."
+                        )
+                    }
+                }
+            }
         }
 
         return AmbientSnapshot(
@@ -371,7 +583,13 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
             stateLabel = label,
             explanation = explanation,
             isSampling = isSampling,
-            lastTriggerReason = triggerReason
+            lastTriggerReason = triggerReason,
+            estimatedBedtimeHour = h,
+            estimatedBedtimeMinute = m,
+            bedtimeDistanceMinutes = diffMinutes,
+            bedtimePhase = bedtimePhase,
+            userEnvironmentState = state,
+            estimatedBedtimeSource = (estimatedSource as String?).orEmpty().ifEmpty { "미측정" }
         )
     }
 }

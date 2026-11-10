@@ -619,13 +619,36 @@ private fun AmbientLightBrightnessTestCard() {
             fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
             color = when {
                 snapshot.isOccluded -> MaterialTheme.colorScheme.error
-                snapshot.stateLabel.contains("취침") -> MaterialTheme.colorScheme.primary
+                snapshot.userEnvironmentState == com.example.itv.infrastructure.observation.UserEnvironmentState.BEDTIME_DELAY_WATCH -> MaterialTheme.colorScheme.error
+                snapshot.userEnvironmentState == com.example.itv.infrastructure.observation.UserEnvironmentState.PRE_SLEEP_REST -> MaterialTheme.colorScheme.primary
                 else -> MaterialTheme.colorScheme.onSurface
             }
         )
         Text(
             text = snapshot.explanation,
             style = MaterialTheme.typography.bodyMedium
+        )
+        HorizontalDivider(Modifier.padding(vertical = 6.dp))
+        val bedtimeDisplay = if (snapshot.estimatedBedtimeHour != null && snapshot.estimatedBedtimeMinute != null) {
+            val h = snapshot.estimatedBedtimeHour!!
+            val m = snapshot.estimatedBedtimeMinute!!
+            val phaseLabel = when (snapshot.bedtimePhase) {
+                com.example.itv.infrastructure.observation.BedtimePhase.ACTIVE_HOURS -> "일상 활동 시간대 (취침과 거리 멂)"
+                com.example.itv.infrastructure.observation.BedtimePhase.APPROACHING -> "취침 임박 시간대 (2시간 이내)"
+                com.example.itv.infrastructure.observation.BedtimePhase.PAST_BEDTIME -> "취침 시각 경과 (심야 수면 시간대)"
+                else -> "확인 대기"
+            }
+            "%02d:%02d (%s · 출처: %s)".format(h, m, phaseLabel, snapshot.estimatedBedtimeSource)
+        } else {
+            "취침 기록 분석 대기 중"
+        }
+        Text(
+            text = "• 평소 추정 취침 시각: $bedtimeDisplay",
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+            color = if (snapshot.bedtimePhase == com.example.itv.infrastructure.observation.BedtimePhase.PAST_BEDTIME ||
+                snapshot.bedtimePhase == com.example.itv.infrastructure.observation.BedtimePhase.APPROACHING)
+                MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
         )
         HorizontalDivider(Modifier.padding(vertical = 6.dp))
         Text(

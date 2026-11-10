@@ -36,13 +36,29 @@ object InterventionReasonResolver {
             }
         }
 
-        // 2. 어두운 환경 / 취침 전 조도 상태
+        // 2. 환경 조도 및 취침 연계 상태
         if (ambient != null) {
-            val isDarkAmbient = ambient.lux != null && ambient.lux <= 15f
-            if (ambient.stateLabel.contains("취침") || (isDarkAmbient && !ambient.isOccluded)) {
-                candidates.add(PrioritizedReason(90, "주변이 어두운데 화면을 보고 있어 눈이 피로해 보여!"))
-            } else if (ambient.stateLabel.contains("야간 시청") || (isDarkAmbient && (ambient.screenBrightness ?: 0) > 100)) {
-                candidates.add(PrioritizedReason(88, "어두운 방에서 밝은 화면을 보면 눈이 많이 지쳐!"))
+            when (ambient.userEnvironmentState) {
+                com.example.itv.infrastructure.observation.UserEnvironmentState.BEDTIME_DELAY_WATCH -> {
+                    candidates.add(PrioritizedReason(92, "취침 시간인데 어두운 방에서 밝은 화면을 보면 눈이 많이 지쳐!"))
+                }
+                com.example.itv.infrastructure.observation.UserEnvironmentState.PRE_SLEEP_REST -> {
+                    candidates.add(PrioritizedReason(90, "불을 끄고 누워서 보고 있네! 이제 눈을 감고 같이 잘 시간이야 🐾"))
+                }
+                com.example.itv.infrastructure.observation.UserEnvironmentState.NIGHT_ACTIVE -> {
+                    candidates.add(PrioritizedReason(88, "평소 자던 시간보다 늦었어! 내일을 위해 슬슬 마무리하자!"))
+                }
+                com.example.itv.infrastructure.observation.UserEnvironmentState.INDOOR_DARK_ACTIVE -> {
+                    candidates.add(PrioritizedReason(82, "어두운 실내에서 밝은 화면을 보고 있어 눈이 피로해 보여!"))
+                }
+                else -> {
+                    val isDarkAmbient = ambient.lux != null && ambient.lux <= 15f
+                    if (ambient.stateLabel.contains("취침") || (isDarkAmbient && !ambient.isOccluded)) {
+                        candidates.add(PrioritizedReason(85, "주변이 어두운데 화면을 보고 있어 눈이 피로해 보여!"))
+                    } else if (ambient.stateLabel.contains("야간 시청") || (isDarkAmbient && (ambient.screenBrightness ?: 0) > 100)) {
+                        candidates.add(PrioritizedReason(85, "어두운 방에서 밝은 화면을 보면 눈이 많이 지쳐!"))
+                    }
+                }
             }
         }
 

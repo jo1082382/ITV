@@ -89,8 +89,62 @@ class InterventionReasonResolverTest {
         )
 
         assertTrue(reasons.size <= 3)
-        // 어두운 조도 사유(우선순위 90)가 2분 연속 시청(우선순위 80)보다 먼저 나와야 함
+        // 어두운 조도 사유(우선순위 85)가 2분 연속 시청(우선순위 80)보다 먼저 나와야 함
         assertTrue(reasons[0].contains("주변이 어두운데"))
         assertTrue(reasons[1].contains("2분 넘게"))
+    }
+
+    @Test
+    fun bedtimeDelayWatchStateGeneratesMelatoninWarningReason() {
+        val ambient = AmbientSnapshot(
+            lux = 5f,
+            proximityDistanceCm = 5f,
+            proximityMaxRangeCm = 5f,
+            isNear = false,
+            isOccluded = false,
+            screenBrightness = 180,
+            nightModeActive = false,
+            stateLabel = "취침 지연 과몰입 상태 (어두운 조명 + 밝은 화면 응시)",
+            explanation = "test",
+            userEnvironmentState = com.example.itv.infrastructure.observation.UserEnvironmentState.BEDTIME_DELAY_WATCH
+        )
+
+        val reasons = InterventionReasonResolver.resolveReasons(
+            isJev = false,
+            jevContext = null,
+            continuousUsedMs = 120_000L,
+            ambient = ambient,
+            shortformAppName = "YouTube 쇼츠",
+            localTime = LocalTime.of(23, 45)
+        )
+
+        assertTrue(reasons.any { it.contains("취침 시간인데 어두운 방에서 밝은 화면") })
+    }
+
+    @Test
+    fun preSleepRestStateGeneratesGentleSleepReason() {
+        val ambient = AmbientSnapshot(
+            lux = 3f,
+            proximityDistanceCm = 5f,
+            proximityMaxRangeCm = 5f,
+            isNear = false,
+            isOccluded = false,
+            screenBrightness = 35,
+            nightModeActive = true,
+            stateLabel = "취침 전 수면 준비 상태",
+            explanation = "test",
+            userEnvironmentState = com.example.itv.infrastructure.observation.UserEnvironmentState.PRE_SLEEP_REST
+        )
+
+        val reasons = InterventionReasonResolver.resolveReasons(
+            isJev = false,
+            jevContext = null,
+            continuousUsedMs = 120_000L,
+            ambient = ambient,
+            shortformAppName = "Instagram 릴스",
+            localTime = LocalTime.of(0, 30)
+        )
+
+        assertTrue(reasons.any { it.contains("불을 끄고 누워서 보고 있네") })
     }
 }
