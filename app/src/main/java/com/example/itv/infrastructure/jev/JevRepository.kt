@@ -100,7 +100,6 @@ class JevRepository private constructor(context: Context) {
             val day=LocalDate.now(ZoneOffset.UTC).toString()
             val key="daily_${settings.testerId}_$day"
             val count=store.readControl(key)?.toIntOrNull() ?: 0
-            check(count<settings.dailyLimit) { "이 기기의 일일 호출 한도에 도달했습니다." }
             val settingsJson = settings.json().put("effectiveProbabilityThreshold", JevCandidatePolicy.effectiveThreshold(settings, c))
             val payload=c.json().put("protocol_version",2).put("id",requestId).put("tester_id",settings.testerId)
                 .put("source",source).put("trigger_reason",reason).put("settings",settingsJson)

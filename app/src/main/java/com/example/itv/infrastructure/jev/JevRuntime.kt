@@ -22,11 +22,27 @@ import java.util.UUID
 import kotlin.time.Duration.Companion.seconds
 
 object JevObservationHub {
+    val transientSystemPackages = setOf(
+        "com.samsung.android.app.smartcapture",
+        "com.samsung.android.capture",
+        "com.sec.android.app.quicktool",
+        "com.android.systemui",
+        "com.google.android.markup"
+    )
+
+    fun isTransientSystemPackage(pkg: String?): Boolean {
+        return pkg != null && pkg in transientSystemPackages
+    }
+
     @Volatile var foregroundPackage: String?=null
         private set
     @Volatile var checkedAt: Long=0
         private set
     fun foreground(pkg: String?) {
+        if (isTransientSystemPackage(pkg)) {
+            checkedAt = SystemClock.elapsedRealtime()
+            return
+        }
         val changed = foregroundPackage != pkg
         foregroundPackage = pkg
         checkedAt = SystemClock.elapsedRealtime()
@@ -35,7 +51,16 @@ object JevObservationHub {
         }
     }
 }
-data class JevLiveState(val status: String="Jev 꺼짐",val context: JevContext?=null,val probability: Double?=null,val pending: Boolean=false)
+data class JevLiveState(
+    val status: String="Jev 꺼짐",
+    val context: JevContext?=null,
+    val probability: Double?=null,
+    val pending: Boolean=false,
+    val dynamicIntervalSeconds: Int?=null,
+    val lastProbabilityGap: Double?=null,
+    val nextEvaluationInSeconds: Long?=null,
+    val additionalViewingNeededSeconds: Long?=null
+)
 
 /** Main-thread coordinator. Network/Room/Keystore work is delegated to IO implementations. */
 class JevRuntime private constructor(context: Context) {
@@ -47,7 +72,7 @@ class JevRuntime private constructor(context: Context) {
     private val mutableState=MutableStateFlow(JevLiveState())
     val state: StateFlow<JevLiveState> = mutableState.asStateFlow()
     private data class Attempt(var at: Long=0,var total: Long=0,var asked: Boolean=false,var suppressedSession: String?=null,
-                               var deferUntil: Long=0,var lastSession: String?=null)
+                               var deferUntil: Long=0,var lastSession: String?=null,var dynamicIntervalSeconds: Int=300,var lastGap: Double?=null)
     private val controls=mutableMapOf<String,Attempt>()
     private val lastActiveWallMs=mutableMapOf<String,Long>()
     private val lastActiveDate=mutableMapOf<String,String>()
@@ -93,7 +118,9 @@ class JevRuntime private constructor(context: Context) {
                             controls[pkg]=Attempt(if(sameBoot)a.optLong("at") else SystemClock.elapsedRealtime(),a.optLong("attemptTotal"),
                                 a.optBoolean("asked"),a.optString("suppressed").takeIf { it.isNotEmpty() },
                                 if(sameBoot)a.optLong("deferUntil") else if(a.optLong("deferUntil")>0)Long.MAX_VALUE else 0,
-                                a.optString("attemptSession",a.optString("session")))
+                                a.optString("attemptSession",a.optString("session")),
+                                a.optInt("dynInterval", 300),
+                                if(a.has("lastGap")) a.optDouble("lastGap") else null)
                         } else {
                             tracker.resetSession(pkg)
                         }
@@ -229,6 +256,7 @@ class JevRuntime private constructor(context: Context) {
         val control=c?.let { controls.getOrPut(it.packageName){Attempt()} }
         if(c!=null && control!=null && control.lastSession!=c.sessionId) {
             control.lastSession=c.sessionId;control.asked=false;control.at=0;control.total=0
+            control.dynamicIntervalSeconds=300;control.lastGap=null
         }
         if(control!=null && control.deferUntil in 1..now)control.deferUntil=0
         val reasons=if(c!=null)JevCandidatePolicy.reasons(c,s) else emptyList()
@@ -247,8 +275,19 @@ class JevRuntime private constructor(context: Context) {
             else -> null
         }
         val result=approval
-        mutableState.value=JevLiveState(block ?: if(inFlight?.isActive==true)"Jev 응답 대기" else if(result!=null)"확률 통과 · 다음 숏폼 전환 대기" else "호출 조건 확인",
-            c,mutableState.value.probability,inFlight?.isActive==true)
+        val intervalSec = control?.dynamicIntervalSeconds ?: 300
+        val nextEvalIn = if (control?.asked == true) maxOf(0L, (intervalSec * 1000L - (now - control.at)) / 1000L) else 0L
+        val addViewingNeeded = if (control?.asked == true && c != null) maxOf(0L, (intervalSec * 1000L - (c.sessionMs - control.total)) / 1000L) else 0L
+        mutableState.value=JevLiveState(
+            status = block ?: if(inFlight?.isActive==true)"Jev 응답 대기" else if(result!=null)"확률 통과 · 다음 숏폼 전환 대기" else "호출 조건 확인",
+            context = c,
+            probability = mutableState.value.probability,
+            pending = inFlight?.isActive==true,
+            dynamicIntervalSeconds = control?.dynamicIntervalSeconds ?: 300,
+            lastProbabilityGap = control?.lastGap,
+            nextEvaluationInSeconds = nextEvalIn,
+            additionalViewingNeededSeconds = addViewingNeeded
+        )
         if(c!=null && s.collectionConsent && store.tokenConfigured.value && block!=null &&
             (block!=loggedReason || now-loggedAt>60_000)) {
             loggedReason=block;loggedAt=now
@@ -256,15 +295,24 @@ class JevRuntime private constructor(context: Context) {
         }
         if(block==null && c!=null && control!=null && approval==null && inFlight?.isActive!=true &&
             (safeSince?.let { now-it>=5000 }==true)) {
-            val eligible=!control.asked || (now-control.at>=s.reevaluateSeconds*1000L &&
-                c.sessionMs-control.total>=s.additionalViewingSeconds*1000L)
+            val eligible=!control.asked || (now-control.at>=intervalSec*1000L &&
+                c.sessionMs-control.total>=intervalSec*1000L)
             if(eligible) {
                 control.asked=true;control.at=now;control.total=c.sessionMs
                 persist()
                 inFlight=scope.launch {
                     try {
                         val answer=repository.evaluate(c,s,"LIVE",reasons.joinToString("|"))
-                        mutableState.value=mutableState.value.copy(probability=answer.probability)
+                        val effThreshold = JevCandidatePolicy.effectiveThreshold(s, c)
+                        val dynamicSec = JevCandidatePolicy.calculateDynamicInterval(effThreshold, answer.probability)
+                        val gap = (effThreshold - answer.probability).coerceAtLeast(0.0)
+                        control.dynamicIntervalSeconds = dynamicSec
+                        control.lastGap = gap
+                        mutableState.value=mutableState.value.copy(
+                            probability=answer.probability,
+                            dynamicIntervalSeconds=dynamicSec,
+                            lastProbabilityGap=gap
+                        )
                         val doneAt=SystemClock.elapsedRealtime()
                         val sameForeground=JevObservationHub.foregroundPackage==c.packageName && doneAt-JevObservationHub.checkedAt in 0..1500
                         val fresh=(state.value.context ?: c.takeIf { sameForeground })?.let {
@@ -314,7 +362,8 @@ class JevRuntime private constructor(context: Context) {
     fun canKeepDisplayed(): Boolean {
         val displayed = displayedApproval ?: return false
         val now = SystemClock.elapsedRealtime()
-        val sameForeground = JevObservationHub.foregroundPackage == displayed.captured.packageName &&
+        val currentFg = JevObservationHub.foregroundPackage
+        val sameForeground = (currentFg == displayed.captured.packageName || JevObservationHub.isTransientSystemPackage(currentFg)) &&
             now - JevObservationHub.checkedAt in 0..1500
         val currentContext = (state.value.context ?: displayed.captured.takeIf { sameForeground })?.let {
             if (sameForeground && it.packageName == displayed.captured.packageName && it.sessionId == displayed.captured.sessionId)
@@ -463,7 +512,8 @@ class JevRuntime private constructor(context: Context) {
             json.put(pkg,JSONObject().put("session",frame.id).put("total",frame.totalMs).put("entered",frame.entered)
                 .put("lastActiveWallMs",lastActiveWallMs[pkg] ?: 0L).put("lastActiveDate",lastActiveDate[pkg] ?: "")
                 .put("at",c.at).put("attemptTotal",c.total).put("asked",c.asked)
-                .put("suppressed",c.suppressedSession ?: "").put("deferUntil",c.deferUntil).put("attemptSession",c.lastSession ?: frame.id))
+                .put("suppressed",c.suppressedSession ?: "").put("deferUntil",c.deferUntil).put("attemptSession",c.lastSession ?: frame.id)
+                .put("dynInterval", c.dynamicIntervalSeconds).put("lastGap", c.lastGap ?: -1.0))
         }
         scope.launch {
             persistMutex.lock()

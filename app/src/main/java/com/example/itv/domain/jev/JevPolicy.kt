@@ -20,7 +20,7 @@ data class JevSettings(
     val additionalViewingSeconds: Int = 300,
     val resultTtlSeconds: Int = 30,
     val laterSeconds: Int = 300,
-    val dailyLimit: Int = 20,
+    val dailyLimit: Int = 999999,
     val personalizedEnabled: Boolean = true,
     val revision: Long = 1
 ) {
@@ -32,7 +32,7 @@ data class JevSettings(
         require(probabilityThreshold.isFinite() && probabilityThreshold in 0.0..1.0) { "확률은 0~100%입니다." }
         require(reevaluateSeconds in 1..86400 && additionalViewingSeconds in 1..86400) { "재평가 간격과 추가 시청은 1~86400초입니다." }
         require(resultTtlSeconds in 1..300 && laterSeconds in 1..86400) { "응답 유효시간은 1~300초, 보류는 1~86400초입니다." }
-        require(dailyLimit in 1..40) { "기기 일일 한도는 1~40회입니다. 서버 전체 한도는 별도로 적용됩니다." }
+        require(dailyLimit in 1..999999) { "기기 일일 한도는 1~999999회입니다." }
     }
     fun targets(pkg: String) = (instagram && pkg == INSTAGRAM) || (youtube && pkg == YOUTUBE)
     companion object {
@@ -117,6 +117,19 @@ object JevCandidatePolicy {
         val minBound = minOf(s.probabilityThreshold, 0.30)
         val maxBound = maxOf(s.probabilityThreshold, 0.95)
         return (kotlin.math.round((s.probabilityThreshold + clampedDelta).coerceIn(minBound, maxBound) * 1000.0) / 1000.0)
+    }
+
+    /**
+     * Calculates the dynamic re-evaluation interval (and required additional viewing)
+     * using continuous linear interpolation between 60s and 300s based on the probability gap.
+     * When gap is 0 (or probability >= threshold), returns 60s.
+     * When gap is >= 20%p (0.20), returns 300s.
+     */
+    fun calculateDynamicInterval(threshold: Double, probability: Double?): Int {
+        if (probability == null || !probability.isFinite()) return 300
+        val gap = (threshold - probability).coerceAtLeast(0.0)
+        val ratio = (gap / 0.20).coerceIn(0.0, 1.0)
+        return kotlin.math.round(60.0 + (300.0 - 60.0) * ratio).toInt()
     }
 
     /** Concise, human-readable summary of how and why the effective probability threshold changed. */

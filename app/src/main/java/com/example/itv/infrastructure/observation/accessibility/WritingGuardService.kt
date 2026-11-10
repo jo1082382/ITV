@@ -36,10 +36,16 @@ open class WritingGuardService : AccessibilityService() {
         // Determine only the foreground package. Never traverse ITV's Compose tree.
         val pkg = try {
             val root = rootInActiveWindow
-                ?: windows?.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive }?.root
-                ?: windows?.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isFocused }?.root
-            if (root == null) null else try { root.packageName?.toString() }
-            finally { @Suppress("DEPRECATION") root.recycle() }
+            val rawPkg = root?.packageName?.toString()
+            if (rawPkg != null && !com.example.itv.infrastructure.jev.JevObservationHub.isTransientSystemPackage(rawPkg)) {
+                try { rawPkg } finally { @Suppress("DEPRECATION") root.recycle() }
+            } else {
+                @Suppress("DEPRECATION") root?.recycle()
+                val target = findActiveApplicationWindow(windows)
+                val r = target?.root
+                if (r == null) rawPkg else try { r.packageName?.toString() }
+                finally { @Suppress("DEPRECATION") r.recycle() }
+            }
         } catch (_: Exception) { null }
         com.example.itv.infrastructure.jev.JevObservationHub.foreground(pkg)
         if (pkg == packageName) {
@@ -109,11 +115,7 @@ open class WritingGuardService : AccessibilityService() {
             if (available.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }) {
                 result(true, "키보드 표시 중 · 개입 보류"); return
             }
-            val window = available.firstOrNull {
-                it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive
-            } ?: available.firstOrNull {
-                it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isFocused
-            }
+            val window = findActiveApplicationWindow(available)
             if (window == null) {
                 result(true, "전면 앱 확인 불가 · 개입 보류"); return
             }

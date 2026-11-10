@@ -8,6 +8,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import com.example.itv.domain.records.ShortformApp
 import com.example.itv.infrastructure.observation.SwipeDynamicsTracker
+import com.example.itv.infrastructure.observation.accessibility.findActiveApplicationWindow
 import com.example.itv.infrastructure.storage.shortform.ShortformPersonalStatsStore
 
 /** Row-position diagnostic only. No content, image or video-identity access. */
@@ -111,11 +112,7 @@ internal object YoutubeProbe {
                     unavailable("키보드 표시 · 비교 보류")
                     return
                 }
-                val root = windows.firstOrNull {
-                    it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive
-                }?.root ?: windows.firstOrNull {
-                    it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isFocused
-                }?.root ?: run {
+                val root = findActiveApplicationWindow(windows)?.root ?: run {
                     unavailable("현재 화면 판별 불가")
                     return
                 }

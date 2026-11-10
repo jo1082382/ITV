@@ -152,7 +152,8 @@ class CoachingMonitorService : Service() {
         val original=missionJevContext ?: return false
         val settings=missionJevSettings ?: return false
         val now=SystemClock.elapsedRealtime()
-        val sameForeground=JevObservationHub.foregroundPackage==original.packageName && now-JevObservationHub.checkedAt in 0..1500
+        val currentFg=JevObservationHub.foregroundPackage
+        val sameForeground=(currentFg==original.packageName || JevObservationHub.isTransientSystemPackage(currentFg)) && now-JevObservationHub.checkedAt in 0..1500
         val currentContext=(jev.state.value.context ?: original.takeIf { sameForeground })?.let {
             if(sameForeground && it.packageName==original.packageName && it.sessionId==original.sessionId) it.copy(quality="VALID") else it
         }
@@ -303,7 +304,7 @@ class CoachingMonitorService : Service() {
             val observation = observer.snapshot()
             val nowElapsed = SystemClock.elapsedRealtime()
             val fgPkg = JevObservationHub.foregroundPackage.takeIf { nowElapsed - JevObservationHub.checkedAt in 0..1500 }
-            val leftDisplayedApp = displayedPackage != null && fgPkg != displayedPackage
+            val leftDisplayedApp = displayedPackage != null && fgPkg != null && fgPkg != displayedPackage && !JevObservationHub.isTransientSystemPackage(fgPkg)
             if (overlay != null && (!using || observation.guardReason != null || leftDisplayedApp)) removeOverlay()
             if (jevMode()) {
                 jev.tick(using, missionController.state.id != null || completionView != null || reactionInProgress || retryPending || retryVisible, overlay != null)

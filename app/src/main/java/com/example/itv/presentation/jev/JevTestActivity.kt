@@ -199,11 +199,8 @@ private fun SettingsPage(vm: JevTestViewModel,s: JevSettings,busy: Boolean) {
     var bedtimeWindow by rememberSaveable(s.revision){mutableStateOf(s.bedtimeWindowMinutes.toString())}
     var probability by rememberSaveable(s.revision){mutableStateOf((s.probabilityThreshold*100).toString())}
     var personalizedOn by rememberSaveable(s.revision){mutableStateOf(s.personalizedEnabled)}
-    var interval by rememberSaveable(s.revision){mutableStateOf(s.reevaluateSeconds.toString())}
-    var additional by rememberSaveable(s.revision){mutableStateOf(s.additionalViewingSeconds.toString())}
     var ttl by rememberSaveable(s.revision){mutableStateOf(s.resultTtlSeconds.toString())}
     var later by rememberSaveable(s.revision){mutableStateOf(s.laterSeconds.toString())}
-    var daily by rememberSaveable(s.revision){mutableStateOf(s.dailyLimit.toString())}
     var error by remember {mutableStateOf<String?>(null)}
     TestSection("실행 모드") {
         Toggle("테스트 모드 (30초 시청 개입 · 10초 무응답 · 30초 재판단 · 10초 내 15초 휴식)",testMode,{
@@ -233,12 +230,51 @@ private fun SettingsPage(vm: JevTestViewModel,s: JevSettings,busy: Boolean) {
         Numeric("응답 유효시간 (초, 최대 300)",ttl,{ttl=it},!busy)
         Text("확률 기준을 통과해도 작성·잠금·보류·미션·상황 변경 시에는 표시하지 않습니다. 숏폼의 다음 전환 시점에 다시 확인합니다.",style=MaterialTheme.typography.bodySmall)
     }
-    TestSection("재평가·호출 제한") {
-        Numeric("재평가 최소 간격 (초)",interval,{interval=it},!busy)
-        Numeric("다시 요청하기 전 추가 시청 (초)",additional,{additional=it},!busy)
-        Numeric("나중에·무응답 보류 (초)",later,{later=it},!busy)
-        Numeric("기기 일일 요청 한도 (1~40회)",daily,{daily=it},!busy)
-        Text("재평가는 시간 간격과 추가 시청을 모두 충족해야 합니다. 수동 요청도 한도에 포함되며 서버 전체 한도는 앱에서 올릴 수 없습니다.",style=MaterialTheme.typography.bodySmall)
+    TestSection("재평가·호출 제한 (동적 선형 보간)") {
+        val liveState by vm.runtime.state.collectAsState()
+        val dynInterval = liveState.dynamicIntervalSeconds ?: 300
+        val lastGap = liveState.lastProbabilityGap
+        val nextInSec = liveState.nextEvaluationInSeconds ?: 0L
+        val addSec = liveState.additionalViewingNeededSeconds ?: 0L
+
+        Card(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+        ) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = "동적 재평가 간격 & 추가 시청: ${dynInterval}초 (${"%.1f".format(dynInterval / 60.0)}분)",
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Text(
+                    text = if (lastGap != null) {
+                        "직전 평가 확률 격차: -${"%.1f".format(lastGap * 100)}%p → 선형 보간(${dynInterval}초) 적용 중"
+                    } else {
+                        "첫 평가 전 기본 간격: 300초 (첫 확률 평가 후 60~300초 선형 보간으로 자동 조정)"
+                    },
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                if (liveState.probability != null) {
+                    Text(
+                        text = "대기 경과: ${maxOf(0L, dynInterval - nextInSec)}초 / ${dynInterval}초 · 추가 시청: ${maxOf(0L, dynInterval - addSec)}초 / ${dynInterval}초",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Text(
+                    text = "기기 일일 호출 한도: 무제한 (기기별 제한 삭제됨)",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = ItvGreen
+                )
+            }
+        }
+        Numeric("나중에·무응답 보류 (초)", later, { later = it }, !busy)
+        Text(
+            text = "‘나중에’를 누르거나 15초간 응답이 없어 강아지가 내려갔을 때, 사용자를 즉시 다시 방해하지 않도록 다음 개입을 일시 보류(대기)하는 쿨다운 시간입니다.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
     error?.let {Text(it,color=MaterialTheme.colorScheme.error)}
     Button(enabled=!busy,onClick={
@@ -249,9 +285,9 @@ private fun SettingsPage(vm: JevTestViewModel,s: JevSettings,busy: Boolean) {
                 continuousEnabled=continuousOn,continuousSeconds=int(continuous,"시청 기준"),
                 returnsEnabled=returnsOn,returnsThreshold=int(returns,"재진입"),
                 bedtimeEnabled=bedtimeOn,bedtimeDelayMinutes=int(bedtimeDelay,"취침 지연"),bedtimeWindowMinutes=int(bedtimeWindow,"취침 적용 시간"),
-                probabilityThreshold=p/100.0,personalizedEnabled=personalizedOn,reevaluateSeconds=int(interval,"재평가 간격"),
-                additionalViewingSeconds=int(additional,"추가 시청"),resultTtlSeconds=int(ttl,"응답 유효시간"),
-                laterSeconds=int(later,"보류 시간"),dailyLimit=int(daily,"일일 한도")).validated()
+                probabilityThreshold=p/100.0,personalizedEnabled=personalizedOn,reevaluateSeconds=300,
+                additionalViewingSeconds=300,resultTtlSeconds=int(ttl,"응답 유효시간"),
+                laterSeconds=int(later,"보류 시간"),dailyLimit=999999).validated()
             error=null;vm.save(next)
         } catch(e:Exception) {error=e.message}
     },modifier=Modifier.fillMaxWidth()) {Text("판단 설정 저장")}
@@ -658,6 +694,26 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
                 } else {
                     CompactCheckRow(label = "최근 개입 확률", value = "아직 기록 없음")
                 }
+            }
+
+            val liveState by vm.runtime.state.collectAsState()
+            val dynInterval = liveState.dynamicIntervalSeconds ?: 300
+            val lastGap = liveState.lastProbabilityGap
+            val nextInSec = liveState.nextEvaluationInSeconds ?: 0L
+            val addSec = liveState.additionalViewingNeededSeconds ?: 0L
+            CompactCheckGroup("4. 동적 재평가 · 추가 시청") {
+                CompactCheckRow(
+                    label = "동적 간격 (60~300초)",
+                    value = "${dynInterval}초 (격차 ${if (lastGap != null) "-${"%.1f".format(lastGap * 100)}%p" else "첫 평가 대기"})"
+                )
+                CompactCheckRow(
+                    label = "다음 재평가 대기",
+                    value = if (nextInSec > 0) "${nextInSec}초 남음" else "대기 시간 충족"
+                )
+                CompactCheckRow(
+                    label = "필요 추가 시청",
+                    value = if (addSec > 0) "${addSec}초 남음" else "시청량 충족"
+                )
             }
         }
 

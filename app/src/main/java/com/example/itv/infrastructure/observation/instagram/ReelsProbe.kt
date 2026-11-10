@@ -9,6 +9,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import com.example.itv.domain.records.ShortformApp
 import com.example.itv.infrastructure.observation.SwipeDynamicsTracker
+import com.example.itv.infrastructure.observation.accessibility.findActiveApplicationWindow
 import com.example.itv.infrastructure.storage.shortform.ShortformPersonalStatsStore
 
 /** Structure-only detection. Never reads message text, images or video identities. */
@@ -143,8 +144,7 @@ internal object ReelsProbe {
         }
         try {
             val windows = service.windows.orEmpty()
-            val w = windows.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive }
-                ?: windows.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isFocused }
+            val w = findActiveApplicationWindow(windows)
             val root = w?.root ?: run {
                 status = "화면 판별 불가"
                 return
