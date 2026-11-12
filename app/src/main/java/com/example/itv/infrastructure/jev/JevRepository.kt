@@ -38,6 +38,12 @@ internal fun JevContext.json() = JSONObject().put("session_id",sessionId).put("p
         swipeAccel1m?.takeIf { it.isFinite() }?.let { put("swipe_accel_1m", it) }
         if (fastSwipeStreak > 0) put("fast_swipe_streak", fastSwipeStreak)
         if (swipeOverheated) put("swipe_overheated", true)
+        shortformShareOfPhoneRatio?.takeIf { it.isFinite() && it >= 0.0 }?.let { put("shortform_share_of_phone_ratio", it) }
+        ambientLux?.takeIf { it.isFinite() }?.let { put("ambient_lux", it) }
+        screenBrightness?.let { put("screen_brightness", it) }
+        if (isNearOrOccluded) put("is_near_or_occluded", true)
+        bedtimeDistanceMinutes?.let { put("bedtime_distance_minutes", it) }
+        userEnvironmentState?.let { put("user_environment_state", it) }
     }
 
 class JevRepository private constructor(context: Context) {

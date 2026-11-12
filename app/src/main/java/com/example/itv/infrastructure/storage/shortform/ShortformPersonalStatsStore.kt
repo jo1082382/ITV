@@ -22,6 +22,7 @@ internal object ShortformPersonalStatsStore {
     const val PKG_INSTAGRAM = "com.instagram.android"
     const val PKG_YOUTUBE = "com.google.android.youtube"
     private const val MIN_VALID_SESSION_MS = 5_000L
+    private const val MIN_REPRESENTATIVE_SESSION_MS = 60_000L
     private const val SESSION_GRACE_MS = 15_000L
     private const val MAX_STORED_SESSIONS = 300
 
@@ -144,6 +145,8 @@ internal object ShortformPersonalStatsStore {
     private var cached7dAvgByPkg: Map<String, Long> = emptyMap()
     @Volatile
     private var cachedPersonalAvgSpmByPkg: Map<String, Double> = emptyMap()
+    @Volatile
+    private var cachedTotalPhoneTodayMs: Long = 0L
 
     data class QuickPersonalMetrics(
         val avgSessionMs: Long,
@@ -154,7 +157,8 @@ internal object ShortformPersonalStatsStore {
         val avg7dDailyMs: Long,
         val avg7dDailyMinutes: Double?,
         val todayVs7dRatio: Double?,
-        val personalAvgSpm: Double?
+        val personalAvgSpm: Double?,
+        val shortformShareOfPhoneRatio: Double? = null
     )
 
     private fun pkgOf(app: ShortformApp): String = when (app) {
@@ -209,6 +213,15 @@ internal object ShortformPersonalStatsStore {
         }
         cached7dAvgByPkg = result7d
         cachedPersonalAvgSpmByPkg = resultSpm
+        val usm = appCtx.getSystemService(Context.USAGE_STATS_SERVICE) as? android.app.usage.UsageStatsManager
+        val todayStartWall = todayDate.atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val stats = runCatching {
+            usm?.queryUsageStats(android.app.usage.UsageStatsManager.INTERVAL_DAILY, todayStartWall, System.currentTimeMillis())
+        }.getOrNull()
+        val phoneMs = stats?.filter { it.totalTimeInForeground > 0L }?.sumOf { it.totalTimeInForeground } ?: 0L
+        if (phoneMs > 0L) {
+            cachedTotalPhoneTodayMs = phoneMs
+        }
     }
 
     private fun expireStaleRunIfNeeded(pkg: String, run: ActiveRun, nowElapsed: Long, nowWall: Long) {
@@ -229,6 +242,32 @@ internal object ShortformPersonalStatsStore {
         }
     }
 
+    /**
+     * Calculates the representative personal session length using the midpoint between
+     * the median and the maximum ((median + max) / 2), filtering out micro-sessions under 1 minute (60s).
+     * If no sessions >= 1 minute exist, falls back to available sessions or fallbackMs.
+     */
+    fun calculateRepresentativeSessionMs(
+        sessions: List<SessionRecord>,
+        fallbackMs: Long = 0L,
+        minDurationMs: Long = MIN_REPRESENTATIVE_SESSION_MS
+    ): Long {
+        val eligible = sessions.filter { it.durationMs >= minDurationMs }
+        val target = when {
+            eligible.isNotEmpty() -> eligible
+            sessions.isNotEmpty() -> sessions
+            else -> return fallbackMs
+        }
+        val sorted = target.map { it.durationMs }.sorted()
+        val median = if (sorted.size % 2 == 1) {
+            sorted[sorted.size / 2]
+        } else {
+            (sorted[sorted.size / 2 - 1] + sorted[sorted.size / 2]) / 2L
+        }
+        val maxVal = sorted.last()
+        return (median + maxVal) / 2L
+    }
+
     /** Fast, non-blocking lookup of personalized ratios and baselines for Jev runtime evaluation. */
     @Synchronized
     fun quickContextMetrics(
@@ -245,9 +284,7 @@ internal object ShortformPersonalStatsStore {
         }
         val appSessions = sessions.filter { it.packageName == pkg }
         val basisSessions = if (appSessions.size >= 2) appSessions else sessions
-        val avgSessionMs = if (basisSessions.isNotEmpty()) {
-            basisSessions.sumOf { it.durationMs } / basisSessions.size
-        } else 0L
+        val avgSessionMs = calculateRepresentativeSessionMs(basisSessions)
         val avgSessionMinutes = if (avgSessionMs >= 30_000L) round2(avgSessionMs / 60_000.0) else null
 
         val activeRunMs = run?.takeIf {
@@ -276,11 +313,18 @@ internal object ShortformPersonalStatsStore {
         } else null
 
         val fallbackSessionSpm = basisSessions.let { list ->
-            val sumMs = list.sumOf { it.durationMs }
-            val sumSwipes = list.sumOf { it.swipes }
+            val eligible = list.filter { it.durationMs >= MIN_REPRESENTATIVE_SESSION_MS }
+            val target = if (eligible.isNotEmpty()) eligible else list
+            val sumMs = target.sumOf { it.durationMs }
+            val sumSwipes = target.sumOf { it.swipes }
             if (sumMs >= 10_000L && sumSwipes > 0) round2(sumSwipes.toDouble() / (sumMs / 60_000.0)) else null
         }
         val personalAvgSpm = cachedPersonalAvgSpmByPkg[pkg] ?: fallbackSessionSpm
+
+        val effectivePhoneMs = maxOf(cachedTotalPhoneTodayMs, todayMs)
+        val shortformShareRatio = if (effectivePhoneMs >= 60_000L && todayMs > 0L) {
+            round2((todayMs.toDouble() / effectivePhoneMs.toDouble()).coerceIn(0.0, 1.0))
+        } else null
 
         return QuickPersonalMetrics(
             avgSessionMs = avgSessionMs,
@@ -291,7 +335,8 @@ internal object ShortformPersonalStatsStore {
             avg7dDailyMs = avg7dMs,
             avg7dDailyMinutes = avg7dDailyMinutes,
             todayVs7dRatio = todayVs7dRatio,
-            personalAvgSpm = personalAvgSpm
+            personalAvgSpm = personalAvgSpm,
+            shortformShareOfPhoneRatio = shortformShareRatio
         )
     }
 
@@ -634,8 +679,9 @@ internal object ShortformPersonalStatsStore {
                 avg7dDailyMs.toDouble() / avg30dDailyMs.toDouble()
             } else null
 
-            // Valid sessions only (>= 5s actual shortform viewing)
+            // Valid sessions (>= 5s) and representative sessions (>= 60s, excluding micro-views under 1 min)
             val validSessions = matchingSessions.filter { it.durationMs >= MIN_VALID_SESSION_MS }
+            val eligibleSessions = matchingSessions.filter { it.durationMs >= MIN_REPRESENTATIVE_SESSION_MS }
             val latestStored = validSessions.maxByOrNull { it.updatedWallMs }
             val currentSessionLive = activeSession != null && activeSession.first > 0L
             val currentSessionMs = when {
@@ -651,12 +697,14 @@ internal object ShortformPersonalStatsStore {
             }
 
             val totalRecordedSessions = when {
+                eligibleSessions.isNotEmpty() -> eligibleSessions.size
                 validSessions.isNotEmpty() -> validSessions.size
                 todayMs >= MIN_VALID_SESSION_MS -> 1
                 else -> 0
             }
             val avgSessionMs = when {
-                validSessions.isNotEmpty() -> validSessions.sumOf { it.durationMs } / validSessions.size
+                eligibleSessions.isNotEmpty() -> calculateRepresentativeSessionMs(eligibleSessions)
+                validSessions.isNotEmpty() -> calculateRepresentativeSessionMs(validSessions)
                 todayMs >= MIN_VALID_SESSION_MS -> todayMs
                 else -> 0L
             }
@@ -669,18 +717,21 @@ internal object ShortformPersonalStatsStore {
                 if (it == 0 && todayMs >= MIN_VALID_SESSION_MS) 1 else it
             }
 
-            // 7-day session metrics (excluding unused days/times)
+            // 7-day session metrics (excluding unused days/times and < 1m micro-sessions)
             val sessions7d = validSessions.filter {
                 val d = runCatching { LocalDate.parse(it.date) }.getOrNull()
                 d != null && !d.isBefore(start7d) && !d.isAfter(todayDate)
             }
+            val eligible7d = sessions7d.filter { it.durationMs >= MIN_REPRESENTATIVE_SESSION_MS }
             val sessionCount7d = when {
+                eligible7d.isNotEmpty() -> eligible7d.size
                 sessions7d.isNotEmpty() -> sessions7d.size
                 observedDays7d > 0 -> observedDays7d
                 else -> 0
             }
             val avg7dSessionMs = when {
-                sessions7d.isNotEmpty() -> sessions7d.sumOf { it.durationMs } / sessions7d.size
+                eligible7d.isNotEmpty() -> calculateRepresentativeSessionMs(eligible7d, fallbackMs = avg7dDailyMs)
+                sessions7d.isNotEmpty() -> calculateRepresentativeSessionMs(sessions7d, fallbackMs = avg7dDailyMs)
                 observedDays7d > 0 -> avg7dDailyMs
                 else -> 0L
             }
@@ -692,18 +743,21 @@ internal object ShortformPersonalStatsStore {
                 sessionCount7d.toDouble() / observedDays7d
             } else 0.0
 
-            // 30-day session metrics (excluding unused days/times)
+            // 30-day session metrics (excluding unused days/times and < 1m micro-sessions)
             val sessions30d = validSessions.filter {
                 val d = runCatching { LocalDate.parse(it.date) }.getOrNull()
                 d != null && !d.isBefore(start30d) && !d.isAfter(todayDate)
             }
+            val eligible30d = sessions30d.filter { it.durationMs >= MIN_REPRESENTATIVE_SESSION_MS }
             val sessionCount30d = when {
+                eligible30d.isNotEmpty() -> eligible30d.size
                 sessions30d.isNotEmpty() -> sessions30d.size
                 observedDays30d > 0 -> observedDays30d
                 else -> 0
             }
             val avg30dSessionMs = when {
-                sessions30d.isNotEmpty() -> sessions30d.sumOf { it.durationMs } / sessions30d.size
+                eligible30d.isNotEmpty() -> calculateRepresentativeSessionMs(eligible30d, fallbackMs = avg30dDailyMs)
+                sessions30d.isNotEmpty() -> calculateRepresentativeSessionMs(sessions30d, fallbackMs = avg30dDailyMs)
                 observedDays30d > 0 -> avg30dDailyMs
                 else -> 0L
             }

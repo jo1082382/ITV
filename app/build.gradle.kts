@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.ksp)
+    alias(libs.plugins.google.services)
 }
 
 android {
@@ -11,14 +12,27 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.example.itv"
+        applicationId = "com.team.itv"
         minSdk = 26
         targetSdk = 37
         versionCode = 1
         versionName = "1.0"
         buildConfigField("boolean", "JEV_TESTING", "false")
+        manifestPlaceholders["kakaoAppKey"] = "c9bc897599445560e87207a69862aa58"
+        buildConfigField("String", "KAKAO_NATIVE_APP_KEY", "\"c9bc897599445560e87207a69862aa58\"")
+        buildConfigField("String", "NAVER_CLIENT_ID", "\"vDIT2IIUievIhb1L_f1e\"")
+        buildConfigField("String", "NAVER_CLIENT_SECRET", "\"KsIbHXVHm6\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     // Instrumented tests target only the isolated QA variant.
@@ -66,6 +80,13 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.auth)
+    implementation(libs.androidx.credentials)
+    implementation(libs.androidx.credentials.play.services.auth)
+    implementation(libs.googleid)
+    implementation(libs.kakao.user)
+    implementation(libs.naver.oauth)
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)

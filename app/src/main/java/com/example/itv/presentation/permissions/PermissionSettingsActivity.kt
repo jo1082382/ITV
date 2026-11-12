@@ -72,6 +72,36 @@ class PermissionSettingsActivity : ComponentActivity() {
                 LazyColumn(Modifier.weight(1f).fillMaxWidth(),
                     contentPadding = PaddingValues(vertical = 16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    item {
+                        OutlinedCard(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
+                            colors = CardDefaults.outlinedCardColors(containerColor = com.example.itv.presentation.components.ItvMint)
+                        ) {
+                            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Row(
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    androidx.compose.foundation.Canvas(Modifier.size(12.dp)) {
+                                        drawCircle(if (consent) androidx.compose.ui.graphics.Color(0xFF24984D) else androidx.compose.ui.graphics.Color(0xFFD63E3E))
+                                    }
+                                    Spacer(Modifier.width(12.dp))
+                                    Text("사용정보 수집 동의", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                                    Switch(
+                                        checked = consent,
+                                        enabled = !screenState.loading,
+                                        onCheckedChange = { updateCollectionConsent(it) }
+                                    )
+                                }
+                                Text(
+                                    "앱 사용시간 확인 및 휴식 코칭을 위해 기기 내에서 숏폼 사용량을 측정하는 것에 동의합니다.\n(화면 본문·입력 문자·화면 이미지는 일체 수집/저장/전송하지 않습니다)",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
                     item { FoldPermission("사용 정보 접근", usage,
                         "전체·앱별 사용시간을 조회하는 권한입니다. 허용되지 않으면 사용량을 조회할 수 없습니다.") { openSystem(false) } }
                     item { FoldPermission("다른 앱 위에 표시", overlay,
@@ -85,7 +115,6 @@ class PermissionSettingsActivity : ComponentActivity() {
                             .putExtra(Settings.EXTRA_CHANNEL_ID, com.example.itv.composition.CoachingAccess.MONITOR)) }
                         catch (_: Exception) { settingsService.showMessage("기기 설정에서 ITV의 알림 채널을 확인하세요.") }
                     } }
-                    item { if (!consent) Text("수집 동의가 없습니다. 시스템 권한 허용과 수집 동의는 별개입니다.", style = MaterialTheme.typography.bodySmall) }
                     item { notice?.let { Text(it) } }
                 }
             }

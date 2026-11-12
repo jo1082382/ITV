@@ -20,6 +20,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <application
+        android:name=".ItvApplication"
         android:allowBackup="true"
         android:label="@string/itv_launcher_app_name"
         android:icon="@mipmap/ic_launcher"
@@ -46,6 +47,18 @@
             </intent-filter>
         </activity>
 
+        <!-- 카카오 로그인 Redirect 수신 액티비티 -->
+        <activity
+            android:name="com.kakao.sdk.auth.AuthCodeHandlerActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:host="oauth" android:scheme="kakao${kakaoAppKey}" />
+            </intent-filter>
+        </activity>
+
         <activity android:name=".presentation.coaching.CoachingTestActivity" android:exported="false" />
         <activity android:name=".presentation.jev.JevTestActivity" android:exported="false" />
         <service
@@ -69,10 +82,10 @@
         </service>
 
         <activity
-            android:name="com.example.itv.presentation.coaching.ReelsProbeActivity"
+            android:name=".presentation.coaching.ReelsProbeActivity"
             android:exported="false" />
         <activity
-            android:name="com.example.itv.presentation.coaching.YoutubeProbeActivity"
+            android:name=".presentation.coaching.YoutubeProbeActivity"
             android:exported="false" />
     <activity android:name=".presentation.usage.AiHistoryActivity" android:exported="false" />
     </application>

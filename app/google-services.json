@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "607435924516",
+    "project_id": "itv-app-64579",
+    "storage_bucket": "itv-app-64579.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:607435924516:android:1e4f4056169dabd0b824b1",
+        "android_client_info": {
+          "package_name": "com.team.itv"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDoylT_2zxeWbHLODm4JiBRr5ezgVdxPLI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

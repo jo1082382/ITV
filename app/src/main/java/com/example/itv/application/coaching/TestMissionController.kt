@@ -40,19 +40,20 @@ internal class TestMissionController(private val journal: CoachingJournal,
             journal.add(state.id!!, "휴식 시작 · ${startSec}초 안에 화면 꺼짐 관측")
         }
     }
-    fun screenOn(now: Long) {
-        val id = state.id ?: return
+    fun screenOn(now: Long): com.example.itv.domain.coaching.TestMissionWake {
+        val id = state.id ?: return com.example.itv.domain.coaching.TestMissionWake.NONE
         val restSec = state.requiredRestMs / 1000L
         val (result, duration) = state.screenOn(now)
         when (result) {
-            TestMissionWake.SUCCESS -> {
+            com.example.itv.domain.coaching.TestMissionWake.SUCCESS -> {
                 journal.structured(id,"REST_COMPLETED")
                 history.finish(id, "success")
                 journal.add(id, "휴식 미션 완료 · 화면 꺼짐 ${restSec}초 이상 관측")
             }
-            TestMissionWake.INCOMPLETE -> journal.add(id, "휴식 미완료 · ${duration / 1000}초 후 화면 켜짐 / 다시 ${restSec}초 필요")
-            TestMissionWake.NONE -> Unit
+            com.example.itv.domain.coaching.TestMissionWake.INCOMPLETE -> journal.add(id, "휴식 미완료 · ${duration / 1000}초 후 화면 켜짐 / 다시 ${restSec}초 필요")
+            com.example.itv.domain.coaching.TestMissionWake.NONE -> Unit
         }
+        return result
     }
     fun completionDisplayed() {
         val id = state.id ?: return

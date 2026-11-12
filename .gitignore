@@ -26,6 +26,7 @@
 # 앱 서명키 및 서명 비밀번호
 *.jks
 *.keystore
+!app/debug.keystore
 keystore.properties
 
 # 환경 변수·비밀정보

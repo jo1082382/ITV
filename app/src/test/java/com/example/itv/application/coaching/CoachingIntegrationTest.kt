@@ -135,4 +135,36 @@ class CoachingIntegrationTest {
         mission.screenOn(27_000L)
         assertEquals(listOf("success"), outcomes)
     }
+    @Test fun missionFailsWhenScreenNotTurnedOffInTime() {
+        val journal=Journal()
+        val outcomes=mutableListOf<String>()
+        val mission=TestMissionController(journal,object:MissionHistory {
+            override fun begin(id:String) {}
+            override fun finish(id:String,result:String) { outcomes.add(result) }
+        },object:MissionScheduler {
+            override fun cancelStartTimeout() {}
+            override fun scheduleStartTimeout(delayMs:Long) {}
+        })
+        mission.begin("fail-start-id", 0L, isJev=true)
+        mission.failStart()
+        assertEquals(listOf("failed"), outcomes)
+        assertEquals(listOf("MISSION_REQUESTED","START_NOT_OBSERVED"), journal.events.map { it.second })
+    }
+    @Test fun missionScreenOnBeforeRestDurationReturnsIncomplete() {
+        val journal=Journal()
+        val outcomes=mutableListOf<String>()
+        val mission=TestMissionController(journal,object:MissionHistory {
+            override fun begin(id:String) {}
+            override fun finish(id:String,result:String) { outcomes.add(result) }
+        },object:MissionScheduler {
+            override fun cancelStartTimeout() {}
+            override fun scheduleStartTimeout(delayMs:Long) {}
+        })
+        mission.begin("early-wake-id", 0L, isJev=true)
+        mission.screenOff(5_000L)
+        val wake = mission.screenOn(15_000L) // Only 10s of rest, needs 30s
+        assertEquals(com.example.itv.domain.coaching.TestMissionWake.INCOMPLETE, wake)
+        assertTrue(outcomes.isEmpty())
+        assertFalse(mission.state.pending)
+    }
 }

@@ -62,7 +62,16 @@ data class JevContext(
     val currentVsPersonalSpmRatio: Double? = null,
     val swipeAccel1m: Double? = null,
     val fastSwipeStreak: Int = 0,
-    val swipeOverheated: Boolean = false
+    val swipeOverheated: Boolean = false,
+    val shortformShareOfPhoneRatio: Double? = null,
+    val ambientLux: Float? = null,
+    val screenBrightness: Int? = null,
+    val isNearOrOccluded: Boolean = false,
+    val bedtimeDistanceMinutes: Int? = null,
+    val userEnvironmentState: String? = null,
+    val lastInterventionOutcome: String? = null,
+    val postInterventionActivity: Boolean = false,
+    val resistanceStreak: Int = 0
 )
 
 object JevCandidatePolicy {
@@ -70,6 +79,109 @@ object JevCandidatePolicy {
         val spm = c.effectiveSpm1m ?: 0.0
         val accel = c.swipeAccel1m ?: 0.0
         return (c.fastSwipeStreak >= 3 && spm >= 10.0) || (spm >= 12.0 && accel >= 3.0)
+    }
+
+    /**
+     * Computes continuous bedtime & environmental lighting adjustment (-15%p ~ +15%p).
+     *
+     * Principles:
+     * 1. Proximity occlusion guard: if proximity is 0cm (or near with low lux), the sensor
+     *    is physically covered by hand/pillow/bedding. It is NOT genuine dark bedroom usage (returns 0%p).
+     * 2. Pre-bedtime dark usage (lights off, lux <= 25, screen dimmed or watching in dark):
+     *    During bedtime window (including 2~3 hours before bedtime up to late night),
+     *    lowers intervention threshold linearly down to -15%p to strictly prevent bedtime sleep disruption.
+     * 3. Normal / daytime active usage:
+     *    During daytime, or even when approaching bedtime if room lights are on (lux >= 40)
+     *    and screen is bright, the user is active/awake, raising threshold up to +15%p.
+     */
+    fun computeBedtimeEnvironmentDelta(c: JevContext): Double {
+        val lux = c.ambientLux
+        val brightness = c.screenBrightness
+        val occluded = c.isNearOrOccluded
+        val d = c.bedtimeDistanceMinutes
+
+        if (lux == null && brightness == null && d == null) return 0.0
+
+        // 1. Proximity Sensor Occlusion Check
+        if (occluded) {
+            return 0.0
+        }
+
+        // 2. Time Window Factor
+        // d: minutes difference from target bedtime (circularMinuteDiff)
+        val bedtimeWeight = when {
+            d == null -> 0.0
+            d in -60..240 -> 1.0 // Core bedtime (1h before ~ 4h after)
+            d in -180 until -60 -> 0.70 + 0.30 * ((d - (-180)).toDouble() / 120.0) // 2~3h before bedtime: 0.70 ~ 1.0
+            d in -240 until -180 -> 0.70 * ((d - (-240)).toDouble() / 60.0) // 3~4h before bedtime: 0.0 ~ 0.70
+            d in 241..360 -> 1.0 - 0.70 * ((d - 240).toDouble() / 120.0) // Dawn: 1.0 ~ 0.30
+            else -> 0.0
+        }
+
+        val daytimeWeight = when {
+            d == null -> 0.5
+            d in -240..360 -> 0.0
+            d in -420 until -240 -> 1.0 - ((d - (-420)).toDouble() / 180.0) // Transition from mid-day to evening
+            else -> 1.0 // Daytime active hours (4+ hours away from bedtime)
+        }
+
+        // 3. Ambient Darkness vs Brightness
+        val darknessLevel = when {
+            lux == null -> 0.0
+            lux <= 5.0f -> 1.0
+            lux <= 25.0f -> ((25.0f - lux) / 20.0).coerceIn(0.0, 1.0)
+            else -> 0.0
+        }
+
+        val brightnessLevel = when {
+            lux == null -> 0.0
+            lux <= 40.0f -> 0.0
+            lux <= 200.0f -> ((lux - 40.0f) / 160.0).coerceIn(0.0, 1.0)
+            else -> 1.0
+        }
+
+        // 4. Screen Brightness Factor (0..255)
+        val normBrightness = (brightness ?: 128) / 255.0
+        val dimScreenFactor = when {
+            brightness == null -> 0.5
+            normBrightness <= 0.25 -> 1.0
+            normBrightness <= 0.45 -> (0.45 - normBrightness) / 0.20
+            else -> 0.0
+        }
+        val brightScreenFactor = when {
+            brightness == null -> 0.5
+            normBrightness <= 0.40 -> 0.0
+            normBrightness <= 0.65 -> (normBrightness - 0.40) / 0.25
+            else -> 1.0
+        }
+
+        // 5. Pre-bedtime Dark Usage Score (P_sleep in [0.0, 1.0])
+        val sleepDarkScore = if (darknessLevel > 0.0 && bedtimeWeight > 0.0) {
+            val screenFactor = 0.75 + 0.25 * dimScreenFactor
+            (bedtimeWeight * darknessLevel * screenFactor).coerceIn(0.0, 1.0)
+        } else 0.0
+
+        // 6. Active / Daytime Usage Score (P_active in [0.0, 1.0])
+        val litRoomActiveScore = if (brightnessLevel > 0.0 && brightScreenFactor > 0.0) {
+            (brightnessLevel * brightScreenFactor).coerceIn(0.0, 1.0)
+        } else 0.0
+
+        val daytimeActiveScore = if (daytimeWeight > 0.0) {
+            (daytimeWeight * (0.6 + 0.4 * brightnessLevel)).coerceIn(0.0, 1.0)
+        } else 0.0
+
+        val activeScore = maxOf(litRoomActiveScore, daytimeActiveScore)
+
+        // 7. Calculate continuous linear delta in [-0.15, +0.15]
+        val delta = if (sleepDarkScore > 0.0) {
+            -0.15 * sleepDarkScore
+        } else if (activeScore > 0.0) {
+            0.15 * activeScore
+        } else {
+            0.0
+        }
+
+        return kotlin.math.round(delta.coerceIn(-0.15, 0.15) * 1000.0) / 1000.0
     }
 
     fun reasons(c: JevContext, s: JevSettings): List<String> = buildList {
@@ -87,36 +199,138 @@ object JevCandidatePolicy {
             if (c.continuousMs >= minSwipeMs && isSwipeOverheated(c)) {
                 add("RAPID_SWIPE_OVERHEAT")
             }
+            val minBedtimeDarkMs = minOf(120_000L, s.continuousSeconds * 1000L)
+            if (c.continuousMs >= minBedtimeDarkMs && computeBedtimeEnvironmentDelta(c) <= -0.08 &&
+                "CONTINUOUS" !in this && "BEDTIME" !in this) {
+                add("PRE_BEDTIME_DARK_USAGE")
+            }
+            // 뇌과학적 연속 시청 피로 누적 (30분 이상 무중단 시청)
+            if (c.continuousMs >= 1800_000L) {
+                add("CONTINUOUS_FATIGUE")
+            }
+            // 직전 개입 미룸 / 무응답 후 시청 지속
+            if (c.lastInterventionOutcome in setOf("LATER", "NO_RESPONSE") && c.postInterventionActivity) {
+                add("INTERVENTION_RESISTANCE")
+            }
         }
+    }
+
+    data class ThresholdAdjustment(
+        val sessionDelta: Double,
+        val swipeDelta: Double,
+        val phoneShareDelta: Double = 0.0,
+        val bedtimeDelta: Double = 0.0,
+        val fatigueDelta: Double = 0.0,
+        val resistanceDelta: Double = 0.0,
+        val totalDelta: Double,
+        val effectiveThreshold: Double
+    )
+
+    /**
+     * 연속 시청 피로도 누적 선형 보간 (뇌과학적 전두엽 자제력 저하 반영):
+     * 15분 미만: 0.0 (정상 집중)
+     * 15분 ~ 30분: 0%p -> -5%p (선형 증가)
+     * 30분 ~ 45분 이상: -5%p -> 최대 -10%p (선형 증가)
+     */
+    fun computeContinuousFatigueDelta(c: JevContext): Double {
+        val min = c.continuousMs / 60000.0
+        val delta = when {
+            min < 15.0 -> 0.0
+            min <= 30.0 -> {
+                val r = (min - 15.0) / 15.0
+                r * -0.05
+            }
+            else -> {
+                val r = ((min - 30.0) / 15.0).coerceIn(0.0, 1.0)
+                -0.05 + (r * -0.05)
+            }
+        }
+        return kotlin.math.round(delta.coerceIn(-0.10, 0.0) * 1000.0) / 1000.0
+    }
+
+    /**
+     * 직전 개입 반응 이력 (개입 저항 및 시청 지속):
+     * - '나중에(LATER)' 선택 후 시청 지속: 1회 -5%p, 2회 이상 -8%p ~ -10%p
+     * - '무응답(NO_RESPONSE)' 후 스와이프 등 시청 활동 지속 (무시하고 시청): 1회 -6%p, 2회 이상 -10%p
+     */
+    fun computeInterventionResistanceDelta(c: JevContext): Double {
+        val outcome = c.lastInterventionOutcome ?: return 0.0
+        val streak = c.resistanceStreak.coerceAtLeast(1)
+        val delta = when (outcome) {
+            "LATER" -> {
+                if (streak >= 2) -0.08 - (0.02 * (streak - 2).coerceIn(0, 1))
+                else -0.05
+            }
+            "NO_RESPONSE" -> {
+                if (c.postInterventionActivity) {
+                    if (streak >= 2) -0.10
+                    else -0.06
+                } else 0.0
+            }
+            else -> 0.0
+        }
+        return kotlin.math.round(delta.coerceIn(-0.10, 0.0) * 1000.0) / 1000.0
+    }
+
+    fun computeThresholdAdjustment(s: JevSettings, c: JevContext? = null): ThresholdAdjustment {
+        if (c == null || !s.personalizedEnabled) {
+            return ThresholdAdjustment(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, s.probabilityThreshold)
+        }
+        val hasAnySignal = c.sessionVsAvgRatio != null || c.effectiveSpm1m != null ||
+            c.swipeAccel1m != null || c.fastSwipeStreak > 0 ||
+            c.ambientLux != null || c.screenBrightness != null || c.bedtimeDistanceMinutes != null ||
+            c.continuousMs >= 900_000L || c.lastInterventionOutcome != null
+        if (!hasAnySignal) {
+            return ThresholdAdjustment(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, s.probabilityThreshold)
+        }
+
+        // 1. 단일 세션 과몰입 선형 보간: 0.5배 (+10%p) ~ 1.0배 (0%p) ~ 1.5배 이상 (-10%p)
+        val sessionRatio = c.sessionVsAvgRatio
+        val sessionDelta = if (sessionRatio != null && sessionRatio > 0.0) {
+            val clamped = sessionRatio.coerceIn(0.5, 1.5)
+            kotlin.math.round(((1.0 - clamped) * 0.20) * 1000.0) / 1000.0
+        } else 0.0
+
+        // 2. 스와이프 과열 선형 보간: SPM 5.0 (0%p) ~ SPM 15.0 (-8%p) + 스트릭/가속도 (-2%p) => 최대 -10%p
+        val swipeDelta = run {
+            val spm = c.effectiveSpm1m ?: 0.0
+            val streak = c.fastSwipeStreak
+            val accel = (c.swipeAccel1m ?: 0.0).coerceAtLeast(0.0)
+            if (spm <= 5.0 && streak < 2) return@run 0.0
+            val spmRatio = ((spm - 5.0) / 10.0).coerceIn(0.0, 1.0)
+            var heat = spmRatio * -0.08
+            if (streak >= 3) {
+                val streakBonus = ((streak - 2) * 0.01).coerceIn(0.0, 0.02)
+                heat -= streakBonus
+            } else if (accel >= 2.0) {
+                heat -= 0.01
+            }
+            kotlin.math.round(heat.coerceIn(-0.10, 0.0) * 1000.0) / 1000.0
+        }
+
+        // [제거됨] 폰 사용 중 숏폼 비중은 실시간 몰입도 판단 지표로 부적합하므로 보정 계산에서 제외 (0%p)
+        val phoneShareDelta = 0.0
+
+        // 3. 취침 연계 환경 조도 및 화면 밝기 선형 증감: 취침전암실 (-15%p) ~ 평상시실내 (0%p) ~ 주간/밝은환경 (+15%p)
+        val bedtimeDelta = computeBedtimeEnvironmentDelta(c)
+
+        // 4. 연속 시청 피로도 누적: 15분 미만(0%p) ~ 30분(-5%p) ~ 45분 이상(-10%p)
+        val fatigueDelta = computeContinuousFatigueDelta(c)
+
+        // 5. 직전 개입 반응 이력 (나중에/무응답 후 시청 지속): -5%p ~ -10%p
+        val resistanceDelta = computeInterventionResistanceDelta(c)
+
+        val totalDelta = kotlin.math.round((sessionDelta + swipeDelta + bedtimeDelta + fatigueDelta + resistanceDelta).coerceIn(-0.40, 0.25) * 1000.0) / 1000.0
+        val eff = kotlin.math.round((s.probabilityThreshold + totalDelta).coerceIn(0.15, 0.95) * 1000.0) / 1000.0
+        return ThresholdAdjustment(sessionDelta, swipeDelta, phoneShareDelta, bedtimeDelta, fatigueDelta, resistanceDelta, totalDelta, eff)
     }
 
     /**
      * Computes the effective intervention probability threshold by applying bounded
-     * personalization and swipe-dynamics adjustments when personalizedEnabled is true.
+     * personalization, session immersion, and swipe-dynamics adjustments when personalizedEnabled is true.
      */
     fun effectiveThreshold(s: JevSettings, c: JevContext? = null): Double {
-        if (c == null || !s.personalizedEnabled) return s.probabilityThreshold
-        val hasAnyPersonalSignal = c.sessionVsAvgRatio != null || c.todayVs7dRatio != null ||
-            c.effectiveSpm1m != null || c.swipeAccel1m != null || c.fastSwipeStreak > 0
-        if (!hasAnyPersonalSignal) return s.probabilityThreshold
-
-        var delta = 0.0
-        if ((c.todayVs7dRatio ?: 0.0) >= 1.30) delta -= 0.05
-        if ((c.sessionVsAvgRatio ?: 0.0) >= 1.25) delta -= 0.05
-        if (isSwipeOverheated(c)) delta -= 0.05
-
-        if (delta == 0.0 &&
-            c.sessionVsAvgRatio != null && c.sessionVsAvgRatio < 0.70 &&
-            (c.todayVs7dRatio == null || c.todayVs7dRatio < 0.85) &&
-            (c.effectiveSpm1m == null || c.effectiveSpm1m < 6.0) &&
-            c.bedtimePassedMinutes == null
-        ) {
-            delta += 0.05
-        }
-        val clampedDelta = delta.coerceIn(-0.15, 0.10)
-        val minBound = minOf(s.probabilityThreshold, 0.30)
-        val maxBound = maxOf(s.probabilityThreshold, 0.95)
-        return (kotlin.math.round((s.probabilityThreshold + clampedDelta).coerceIn(minBound, maxBound) * 1000.0) / 1000.0)
+        return computeThresholdAdjustment(s, c).effectiveThreshold
     }
 
     /**
@@ -137,14 +351,36 @@ object JevCandidatePolicy {
         val basePct = s.probabilityThreshold * 100.0
         if (!s.personalizedEnabled) return "기본 ${"%.0f".format(basePct)}% (보정 꺼짐)"
         if (c == null) return "기본 ${"%.0f".format(basePct)}% (관측 대기)"
-        val effPct = effectiveThreshold(s, c) * 100.0
+        val adj = computeThresholdAdjustment(s, c)
+        val effPct = adj.effectiveThreshold * 100.0
         val diffPct = effPct - basePct
         val factors = mutableListOf<String>()
-        if ((c.todayVs7dRatio ?: 0.0) >= 1.30) factors.add("오늘비율 -5%p")
-        if ((c.sessionVsAvgRatio ?: 0.0) >= 1.25) factors.add("세션비율 -5%p")
-        if (isSwipeOverheated(c)) factors.add("스와이프과열 -5%p")
-        if (factors.isEmpty() && diffPct > 0.04) factors.add("짧은시청·안정 +5%p")
-        return if (kotlin.math.abs(diffPct) >= 0.05 || factors.isNotEmpty()) {
+        if (kotlin.math.abs(adj.sessionDelta) >= 0.005) {
+            val sign = if (adj.sessionDelta > 0) "+" else ""
+            val ratioPct = (c.sessionVsAvgRatio ?: 1.0) * 100.0
+            factors.add("세션 ${"%.0f".format(ratioPct)}% (${sign}${"%.0f".format(adj.sessionDelta * 100)}%p)")
+        }
+        if (kotlin.math.abs(adj.swipeDelta) >= 0.005) {
+            factors.add("스와이프 ${"%.0f".format(c.effectiveSpm1m ?: 0.0)}SPM (${"%.0f".format(adj.swipeDelta * 100)}%p)")
+        }
+        if (kotlin.math.abs(adj.bedtimeDelta) >= 0.005) {
+            val sign = if (adj.bedtimeDelta > 0) "+" else ""
+            val envDesc = when {
+                c.isNearOrOccluded -> "센서가림"
+                adj.bedtimeDelta < 0 -> "취침전암실"
+                else -> "주간/밝은환경"
+            }
+            factors.add("$envDesc (${sign}${"%.0f".format(adj.bedtimeDelta * 100)}%p)")
+        }
+        if (kotlin.math.abs(adj.fatigueDelta) >= 0.005) {
+            val contMin = "%.0f".format(c.continuousMs / 60000.0)
+            factors.add("연속피로 ${contMin}분 (${"%.0f".format(adj.fatigueDelta * 100)}%p)")
+        }
+        if (kotlin.math.abs(adj.resistanceDelta) >= 0.005) {
+            val tag = if (c.lastInterventionOutcome == "LATER") "나중에미룸" else "무응답시청지속"
+            factors.add("$tag (${"%.0f".format(adj.resistanceDelta * 100)}%p)")
+        }
+        return if (kotlin.math.abs(diffPct) >= 0.5 || factors.isNotEmpty()) {
             val sign = if (diffPct > 0) "+" else ""
             val detail = if (factors.isNotEmpty()) " · ${factors.joinToString(", ")}" else ""
             "기본 ${"%.0f".format(basePct)}% → ${"%.0f".format(effPct)}% (${sign}${"%.0f".format(diffPct)}%p$detail)"
@@ -192,7 +428,7 @@ class JevSessionTracker(private val newId: () -> String) {
         val delta = if (before == null) 0 else now - before
         val contiguous = before != null && delta in 1..1500
         if (coverageStart == null || !contiguous || pkg == null) coverageStart = now
-        val inspectingItv = pkg == "com.example.itv"
+        val inspectingItv = pkg == "com.team.itv" || pkg == "com.example.itv"
         for (app in listOf(JevSettings.INSTAGRAM, JevSettings.YOUTUBE)) {
             val state = states.getOrPut(app) { AppState(newId()) }
             if (pkg == app && previousPkg != app) {

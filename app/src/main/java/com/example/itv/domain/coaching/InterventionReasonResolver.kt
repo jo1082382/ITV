@@ -83,15 +83,16 @@ object InterventionReasonResolver {
             }
         }
 
-        // 5. 평소보다 긴 시청 / 잦은 재접속 / 오늘 시청량 증가
+        // 5. 평소보다 긴 시청 / 잦은 재접속 / 폰 사용 중 숏폼 과다
         if (jevContext != null) {
             val sessionRatio = jevContext.sessionVsAvgRatio
+            val phoneShare = jevContext.shortformShareOfPhoneRatio
             if (sessionRatio != null && sessionRatio >= 1.4) {
                 candidates.add(PrioritizedReason(65, "평소 보던 시간보다 훨씬 오래 보고 있어!"))
             } else if (jevContext.returns10m >= 3) {
                 candidates.add(PrioritizedReason(62, "조금 전에도 껐다가 바로 다시 켰잖아!"))
-            } else if ((jevContext.todayVs7dRatio ?: 0.0) >= 1.3) {
-                candidates.add(PrioritizedReason(60, "오늘 숏폼 시청량이 평소보다 많아!"))
+            } else if (phoneShare != null && phoneShare >= 0.5) {
+                candidates.add(PrioritizedReason(60, "오늘 폰 사용의 대부분이 숏폼에 집중되어 있어!"))
             }
         }
 

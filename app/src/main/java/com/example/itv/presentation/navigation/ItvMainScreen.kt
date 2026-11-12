@@ -5,6 +5,10 @@ import com.example.itv.domain.goals.HomeGoalRow
 import com.example.itv.presentation.usage.UsageRecordsContent
 import android.content.Intent
 import androidx.compose.ui.platform.LocalContext
+import com.example.itv.MainActivity
+import com.example.itv.presentation.auth.AccountSettingsScreen
+import com.example.itv.presentation.coaching.CoachingSettingsScreen
+import com.example.itv.composition.AuthComposition
 import com.example.itv.presentation.permissions.PermissionSettingsActivity
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
@@ -35,6 +39,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
 
 private data class MainTab(val id: String, val label: String, val mark: String)
@@ -55,8 +60,12 @@ fun ItvMainScreen(
     val activeTab = selectedTab.takeIf { id -> tabs.any { it.id == id } } ?: "home"
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
     BackHandler(enabled = settingsOpen) { settingsOpen = false }
+    var showAccountSettings by rememberSaveable { mutableStateOf(false) }
+    BackHandler(enabled = showAccountSettings) { showAccountSettings = false }
+    var showCoachingSettings by rememberSaveable { mutableStateOf(false) }
+    BackHandler(enabled = showCoachingSettings) { showCoachingSettings = false }
     var showCoaching by rememberSaveable { mutableStateOf(false) }
-    BackHandler(enabled = !settingsOpen && (activeTab != "home" || showCoaching)) {
+    BackHandler(enabled = !settingsOpen && !showAccountSettings && !showCoachingSettings && (activeTab != "home" || showCoaching)) {
         if (showCoaching) showCoaching = false else onSelectTab("home")
     }
     // Outer MainActivity Scaffold already handles system bar insets.
@@ -140,7 +149,55 @@ fun ItvMainScreen(
 
         }
     }
-    HomeSettingsDrawer(settingsOpen, { settingsOpen = false }, onOpenGoals)
+    HomeSettingsDrawer(
+        open = settingsOpen,
+        onClose = { settingsOpen = false },
+        onOpenGoals = onOpenGoals,
+        onOpenAccountSettings = { showAccountSettings = true },
+        onOpenCoachingSettings = { showCoachingSettings = true }
+    )
+
+    if (showCoachingSettings) {
+        CoachingSettingsScreen(
+            onNavigateBack = { showCoachingSettings = false }
+        )
+    }
+
+    if (showAccountSettings) {
+        val context = LocalContext.current
+        val coroutineScope = rememberCoroutineScope()
+        AccountSettingsScreen(
+            onNavigateBack = { showAccountSettings = false },
+            onAccountDeleted = {
+                showAccountSettings = false
+                val intent = Intent(context, MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    putExtra(MainActivity.EXTRA_FORCE_ONBOARDING, true)
+                }
+                context.startActivity(intent)
+            },
+            onSignedOut = {
+                showAccountSettings = false
+                val intent = Intent(context, MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    putExtra(MainActivity.EXTRA_FORCE_ONBOARDING, true)
+                }
+                context.startActivity(intent)
+            },
+            onGoogleSignInRequested = { callback ->
+                coroutineScope.launch {
+                    try {
+                        val client = AuthComposition.googleAuthClient(context)
+                        val tokenRes = client.getGoogleIdToken()
+                        tokenRes.onSuccess { callback(it) }
+                            .onFailure { android.widget.Toast.makeText(context, "Google 인증: ${it.message}", android.widget.Toast.LENGTH_SHORT).show() }
+                    } catch (e: Exception) {
+                        android.widget.Toast.makeText(context, "Google 인증 오류: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        )
+    }
     }
 }
 
@@ -212,7 +269,13 @@ private fun CenteredHomePage(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun HomeSettingsDrawer(open: Boolean, onClose: () -> Unit, onOpenGoals: () -> Unit) {
+private fun HomeSettingsDrawer(
+    open: Boolean,
+    onClose: () -> Unit,
+    onOpenGoals: () -> Unit,
+    onOpenAccountSettings: () -> Unit,
+    onOpenCoachingSettings: () -> Unit
+) {
     val context = LocalContext.current
     val development = (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
     AnimatedVisibility(visible = open, enter = fadeIn(tween(240)), exit = fadeOut(tween(240))) {
@@ -238,13 +301,27 @@ private fun HomeSettingsDrawer(open: Boolean, onClose: () -> Unit, onOpenGoals: 
                         TextButton(onClick = onClose) { Text("닫기", color = ItvGreen) }
                     }
                     HorizontalDivider(color = ItvLine)
-                    if (development) DrawerSettingItem("개발용 통합 상태", "측정·시계·개입·미션 기록") {
+                    DrawerSettingItem("계정 관리", "로그인 상태 확인, 소셜 연동, 계정 삭제") {
                         onClose()
-                        context.startActivity(Intent(context, PermissionSettingsActivity::class.java).putExtra("initial_page", 0))
+                        onOpenAccountSettings()
+                    }
+                    DrawerSettingItem("코칭 설정", "개입 방식, 강도, 캐릭터 말투 설정") {
+                        onClose()
+                        onOpenCoachingSettings()
                     }
                     if (com.example.itv.infrastructure.jev.JevFeature.available()) DrawerSettingItem("Jev 공동 테스트", "임계값·수동 요청·판단 기록·평가") {
                         onClose()
                         context.startActivity(Intent(context, com.example.itv.presentation.jev.JevTestActivity::class.java))
+                    }
+                    if (development || com.example.itv.infrastructure.jev.JevFeature.available()) {
+                        DrawerSettingItem("초기 화면(온보딩) 테스트", "권한 안내 및 로그인 창 다시 확인 (기록 유지)") {
+                            onClose()
+                            val intent = Intent(context, MainActivity::class.java).apply {
+                                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                                putExtra(MainActivity.EXTRA_FORCE_ONBOARDING, true)
+                            }
+                            context.startActivity(intent)
+                        }
                     }
                     DrawerSettingItem("목표 설정", "사용시간·취침·휴식 목표") { onClose(); onOpenGoals() }
                     DrawerSettingItem("권한", "수집 동의와 필요한 권한 확인") {
