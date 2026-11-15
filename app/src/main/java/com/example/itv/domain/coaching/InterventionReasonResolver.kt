@@ -43,7 +43,7 @@ object InterventionReasonResolver {
                     candidates.add(PrioritizedReason(92, "취침 시간인데 어두운 방에서 밝은 화면을 보면 눈이 많이 지쳐!"))
                 }
                 com.example.itv.infrastructure.observation.UserEnvironmentState.PRE_SLEEP_REST -> {
-                    candidates.add(PrioritizedReason(90, "불을 끄고 누워서 보고 있네! 이제 눈을 감고 같이 잘 시간이야 🐾"))
+                    candidates.add(PrioritizedReason(90, "불을 끄고 누워서 보고 있네! 이제 눈을 감고 같이 잘 시간이야"))
                 }
                 com.example.itv.infrastructure.observation.UserEnvironmentState.NIGHT_ACTIVE -> {
                     candidates.add(PrioritizedReason(88, "평소 자던 시간보다 늦었어! 내일을 위해 슬슬 마무리하자!"))
@@ -59,6 +59,18 @@ object InterventionReasonResolver {
                         candidates.add(PrioritizedReason(85, "어두운 방에서 밝은 화면을 보면 눈이 많이 지쳐!"))
                     }
                 }
+            }
+            when (ambient.posture) {
+                com.example.itv.domain.coaching.UserPosture.LYING_DOWN -> {
+                    candidates.add(PrioritizedReason(87, "스마트폰을 눕혀 보느라 목에 부담이 실리고 있어!"))
+                }
+                com.example.itv.domain.coaching.UserPosture.SITTING_OR_STANDING -> {
+                    candidates.add(PrioritizedReason(83, "스마트폰을 오래 쥐고 있어 어깨와 등이 굳고 있어!"))
+                }
+                com.example.itv.domain.coaching.UserPosture.TABLE_OR_DESK -> {
+                    candidates.add(PrioritizedReason(84, "테이블을 내려다보느라 고개가 푹 숙여지고 있어!"))
+                }
+                else -> Unit
             }
         }
 

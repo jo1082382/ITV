@@ -167,4 +167,57 @@ class CoachingIntegrationTest {
         assertTrue(outcomes.isEmpty())
         assertFalse(mission.state.pending)
     }
+    @Test fun facedownRestMissionRequiresFacedownToSucceed() {
+        val journal=Journal()
+        val outcomes=mutableListOf<String>()
+        val mission=TestMissionController(journal,object:MissionHistory {
+            override fun begin(id:String) {}
+            override fun finish(id:String,result:String) { outcomes.add(result) }
+        },object:MissionScheduler {
+            override fun cancelStartTimeout() {}
+            override fun scheduleStartTimeout(delayMs:Long) {}
+        })
+        mission.begin("facedown-id", 0L, isJev=false, requireFacedown=true)
+        mission.screenOff(2_000L)
+
+        // 15 seconds elapsed, but facedown was NOT observed
+        val failedWake = mission.screenOn(18_000L, isFacedownObserved=false)
+        assertEquals(com.example.itv.domain.coaching.TestMissionWake.INCOMPLETE, failedWake)
+        assertTrue(outcomes.isEmpty())
+
+        // Try again with facedown observed
+        mission.screenOff(20_000L)
+        val successWake = mission.screenOn(36_000L, isFacedownObserved=true)
+        assertEquals(com.example.itv.domain.coaching.TestMissionWake.SUCCESS, successWake)
+        assertEquals(listOf("success"), outcomes)
+    }
+    @Test fun restMissionCatalogPicksAppropriateRecommendations() {
+        val strongRec = com.example.itv.domain.coaching.RestMissionCatalog.pick(
+            com.example.itv.domain.coaching.UserPosture.LYING_DOWN,
+            isStrong = true
+        )
+        assertTrue(strongRec.isFacedownRequired)
+        assertTrue(strongRec.title.contains("엎어두기"))
+
+        val lyingRec = com.example.itv.domain.coaching.RestMissionCatalog.pick(
+            com.example.itv.domain.coaching.UserPosture.LYING_DOWN,
+            isStrong = false
+        )
+        assertFalse(lyingRec.isFacedownRequired)
+        assertTrue(lyingRec.targetPosture == com.example.itv.domain.coaching.UserPosture.LYING_DOWN || lyingRec.targetPosture == null)
+
+        val sittingRec = com.example.itv.domain.coaching.RestMissionCatalog.pick(
+            com.example.itv.domain.coaching.UserPosture.SITTING_OR_STANDING,
+            isStrong = false
+        )
+        assertFalse(sittingRec.isFacedownRequired)
+        assertTrue(sittingRec.targetPosture == com.example.itv.domain.coaching.UserPosture.SITTING_OR_STANDING || sittingRec.targetPosture == null)
+
+        val tableRec = com.example.itv.domain.coaching.RestMissionCatalog.pick(
+            com.example.itv.domain.coaching.UserPosture.TABLE_OR_DESK,
+            isStrong = false
+        )
+        assertFalse(tableRec.isFacedownRequired)
+        assertTrue(tableRec.targetPosture == com.example.itv.domain.coaching.UserPosture.TABLE_OR_DESK || tableRec.targetPosture == null)
+    }
 }

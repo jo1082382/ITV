@@ -30,34 +30,39 @@ internal class TestRestMission {
     var started = false
     var offAt: Long? = null
     var pending = false
+    var requireFacedown = false
+
     fun begin(
         value: String,
         now: Long,
         startMs: Long = TestCoachingPolicy.MISSION_START_MS,
-        restMs: Long = TestCoachingPolicy.REST_MS
+        restMs: Long = TestCoachingPolicy.REST_MS,
+        requireFacedown: Boolean = false
     ) {
         id = value; offAt = null; pending = false; started = false
         startWindowMs = startMs
         requiredRestMs = restMs
         startDeadline = now + startMs
+        this.requireFacedown = requireFacedown
     }
     fun isLate(now: Long) = id != null && !started && !pending && now > startDeadline
-    fun failStart() { id = null; offAt = null; startDeadline = 0L }
+    fun failStart() { id = null; offAt = null; startDeadline = 0L; requireFacedown = false }
     fun screenOff(now: Long): Boolean {
         if (id == null || pending || offAt != null) return false
         val first = !started
         started = true; offAt = now
         return first
     }
-    fun screenOn(now: Long): Pair<TestMissionWake, Long> {
+    fun screenOn(now: Long, isFacedownObserved: Boolean = true): Pair<TestMissionWake, Long> {
         val start = offAt ?: return TestMissionWake.NONE to 0L
         offAt = null
         if (id == null) return TestMissionWake.NONE to 0L
         val duration = now - start
-        return if (duration >= requiredRestMs) {
+        val facedownOk = !requireFacedown || isFacedownObserved
+        return if (duration >= requiredRestMs && facedownOk) {
             pending = true; TestMissionWake.SUCCESS to duration
         } else TestMissionWake.INCOMPLETE to duration
     }
-    fun displayed() { pending = false; id = null }
-    fun clear() { id = null; pending = false; offAt = null }
+    fun displayed() { pending = false; id = null; requireFacedown = false }
+    fun clear() { id = null; pending = false; offAt = null; requireFacedown = false }
 }

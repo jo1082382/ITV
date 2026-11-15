@@ -65,7 +65,13 @@ data class AmbientSnapshot(
     val bedtimeDistanceMinutes: Int? = null,
     val bedtimePhase: BedtimePhase = BedtimePhase.UNKNOWN,
     val userEnvironmentState: UserEnvironmentState = UserEnvironmentState.INDOOR_ACTIVE,
-    val estimatedBedtimeSource: String = "미측정"
+    val estimatedBedtimeSource: String = "미측정",
+    val posture: com.example.itv.domain.coaching.UserPosture = com.example.itv.domain.coaching.UserPosture.UNKNOWN,
+    val pitchDegrees: Float? = null,
+    val rollDegrees: Float? = null,
+    val gravityZ: Float? = null,
+    val postureExplanation: String = "자세 판별 대기 중",
+    val isStationary: Boolean = false
 )
 
 class LightAndBrightnessTracker(context: Context) : SensorEventListener {
@@ -74,11 +80,45 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
     private val powerManager = appContext.getSystemService(PowerManager::class.java)
     private val lightSensor: Sensor? = sm?.getDefaultSensor(Sensor.TYPE_LIGHT)
     private val proximitySensor: Sensor? = sm?.getDefaultSensor(Sensor.TYPE_PROXIMITY)
+    private val gravitySensor: Sensor? = sm?.getDefaultSensor(Sensor.TYPE_GRAVITY)
+        ?: sm?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private var currentLux: Float? = null
     private var currentProximity: Float? = null
+    private var currentGx: Float? = null
+    private var currentGy: Float? = null
+    private var currentGz: Float? = null
+    private var facedownMonitoring = false
+    private var facedownObserved = false
+
+    private val motionSamples = java.util.ArrayDeque<FloatArray>(20)
+    private var isCurrentlyStationary = false
+
+    private fun trackMotion(gx: Float, gy: Float, gz: Float) {
+        synchronized(motionSamples) {
+            motionSamples.addLast(floatArrayOf(gx, gy, gz))
+            if (motionSamples.size > 15) {
+                motionSamples.removeFirst()
+            }
+            if (motionSamples.size >= 8) {
+                var sumX = 0f; var sumY = 0f; var sumZ = 0f
+                for (s in motionSamples) {
+                    sumX += s[0]; sumY += s[1]; sumZ += s[2]
+                }
+                val n = motionSamples.size.toFloat()
+                val meanX = sumX / n; val meanY = sumY / n; val meanZ = sumZ / n
+                var varX = 0f; var varY = 0f; var varZ = 0f
+                for (s in motionSamples) {
+                    val dx = s[0] - meanX; val dy = s[1] - meanY; val dz = s[2] - meanZ
+                    varX += dx * dx; varY += dy * dy; varZ += dz * dz
+                }
+                val totalVariance = (varX + varY + varZ) / n
+                isCurrentlyStationary = totalVariance < 0.006f
+            }
+        }
+    }
 
     private var refCount = 0
     private var isScreenOn = powerManager?.isInteractive ?: true
@@ -316,34 +356,123 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         if (sm != null) {
             lightSensor?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL) }
             proximitySensor?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL) }
+            gravitySensor?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
             isSensorsRegistered = true
         }
     }
 
+    private var continuousPostureClients = 0
+
+    fun startContinuousPostureListening() {
+        continuousPostureClients++
+        startSensors()
+    }
+
+    fun stopContinuousPostureListening() {
+        continuousPostureClients = maxOf(0, continuousPostureClients - 1)
+        if (continuousPostureClients == 0 && sampleJob?.isActive != true && !facedownMonitoring) {
+            stopSensors()
+        }
+    }
+
     private fun stopSensors() {
+        if (continuousPostureClients > 0 || facedownMonitoring) return
         if (!isSensorsRegistered) return
         sm?.unregisterListener(this)
         isSensorsRegistered = false
     }
 
+    fun currentPosture(): com.example.itv.domain.coaching.UserPosture = _snapshot.value.posture
+
+    fun isFacedown(): Boolean {
+        val gz = currentGz ?: _snapshot.value.gravityZ ?: return false
+        val isNear = _snapshot.value.isNear
+        val lux = currentLux ?: _snapshot.value.lux
+        val roll = _snapshot.value.rollDegrees
+        val absRoll = roll?.let { abs(it) } ?: 0f
+        val gy = currentGy ?: 0f
+        val gx = currentGx ?: 0f
+        val screenInteractive = powerManager?.isInteractive ?: isScreenOn
+
+        val isPitchBlack = lux != null && lux <= 0.8f
+        val isFlatResting = gz < -8.5f && abs(gy) < 2.5f && abs(gx) < 2.5f
+
+        // 1. 화면이 꺼져 있는 경우 (휴식 미션 실행 중)
+        if (!screenInteractive && (gz < -5.0f || absRoll > 135f || isNear)) return true
+
+        // 2. 근접 센서가 확실히 가려진 경우 (침대/이불/베개 밀착)
+        if (isNear && (isPitchBlack || gz < -3.5f)) return true
+
+        // 3. 조도가 0 lux로 차단되고 책상에 수평으로 놓인 경우 (카툭튀 대응)
+        if (isPitchBlack && (isFlatResting || (absRoll > 165f && abs(gy) < 2.5f))) return true
+
+        // 화면이 켜져 있고 조도가 있거나(lux > 0.8) 근접 센서가 열려 있다면, 누워서 얼굴 위로 들고 시청 중!
+        return false
+    }
+
+    fun startFacedownMonitoring() {
+        facedownMonitoring = true
+        facedownObserved = isFacedown()
+        startSensors()
+    }
+
+    fun stopFacedownMonitoring(): Boolean {
+        facedownMonitoring = false
+        val wasFacedown = facedownObserved || isFacedown()
+        if (!isScreenOn && continuousPostureClients == 0) stopSensors()
+        return wasFacedown
+    }
+
     override fun onSensorChanged(event: SensorEvent?) {
+        val isContinuous = continuousPostureClients > 0
         when (event?.sensor?.type) {
             Sensor.TYPE_LIGHT -> {
                 currentLux = event.values.firstOrNull()
-                update(force = false, isSampling = true, triggerReason = _snapshot.value.lastTriggerReason)
+                update(force = isContinuous, isSampling = true, triggerReason = if (isContinuous) "실시간 조도 갱신" else _snapshot.value.lastTriggerReason)
             }
             Sensor.TYPE_PROXIMITY -> {
                 currentProximity = event.values.firstOrNull()
-                update(force = false, isSampling = true, triggerReason = _snapshot.value.lastTriggerReason)
+                update(force = isContinuous, isSampling = true, triggerReason = if (isContinuous) "실시간 근접 갱신" else _snapshot.value.lastTriggerReason)
+            }
+            Sensor.TYPE_GRAVITY, Sensor.TYPE_ACCELEROMETER -> {
+                val gx = event.values.getOrNull(0)
+                val gy = event.values.getOrNull(1)
+                val gz = event.values.getOrNull(2)
+                currentGx = gx
+                currentGy = gy
+                currentGz = gz
+                if (gx != null && gy != null && gz != null) {
+                    trackMotion(gx, gy, gz)
+                }
+                if (facedownMonitoring && isFacedown()) {
+                    facedownObserved = true
+                }
+                update(force = isContinuous, isSampling = true, triggerReason = if (isContinuous) "실시간 자세 감지" else _snapshot.value.lastTriggerReason)
             }
         }
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
+    private var lastContinuousUpdateMs = 0L
+
     private fun update(force: Boolean, isSampling: Boolean, triggerReason: String) {
         val candidate = readCurrent(currentLux, currentProximity, isSampling, triggerReason)
         val current = _snapshot.value
+        val now = android.os.SystemClock.elapsedRealtime()
+
+        val isContinuous = continuousPostureClients > 0
+        if (isContinuous) {
+            // 실시간 감지 중에는 최소 200ms 스로틀링 적용 (초당 50~60회 방출로 인한 Compose 전체 리컴포지션 렉 방지)
+            if (now - lastContinuousUpdateMs < 200L) {
+                return
+            }
+            if (shouldPublishUpdate(current, candidate) || (now - lastContinuousUpdateMs >= 1000L) || current.isSampling != isSampling) {
+                lastContinuousUpdateMs = now
+                _snapshot.value = candidate
+            }
+            return
+        }
 
         if (force || shouldPublishUpdate(current, candidate) || current.isSampling != isSampling) {
             _snapshot.value = candidate
@@ -365,6 +494,14 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         if (old.stateLabel != new.stateLabel) return true
         if (old.userEnvironmentState != new.userEnvironmentState) return true
         if (old.bedtimePhase != new.bedtimePhase) return true
+        if (old.posture != new.posture) return true
+        if (old.isStationary != new.isStationary) return true
+        val oldPitch = old.pitchDegrees ?: 0f
+        val newPitch = new.pitchDegrees ?: 0f
+        if (abs(newPitch - oldPitch) >= 2f) return true
+        val oldRoll = old.rollDegrees ?: 0f
+        val newRoll = new.rollDegrees ?: 0f
+        if (abs(newRoll - oldRoll) >= 2f) return true
 
         // 5. 다크 모드 또는 화면 밝기 대폭 변경
         if (old.nightModeActive != new.nightModeActive) return true
@@ -572,6 +709,11 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
             }
         }
 
+        val (posture, pitchRoll, postureExplain) = computePosture(
+            currentGx, currentGy, currentGz,
+            isNear, lux, isCurrentlyStationary
+        )
+
         return AmbientSnapshot(
             lux = lux,
             proximityDistanceCm = proximity,
@@ -589,7 +731,158 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
             bedtimeDistanceMinutes = diffMinutes,
             bedtimePhase = bedtimePhase,
             userEnvironmentState = state,
-            estimatedBedtimeSource = (estimatedSource as String?).orEmpty().ifEmpty { "미측정" }
+            estimatedBedtimeSource = (estimatedSource as String?).orEmpty().ifEmpty { "미측정" },
+            posture = posture,
+            pitchDegrees = pitchRoll.first,
+            rollDegrees = pitchRoll.second,
+            gravityZ = currentGz,
+            postureExplanation = postureExplain,
+            isStationary = isCurrentlyStationary
         )
+    }
+
+    private fun computePosture(
+        gx: Float?,
+        gy: Float?,
+        gz: Float?,
+        isNear: Boolean,
+        lux: Float?,
+        isStationary: Boolean
+    ): Triple<com.example.itv.domain.coaching.UserPosture, Pair<Float?, Float?>, String> {
+        if (gx == null || gy == null || gz == null) {
+            if ((isNear && (lux != null && lux <= 1.5f)) || (lux != null && lux <= 0.1f)) {
+                return Triple(
+                    com.example.itv.domain.coaching.UserPosture.FACEDOWN,
+                    Pair(null, null),
+                    "화면이 엎어져 있습니다 (조도 센서 차단 감지)"
+                )
+            }
+            return Triple(
+                com.example.itv.domain.coaching.UserPosture.UNKNOWN,
+                Pair(null, null),
+                "자세 판별 중 (중력 센서 대기)"
+            )
+        }
+
+        val gMag = kotlin.math.sqrt((gx * gx + gy * gy + gz * gz).toDouble()).toFloat().coerceAtLeast(0.1f)
+
+        // Pitch: 스마트폰 전면 거치 각도 (수평 0° ~ 수직 90°)
+        // 세운 방향일수록 gy가 양수로 증가: arcsin(gy / |g|) -> 0°(바닥 평평) ~ 90°(직립)
+        val pitch = Math.toDegrees(kotlin.math.asin((gy / gMag).coerceIn(-1f, 1f).toDouble())).toFloat()
+
+        // Roll: 좌우 기울기 (-180° ~ +180°)
+        // 바로 세움 = ~0°, 오른쪽 기울임 = +, 왼쪽 기울임 = -, 뒤집어 엎음 = ±180°
+        val roll = Math.toDegrees(kotlin.math.atan2(gx.toDouble(), gz.toDouble())).toFloat()
+        val absRoll = abs(roll)
+
+        val screenInteractive = powerManager?.isInteractive ?: isScreenOn
+        val isPitchBlack = lux != null && lux <= 0.8f
+        val isFlatResting = gz < -8.5f && abs(gy) < 2.5f && abs(gx) < 2.5f
+
+        val postureTriple = when {
+            // 1. 스마트폰 화면 하향 각도 (Z축 음수 또는 반전 135° 이상)
+            // -> 바닥/침대에 엎어둔 것인지 vs 얼굴 위로 들고 시청 중인 것인지 조도/근접/화면상태로 정밀 분기
+            gz < -2.5f || absRoll > 135f -> {
+                val isTrulyFacedown = when {
+                    // 화면 꺼짐: 미션 중 화면 끄고 엎어둠
+                    !screenInteractive -> true
+                    // 근접 센서가 밀착 가림 (침구류/베개/손바닥)
+                    isNear && (isPitchBlack || gz < -3.5f) -> true
+                    // 조도 0 lux 차단 및 바닥 수평 거치
+                    isPitchBlack && isFlatResting -> true
+                    isPitchBlack && absRoll > 165f && abs(gy) < 2.5f -> true
+                    else -> false
+                }
+
+                if (isTrulyFacedown) {
+                    Triple(
+                        com.example.itv.domain.coaching.UserPosture.FACEDOWN,
+                        Pair(pitch, roll),
+                        "화면이 바닥에 엎어져 있습니다 (조도 차단 %.1f lux · Z축 %.1f m/s²). 강한 개입 차단 조건 충족.".format(lux ?: 0f, gz)
+                    )
+                } else {
+                    // 화면이 켜져 있고 조도가 유입되거나 근접 센서가 열려 있는 경우:
+                    // 얼굴 위로 스마트폰을 들고 있는 고하중 오버헤드 각도
+                    Triple(
+                        com.example.itv.domain.coaching.UserPosture.LYING_DOWN,
+                        Pair(pitch, roll),
+                        "얼굴 위로 폰을 들고 시청 중 (전면 %.0f° · 팔·목 근육 피로 누적 각도). 목·어깨 이완 필요.".format(pitch)
+                    )
+                }
+            }
+
+            // 2. 테이블/거치대 고정 각도 (TABLE_OR_DESK)
+            // 특징: 기기가 미세 떨림 없이 완전 정지(isStationary) 상태
+            isStationary && (
+                (gz > 7.5f && pitch < 25f && absRoll < 30f) ||
+                (pitch in 25f..85f && absRoll < 30f) ||
+                (absRoll in 65f..115f && pitch < 35f)
+            ) -> {
+                val modeDesc = when {
+                    absRoll in 65f..115f -> "가로 모드 거치"
+                    gz > 7.5f && pitch < 25f -> "테이블 수평 내려놓음"
+                    else -> "거치대에 세워둠"
+                }
+                Triple(
+                    com.example.itv.domain.coaching.UserPosture.TABLE_OR_DESK,
+                    Pair(pitch, roll),
+                    "테이블 거치 상태 ($modeDesc · 고정 응시). 장시간 고개 숙임과 식사 중 시청에 주의하세요."
+                )
+            }
+
+            // 3. 수평/하향 각도 (LYING_DOWN: 경추 고하중 거북목 각도)
+            // 전면 거치 각도가 22° 미만으로 낮아 고개를 아래로 깊게 떨구거나 누워 올려다보는 각도
+            pitch < 22f && gz > 5.5f -> {
+                Triple(
+                    com.example.itv.domain.coaching.UserPosture.LYING_DOWN,
+                    Pair(pitch, roll),
+                    "스마트폰이 수평으로 눕혀져 있어(전면 %.0f°) 목(경추)에 최대 27kg 하중이 실리는 각도입니다. 턱 당기기 스트레칭을 권유합니다.".format(pitch)
+                )
+            }
+
+            // 4. 좌우 비대칭 기울임 파지 (한쪽으로 기울여 쥠)
+            absRoll > 40f && pitch < 55f -> {
+                Triple(
+                    com.example.itv.domain.coaching.UserPosture.SITTING_OR_STANDING,
+                    Pair(pitch, roll),
+                    "스마트폰이 좌우로 기울어져 있어(기울기 %.0f°) 척추와 어깨 좌우 불균형이 발생할 수 있는 각도입니다. 어깨와 허리 스트레칭을 권유합니다.".format(roll)
+                )
+            }
+
+            // 5. 정면 파지 시청 (SITTING_OR_STANDING)
+            // 전면 거치 각도가 22°~88° 사이인 일반적인 파지 상태
+            pitch in 22f..88f && absRoll <= 40f && gz > -3.5f -> {
+                Triple(
+                    com.example.itv.domain.coaching.UserPosture.SITTING_OR_STANDING,
+                    Pair(pitch, roll),
+                    "균형 잡힌 파지 각도(전면 %.0f°, 좌우 %.0f°)입니다. 다만 장시간 고정 시 목·어깨가 굳으므로 가벼운 스트레칭을 권유합니다.".format(pitch, roll)
+                )
+            }
+
+            // Fallbacks:
+            pitch >= 20f && gz > -2.0f -> {
+                Triple(
+                    com.example.itv.domain.coaching.UserPosture.SITTING_OR_STANDING,
+                    Pair(pitch, roll),
+                    "정면 파지 각도(전면 %.0f°)입니다. 가벼운 스트레칭을 권유합니다.".format(pitch)
+                )
+            }
+            gz > 6.0f -> {
+                Triple(
+                    com.example.itv.domain.coaching.UserPosture.LYING_DOWN,
+                    Pair(pitch, roll),
+                    "수평에 가까운 각도(전면 %.0f°)로 경추 부담이 큽니다. 목 스트레칭을 권유합니다.".format(pitch)
+                )
+            }
+            else -> {
+                Triple(
+                    com.example.itv.domain.coaching.UserPosture.UNKNOWN,
+                    Pair(pitch, roll),
+                    "각도 측정 중 (전면 %.0f°, 좌우 %.0f°)".format(pitch, roll)
+                )
+            }
+        }
+
+        return postureTriple
     }
 }

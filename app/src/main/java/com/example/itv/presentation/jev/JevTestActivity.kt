@@ -26,9 +26,11 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.itv.domain.coaching.RestMissionCatalog
+import com.example.itv.domain.coaching.UserPosture
 import com.example.itv.domain.jev.*
-import com.example.itv.domain.records.ShortformApp
 import com.example.itv.infrastructure.jev.*
+import com.example.itv.infrastructure.observation.LightAndBrightnessTracker
 import com.example.itv.infrastructure.observation.SwipeDynamicsTracker
 import com.example.itv.infrastructure.observation.instagram.ReelsProbe
 import com.example.itv.infrastructure.observation.youtube.YoutubeProbe
@@ -37,6 +39,7 @@ import com.example.itv.infrastructure.storage.shortform.ReelsUsageStore
 import com.example.itv.infrastructure.coaching.InterventionJournal
 import com.example.itv.infrastructure.coaching.MissionStats
 import com.example.itv.presentation.character.CompanionPreviewActivity
+import com.example.itv.presentation.coaching.CoachingMonitorService
 import com.example.itv.presentation.components.*
 import com.example.itv.ui.theme.ITVTheme
 import org.json.JSONObject
@@ -74,7 +77,7 @@ private fun JevTestScreen(vm: JevTestViewModel,onBack: ()->Unit,modifier: Modifi
         Text("Jev 공동 테스트",Modifier.padding(horizontal=20.dp),style=MaterialTheme.typography.headlineSmall,
             fontWeight=FontWeight.Bold,color=ItvGreen)
         PrimaryScrollableTabRow(selectedTabIndex=page,edgePadding=12.dp) {
-            listOf("연결","판단 설정","수동 요청","상태·기록","개입 기록","실시간 측정 테스트","스와이프 테스트").forEachIndexed { i,title ->
+            listOf("연결","판단 설정","상태·기록","개입 기록","실시간 측정 테스트","파지 각도·목 부담 감지").forEachIndexed { i,title ->
                 Tab(selected=page==i,onClick={page=i},text={Text(title)})
             }
         }
@@ -88,11 +91,10 @@ private fun JevTestScreen(vm: JevTestViewModel,onBack: ()->Unit,modifier: Modifi
                 when(page) {
                     0 -> ConnectionPage(vm,s,busy)
                     1 -> SettingsPage(vm,s,busy)
-                    2 -> ManualPage(vm,s,busy)
-                    3 -> RecordsPage(vm,busy)
-                    4 -> InterventionHistoryPage()
-                    5 -> ObservationTestPage(vm,busy)
-                    else -> SwipeTestPage(busy)
+                    2 -> RecordsPage(vm,busy)
+                    3 -> InterventionHistoryPage()
+                    4 -> ObservationTestPage(vm,busy)
+                    else -> PostureTestPage(busy)
                 }
             }
         }
@@ -301,67 +303,7 @@ private fun SettingsPage(vm: JevTestViewModel,s: JevSettings,busy: Boolean) {
     },modifier=Modifier.fillMaxWidth()) {Text("판단 설정 저장")}
     OutlinedButton(enabled=!busy,onClick={vm.save(JevSettings(testerId=s.testerId,collectionConsent=s.collectionConsent))},modifier=Modifier.fillMaxWidth()) {Text("초기 시험 설정으로 복원")}
 }
-@Composable
-private fun ManualPage(vm: JevTestViewModel,s: JevSettings,busy: Boolean) {
-    var pkg by rememberSaveable {mutableStateOf(JevSettings.INSTAGRAM)}
-    var total by rememberSaveable {mutableStateOf("18")}
-    var continuous by rememberSaveable {mutableStateOf("18")}
-    var returns by rememberSaveable {mutableStateOf("4")}
-    var bedtimeOn by rememberSaveable {mutableStateOf(true)}
-    var bedtime by rememberSaveable {mutableStateOf("20")}
-    var error by remember {mutableStateOf<String?>(null)}
-    val answer by vm.manualAnswer.collectAsState()
-    TestSection("가상 상황 입력") {
-        Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-            FilterChip(selected=pkg==JevSettings.INSTAGRAM,onClick={pkg=JevSettings.INSTAGRAM},label={Text("Instagram")},enabled=!busy)
-            FilterChip(selected=pkg==JevSettings.YOUTUBE,onClick={pkg=JevSettings.YOUTUBE},label={Text("YouTube")},enabled=!busy)
-        }
-        Numeric("구간 숏폼 누적시간 (분)",total,{total=it},!busy,true)
-        Numeric("연속 숏폼 시청시간 (분)",continuous,{continuous=it},!busy,true)
-        Numeric("최근 10분 재진입 (회)",returns,{returns=it},!busy)
-        Toggle("취침 목표 적용",bedtimeOn,{bedtimeOn=it},!busy)
-        if(bedtimeOn) Numeric("취침 목표 초과 (분)",bedtime,{bedtime=it},!busy)
-        Row(Modifier.horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick={total="2";continuous="2";returns="0";bedtimeOn=false},enabled=!busy) {Text("짧은 시청")}
-            OutlinedButton(onClick={total="30";continuous="30";returns="4";bedtimeOn=false},enabled=!busy) {Text("장시간")}
-            OutlinedButton(onClick={total="18";continuous="18";returns="4";bedtime="20";bedtimeOn=true},enabled=!busy) {Text("취침 이후")}
-        }
-        OutlinedButton(enabled=!busy,onClick={
-            val c=vm.runtime.lastObservedContext
-            if(c==null)error="확인된 최근 숏폼 관측이 없습니다."
-            else {pkg=c.packageName;total=(c.sessionMs/60000.0).toString();continuous=(c.continuousMs/60000.0).toString()
-                returns=c.returns10m.toString();bedtimeOn=c.bedtimePassedMinutes!=null;bedtime=(c.bedtimePassedMinutes ?: 0).toString();error=null}
-        },modifier=Modifier.fillMaxWidth()) {Text("최근 관측값 불러오기")}
-        Text("수동 요청은 호출 후보 조건을 우회하지만 인증·서버 한도는 적용됩니다. MANUAL로 기록하며 실제 개입·평가를 발생시키지 않습니다.",style=MaterialTheme.typography.bodySmall)
-        error?.let {Text(it,color=MaterialTheme.colorScheme.error)}
-        Button(enabled=!busy && s.collectionConsent,onClick={
-            try {
-                val t=total.toDoubleOrNull() ?: error("누적시간을 확인해 주세요.")
-                val c=continuous.toDoubleOrNull() ?: error("연속시간을 확인해 주세요.")
-                val r=returns.toIntOrNull() ?: error("재진입 횟수를 확인해 주세요.")
-                require(t.isFinite() && c.isFinite() && t in 0.0..1440.0 && c in 0.0..t) {"시청시간은 0~1440분이며 연속시간은 누적시간 이하여야 합니다."}
-                require(r in 0..1440) {"재진입은 0~1440회입니다."}
-                val b=if(bedtimeOn)bedtime.toIntOrNull()?.also {require(it in 0..1440)} ?: error("취침 초과 시간을 확인해 주세요.") else null
-                error=null
-                val baseCtx=JevContext(UUID.randomUUID().toString(),pkg,(t*60000).toLong(),(c*60000).toLong(),r,600,b,System.currentTimeMillis())
-                vm.manual(vm.runtime.enrichContext(baseCtx))
-            } catch(e:Exception) {error=e.message ?: "입력값을 확인해 주세요."}
-        },modifier=Modifier.fillMaxWidth()) {Text("입력값으로 Jev 판단 요청")}
-    }
-    answer?.let { a ->
-        val settingsObj=JSONObject(a.trial.payload).getJSONObject("settings")
-        val baseThreshold=settingsObj.optDouble("probabilityThreshold")
-        val effThreshold=settingsObj.optDouble("effectiveProbabilityThreshold",baseThreshold)
-        val diffPct=(effThreshold-baseThreshold)*100.0
-        val diffText=if(kotlin.math.abs(diffPct)>=0.05)"${if(diffPct>0)"+" else ""}${"%.1f".format(diffPct)}%p 변화" else "변화 0.0%p"
-        TestSection("최근 수동·재확인 결과") {
-            Text("개입 적절 확률: ${"%.1f".format(a.probability*100)}%")
-            Text("요청 당시 기준: ${"%.1f".format(effThreshold*100)}% (기본 ${"%.1f".format(baseThreshold*100)}% · $diffText) · ${if(a.probability>=effThreshold)"통과" else "미달"}")
-            Text("모델: ${a.trial.model} · 입력 ${a.trial.inputTokens ?: "미제공"} 토큰")
-            Text("응답: ${a.trial.latencyMs}ms · 실제 개입 없음")
-        }
-    }
-}
+
 @Composable
 private fun RecordsPage(vm: JevTestViewModel,busy: Boolean) {
     val context = LocalContext.current
@@ -766,6 +708,21 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
                     value = "$bedtimeStatusStr$bedtimeDeltaStr",
                     highlight = adj.bedtimeDelta < 0
                 )
+                val ambientSnapshot = remember(refreshTick) {
+                    com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(context).snapshot.value
+                }
+                val postureStr = when (ambientSnapshot.posture) {
+                    com.example.itv.domain.coaching.UserPosture.LYING_DOWN -> "수평/하향 각도 (전면 ${ambientSnapshot.pitchDegrees?.toInt() ?: 0}° · 경추 고하중 🐢)"
+                    com.example.itv.domain.coaching.UserPosture.SITTING_OR_STANDING -> "정면 파지 각도 (전면 ${ambientSnapshot.pitchDegrees?.toInt() ?: 0}° · 어깨/허리 긴장 🙆)"
+                    com.example.itv.domain.coaching.UserPosture.TABLE_OR_DESK -> "테이블 거치 각도 (전면 ${ambientSnapshot.pitchDegrees?.toInt() ?: 0}° · 고개숙임 🍽️)"
+                    com.example.itv.domain.coaching.UserPosture.FACEDOWN -> "스마트폰 엎어둠 (완전 차단 🛑)"
+                    else -> "각도 측정 중 (기울기 ${ambientSnapshot.pitchDegrees?.toInt() ?: 0}°)"
+                }
+                CompactCheckRow(
+                    label = "파지 각도 및 하중",
+                    value = postureStr,
+                    highlight = ambientSnapshot.posture == com.example.itv.domain.coaching.UserPosture.LYING_DOWN
+                )
             }
 
             // 3. 개입 확률 기준 & 판정 결과 박스
@@ -965,143 +922,245 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
     }
 }
 
-private fun signed(v: Double): String = if (v > 0.0) "+${"%.1f".format(v)}" else "%.1f".format(v)
-
 @Composable
-private fun SwipeTestPage(busy: Boolean) {
-    var selectedApp by rememberSaveable { mutableStateOf(ShortformApp.YOUTUBE.name) }
-    var refreshTick by remember { mutableLongStateOf(android.os.SystemClock.elapsedRealtime()) }
-    val app = if (selectedApp == ShortformApp.INSTAGRAM.name) ShortformApp.INSTAGRAM else ShortformApp.YOUTUBE
+@Suppress("UNUSED_PARAMETER")
+private fun PostureTestPage(busy: Boolean) {
+    val context = LocalContext.current
+    val tracker = remember { LightAndBrightnessTracker.getInstance(context) }
 
-    LaunchedEffect(Unit) {
-        while (true) {
-            kotlinx.coroutines.delay(1.seconds)
-            refreshTick = android.os.SystemClock.elapsedRealtime()
+    DisposableEffect(Unit) {
+        tracker.start()
+        tracker.startContinuousPostureListening()
+        onDispose {
+            tracker.stopContinuousPostureListening()
+            tracker.stop()
         }
     }
 
-    val snap = remember(app, refreshTick) { SwipeDynamicsTracker.snapshot(app) }
-    val updatedAt = Instant.ofEpochMilli(snap.updatedWallMs).atZone(ZoneId.systemDefault())
-        .format(DateTimeFormatter.ofPattern("HH:mm:ss"))
+    val snap by tracker.snapshot.collectAsState()
+    var missionSeed by remember { mutableIntStateOf(0) }
+    val normalMission = remember(snap.posture, missionSeed) {
+        RestMissionCatalog.pick(snap.posture, isStrong = false)
+    }
+    val strongMission = remember(snap.posture, missionSeed) {
+        RestMissionCatalog.pick(snap.posture, isStrong = true)
+    }
+    val isFacedown = tracker.isFacedown()
 
-    TestSection("스와이프 속도 · 가속도 감별 테스트") {
-        Text(
-            "유튜브 쇼츠나 인스타그램 릴스를 시청·스와이프한 뒤 돌아오면 분당 스와이프 수(SPM)와 스와이프 가속도 기록을 확인할 수 있습니다. (15초 유예 및 직전 세션 보존 적용)",
-            style = MaterialTheme.typography.bodySmall
-        )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(
-                selected = app == ShortformApp.YOUTUBE,
-                onClick = { selectedApp = ShortformApp.YOUTUBE.name },
-                label = { Text("YouTube 쇼츠") },
-                enabled = !busy
-            )
-            FilterChip(
-                selected = app == ShortformApp.INSTAGRAM,
-                onClick = { selectedApp = ShortformApp.INSTAGRAM.name },
-                label = { Text("Instagram 릴스") },
-                enabled = !busy
-            )
-        }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(
-                onClick = { refreshTick = android.os.SystemClock.elapsedRealtime() },
-                modifier = Modifier.weight(1f)
-            ) {
-                Text("기록 즉시 갱신")
-            }
-            OutlinedButton(
-                onClick = {
-                    if (app == ShortformApp.YOUTUBE) YoutubeProbe.reset() else ReelsProbe.reset()
-                    SwipeDynamicsTracker.reset(app)
-                    refreshTick = android.os.SystemClock.elapsedRealtime()
-                },
-                enabled = !busy,
-                modifier = Modifier.weight(1f)
-            ) {
-                Text("현재 앱 기록 초기화")
-            }
-        }
+    val postureTitle = when (snap.posture) {
+        UserPosture.LYING_DOWN -> "수평/하향 각도 (목 하중·거북목 부담)"
+        UserPosture.SITTING_OR_STANDING -> "정면 파지 각도 (어깨·등 뭉침)"
+        UserPosture.TABLE_OR_DESK -> "식탁/책상 거치 (고개 숙임)"
+        UserPosture.FACEDOWN -> "스마트폰 엎어둠 (완전 차단)"
+        UserPosture.UNKNOWN -> "각도 측정 중 / 미정"
     }
 
-    TestSection("현재 감별 요약 (${if (app == ShortformApp.YOUTUBE) "YouTube 쇼츠" else "Instagram 릴스"})") {
-        Text(
-            "• 패턴 감별 결과: ${snap.patternLabel}",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
-            color = ItvGreen
-        )
-        Text(
-            "• 측정 상태: ${if (snap.active) "실시간 관측 중" else "직전 시청 세션 보존 기록"} (갱신: $updatedAt · 세션 ${"%.1f".format(snap.sessionDurationSeconds)}초)",
-            style = MaterialTheme.typography.bodySmall
-        )
-        Text(
-            "• 스와이프 집계: 전체 ${snap.totalSwipesInRun}회 → 유효 ${snap.effectiveSwipesInRun}회 (광고·단발 즉시 스킵 제외 ${snap.filteredAdSkipsInRun}회) · 현재 연속 고속 스트릭 ${snap.currentFastStreak}회",
-            style = MaterialTheme.typography.bodySmall,
-            fontWeight = FontWeight.SemiBold
-        )
-        HorizontalDivider(Modifier.padding(vertical = 4.dp))
-        Text("1) 광고 보정 유효 분당 스와이프 수 (SPM)", fontWeight = FontWeight.Bold)
-        Text(
-            "  • 최근 1분 유효 SPM: ${"%.1f".format(snap.effectiveSpm1m)} 회/분 (보정 전 원시: ${"%.1f".format(snap.rawSpm1m)} · 직전 1분 유효: ${"%.1f".format(snap.effectiveSpmPrev1m)})",
-            fontWeight = FontWeight.SemiBold
-        )
-        Text(
-            "  • 최근 30초 단기 유효 환산: ${"%.1f".format(snap.effectiveSpm30s)} 회/분 (보정 전 원시: ${"%.1f".format(snap.rawSpm30s)} · 직전 30초 유효: ${"%.1f".format(snap.effectiveSpmPrev30s)})"
-        )
-        Text(
-            "  • 현재 세션 평균 유효 SPM: ${"%.1f".format(snap.effectiveSessionSpm)} 회/분 (보정 전 원시: ${"%.1f".format(snap.rawSessionSpm)})"
-        )
-
-        HorizontalDivider(Modifier.padding(vertical = 4.dp))
-        Text("2) 광고 보정 유효 스와이프 가속도", fontWeight = FontWeight.Bold)
-        Text(
-            "  • 1분 구간 유효 가속도: ${signed(snap.effectiveAccel1m)} 회/분² (배율 ${"%.2f".format(snap.effectiveAccelRatio1m)}x · 보정 전 원시 ${signed(snap.rawAccel1m)})",
-            fontWeight = FontWeight.SemiBold,
-            color = if (snap.effectiveAccel1m >= 3.0) ItvGreen else MaterialTheme.colorScheme.onSurface
-        )
-        Text(
-            "  • 30초 단기 유효 가속도: ${signed(snap.effectiveAccel30s)} 회/분² (보정 전 원시 ${signed(snap.rawAccel30s)})",
-            fontWeight = FontWeight.SemiBold,
-            color = if (snap.effectiveAccel30s >= 4.0) ItvGreen else MaterialTheme.colorScheme.onSurface
-        )
-        Text(
-            "※ [광고 스킵 보정 규칙] 2.5초 이내에 즉시 넘긴 스와이프가 1~2회만 단발성으로 나타나고 다음 영상을 정상 시청하면 '광고/단발 스킵'으로 간주해 유효 SPM과 가속도에서 제외합니다. 반면 4.5초 이내 빠른 스와이프가 3회 이상 연속(스트릭 ≥ 3) 이어지면 진짜 고속 탐색으로 판단해 모두 반영합니다.",
-            style = MaterialTheme.typography.bodySmall
-        )
+    val postureColor = when (snap.posture) {
+        UserPosture.LYING_DOWN -> MaterialTheme.colorScheme.error
+        UserPosture.SITTING_OR_STANDING -> ItvGreen
+        UserPosture.TABLE_OR_DESK -> MaterialTheme.colorScheme.primary
+        UserPosture.FACEDOWN -> MaterialTheme.colorScheme.tertiary
+        UserPosture.UNKNOWN -> MaterialTheme.colorScheme.outline
     }
 
-    TestSection("스와이프별 실시간 기록 로그 (최근 ${snap.events.size}건)") {
-        if (snap.events.isEmpty()) {
-            Text("아직 기록된 스와이프가 없습니다. 쇼츠/릴스를 넘긴 뒤 확인해 보세요.")
-        } else {
-            snap.events.forEach { ev ->
-                val t = Instant.ofEpochMilli(ev.wallMs).atZone(ZoneId.systemDefault())
-                    .format(DateTimeFormatter.ofPattern("HH:mm:ss"))
-                val tag = if (ev.filteredAsAdSkip) "[광고/단발 스킵 제외]" else "[유효 반영]"
-                Card(
+    TestSection("실시간 각도 및 목·어깨 부담 감지 (실시간 반응)") {
+        Text(
+            "자이로/중력 센서를 분석하여 스마트폰 파지 각도와 그에 따른 목·어깨·허리의 부담을 실시간 측정하고, 2° 이상의 각도 변화에도 즉시 반응하여 최적의 부위별 스트레칭을 매칭합니다.",
+            style = MaterialTheme.typography.bodySmall
+        )
+
+        Card(
+            Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(14.dp),
+            border = BorderStroke(2.dp, postureColor),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
                     Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp),
-                    border = BorderStroke(1.dp, ItvLine),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        postureTitle,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = postureColor
+                    )
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = if (isFacedown) MaterialTheme.colorScheme.errorContainer else ItvMint
+                    ) {
                         Text(
-                            "#${ev.index} · $t · $tag · ${ev.patternLabel}",
+                            text = if (isFacedown) "엎어둠 감지!" else "정상 시청 각도",
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.Bold,
-                            color = if (ev.filteredAsAdSkip) MaterialTheme.colorScheme.secondary else ItvGreen
-                        )
-                        Text(
-                            "유효 SPM: 1분 ${"%.1f".format(ev.effectiveSpm1m)} (원시 ${"%.1f".format(ev.rawSpm1m)}) · 30초환산 ${"%.1f".format(ev.effectiveSpm30s)} (원시 ${"%.1f".format(ev.rawSpm30s)}) · 연속고속스트릭 ${ev.fastStreakAtSwipe}회",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                        Text(
-                            "유효 가속도: 1분 ${signed(ev.effectiveAccel1m)}회/분² (${"%.2f".format(ev.effectiveAccelRatio1m)}x) · 30초단기 ${signed(ev.effectiveAccel30s)}회/분²",
-                            style = MaterialTheme.typography.bodySmall,
-                            fontWeight = FontWeight.SemiBold
+                            color = if (isFacedown) MaterialTheme.colorScheme.onErrorContainer else ItvGreen
                         )
                     }
                 }
+                Text(
+                    text = "판별 요약: ${snap.postureExplanation}",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+        }
+    }
+
+    TestSection("센서 실시간 측정 수치") {
+        CompactCheckGroup("자이로·중력 및 환경 센서") {
+            CompactCheckRow(
+                label = "기기 거치 안정도",
+                value = if (snap.isStationary) "식탁/거치대 완전 정지 (Stationary)" else "손 파지 상태 (미세 떨림 감지)",
+                highlight = snap.isStationary
+            )
+            CompactCheckRow(
+                label = "전면 기울기 (Pitch)",
+                value = snap.pitchDegrees?.let { "%.1f° (수평 0° ~ 직립 90°)".format(it) } ?: "측정 대기",
+                highlight = snap.pitchDegrees != null && snap.pitchDegrees!! in 22f..88f
+            )
+            CompactCheckRow(
+                label = "좌우 기울기 (Roll)",
+                value = snap.rollDegrees?.let { "%.1f° (좌우 수평 0° · 엎음 180°)".format(it) } ?: "측정 대기",
+                highlight = snap.rollDegrees != null && kotlin.math.abs(snap.rollDegrees!!) > 45f
+            )
+            CompactCheckRow(
+                label = "Z축 중력가속도",
+                value = snap.gravityZ?.let { "%.2f m/s² (상향 +9.8 · 하향 -9.8)".format(it) } ?: "측정 대기",
+                highlight = snap.gravityZ != null && snap.gravityZ!! < -6.0f
+            )
+            CompactCheckRow(
+                label = "주변 조도 (Lux)",
+                value = snap.lux?.let { "%.1f lux".format(it) } ?: "측정 대기",
+                highlight = snap.lux != null && snap.lux!! <= 1.0f
+            )
+            val proxText = when {
+                snap.proximityDistanceCm == null -> "측정 대기"
+                snap.isNear -> "가림 (닫힘, 0cm)"
+                isFacedown -> "열림 (${snap.proximityDistanceCm}cm) · ※카툭튀/가상센서 특성 (중력·조도로 엎어둠 감지)"
+                else -> "열림 (${snap.proximityDistanceCm}cm)"
+            }
+            CompactCheckRow(
+                label = "근접 센서 상태",
+                value = proxText,
+                highlight = snap.isNear || isFacedown
+            )
+        }
+    }
+
+    TestSection("파지 각도 및 신체 부위별 부담 판별 기준") {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("• 수평/하향 각도 (LYING_DOWN): 폰을 바닥이나 침대에 눕혀 내려다보거나 얼굴 위로 들고 보는 각도입니다. 고개가 꺾여 목에 하중이 실리므로, 고개를 뒤로 젖히고 목 주변 근육을 풀어주는 스트레칭을 우선 추천합니다.", style = MaterialTheme.typography.bodySmall)
+            Text("• 정면 파지 각도 (SITTING_OR_STANDING): 손에 쥐고 장시간 고정하는 표준 파지 각도입니다. 어깨와 등이 굳고 뭉치기 쉬우므로, 어깨를 둥글게 굴리거나 기지개로 굳은 상체를 시원하게 풀어주도록 제안합니다.", style = MaterialTheme.typography.bodySmall)
+            Text("• 식탁/책상 거치 (TABLE_OR_DESK): 폰을 내려놓고 고개를 푹 숙인 채 시청하는 상태입니다. 허리를 곧게 펴고 고개를 들어 시야를 넓히도록 자세 교정과 휴식을 제안합니다.", style = MaterialTheme.typography.bodySmall)
+            Text("• 화면 엎어둠 (FACEDOWN): 화면을 바닥이나 침대에 엎어두어 조도가 차단된 상태입니다. 폰을 완전히 엎어두고 기지개를 켜거나 어깨를 푸는 등 실질적인 휴식 미션 완료를 판단합니다.", style = MaterialTheme.typography.bodySmall)
+        }
+    }
+
+    TestSection("현재 파지 각도 맞춤 스트레칭 미션 매칭") {
+        Text("현재 감지된 파지 각도 [${snap.posture.name}]에 따라 목, 어깨, 허리 등 부위별 뭉친 곳을 풀어주는 맞춤 스트레칭 미션입니다.", style = MaterialTheme.typography.bodySmall)
+
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            TextButton(onClick = { missionSeed++ }) {
+                Text("다른 미션 뽑아보기")
+            }
+        }
+
+        Card(
+            Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            border = BorderStroke(1.dp, ItvLine),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("일반 추천 미션 (부위별 이완)", fontWeight = FontWeight.Bold, color = ItvGreen)
+                    Surface(shape = RoundedCornerShape(6.dp), color = ItvMint) {
+                        Text(
+                            normalMission.category,
+                            Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+                Text(normalMission.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text(normalMission.action, style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+
+        Card(
+            Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("강한 개입 미션 (화면 엎어두기)", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.error)
+                    Surface(shape = RoundedCornerShape(6.dp), color = MaterialTheme.colorScheme.errorContainer) {
+                        Text(
+                            strongMission.category,
+                            Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                }
+                Text(strongMission.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text(strongMission.action, style = MaterialTheme.typography.bodyMedium)
+                Text("※ 화면을 끄고 뒤집어(엎어)두어야만 미션 시간이 흘러갑니다.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            }
+        }
+    }
+
+    TestSection("강아지 개입 실시간 동작 테스트") {
+        Text(
+            "현재 측정된 각도(Pitch/Roll)와 조도(Lux)에 따라 개입 사유와 추천 미션이 동적으로 달라집니다. 기다리지 않고 즉시 테스트해 보세요.",
+            style = MaterialTheme.typography.bodySmall
+        )
+
+        Button(
+            onClick = {
+                context.startActivity(Intent(context, CompanionPreviewActivity::class.java))
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("현재 감지 상태로 개입 테스트 (미리보기 창 열기)")
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(
+                onClick = {
+                    android.widget.Toast.makeText(context, "3초 뒤 오버레이가 뜹니다! 원하는 자세를 취해보세요", android.widget.Toast.LENGTH_SHORT).show()
+                    CoachingMonitorService.triggerTest(context, forceStrong = false, delayMs = 3000L)
+                },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("3초 뒤 일반 개입")
+            }
+
+            OutlinedButton(
+                onClick = {
+                    android.widget.Toast.makeText(context, "3초 뒤 강한 개입이 뜹니다", android.widget.Toast.LENGTH_SHORT).show()
+                    CoachingMonitorService.triggerTest(context, forceStrong = true, delayMs = 3000L)
+                },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("3초 뒤 강한 개입")
             }
         }
     }
@@ -1114,6 +1173,7 @@ private fun InterventionHistoryPage() {
     var showJournalDelete by remember { mutableStateOf(false) }
 
     val missionCounts = remember(refreshTick) { MissionStats.counts(context) }
+    val userReward = remember(refreshTick) { com.example.itv.infrastructure.reward.UserRewardStore.getReward(context) }
     val journalRows = remember(refreshTick) { InterventionJournal.rows(context) }
 
     if (showJournalDelete) {
@@ -1134,7 +1194,7 @@ private fun InterventionHistoryPage() {
         )
     }
 
-    TestSection("🐶 캐릭터 상호작용 미리보기") {
+    TestSection("캐릭터 상호작용 미리보기") {
         Text(
             "강아지 캐릭터의 다양한 표정(환영, 피곤, 응원, 휴식 제안, 축하 등)과 대화 상호작용 오버레이 동작을 직접 테스트하고 확인합니다.",
             style = MaterialTheme.typography.bodySmall
@@ -1146,6 +1206,62 @@ private fun InterventionHistoryPage() {
             modifier = Modifier.fillMaxWidth()
         ) {
             Text("캐릭터 상호작용 미리보기 열기", fontWeight = FontWeight.Bold)
+        }
+    }
+
+    TestSection("캐릭터 성장 및 보상 시스템 (레벨·EXP·포인트)") {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("현재 캐릭터 레벨: Lv.${userReward.currentLevel}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = ItvGreen)
+            Surface(shape = RoundedCornerShape(6.dp), color = ItvMint) {
+                Text(
+                    "${userReward.currentPoints} P 보유",
+                    Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+        Text("• 경험치: ${userReward.currentLevelExp} / ${userReward.nextLevelExpRequired} EXP (${(userReward.progressPercent * 100).toInt()}%) · 누적 ${userReward.totalExp} EXP")
+        Text("• 누적 미션 성공: ${userReward.totalCompletedMissions}회")
+        LinearProgressIndicator(
+            progress = { userReward.progressPercent },
+            modifier = Modifier.fillMaxWidth().height(8.dp),
+            color = ItvGreen,
+            trackColor = ItvMint
+        )
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                onClick = {
+                    val res = com.example.itv.infrastructure.reward.UserRewardStore.grantMissionReward(context, isStrong = false)
+                    android.widget.Toast.makeText(context, "+${res.expGained} EXP, +${res.pointsGained} P 지급 (Lv.${res.newLevel})", android.widget.Toast.LENGTH_SHORT).show()
+                    refreshTick = android.os.SystemClock.elapsedRealtime()
+                },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("+30 EXP (일반)", style = MaterialTheme.typography.labelSmall)
+            }
+            OutlinedButton(
+                onClick = {
+                    val res = com.example.itv.infrastructure.reward.UserRewardStore.grantMissionReward(context, isStrong = true)
+                    android.widget.Toast.makeText(context, "+${res.expGained} EXP, +${res.pointsGained} P 지급 (Lv.${res.newLevel})", android.widget.Toast.LENGTH_SHORT).show()
+                    refreshTick = android.os.SystemClock.elapsedRealtime()
+                },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("+50 EXP (강함)", style = MaterialTheme.typography.labelSmall)
+            }
+            TextButton(
+                onClick = {
+                    com.example.itv.infrastructure.reward.UserRewardStore.reset(context)
+                    refreshTick = android.os.SystemClock.elapsedRealtime()
+                }
+            ) {
+                Text("초기화", color = MaterialTheme.colorScheme.error)
+            }
         }
     }
 

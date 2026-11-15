@@ -14,6 +14,8 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -30,6 +32,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.itv.presentation.home.HomeScreen
 import com.example.itv.presentation.components.*
 import androidx.compose.animation.AnimatedVisibility
@@ -39,6 +42,17 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.Image
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.layout.ContentScale
+import com.example.itv.domain.equip.EquipCatalog
+import com.example.itv.domain.equip.EquipItem
+import com.example.itv.domain.equip.EquipSlot
+import com.example.itv.infrastructure.equip.UserEquipStore
+import com.example.itv.infrastructure.reward.UserRewardStore
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
 
@@ -144,9 +158,7 @@ fun ItvMainScreen(
         when (activeTab) {
             "home" -> CenteredHomePage(Modifier.padding(padding))
             "records" -> Box(Modifier.fillMaxSize().padding(padding)) { RecordsScreen() }
-            "character" -> TabPage(Modifier.padding(padding)) { CharacterScreen() }
-
-
+            "character" -> Box(Modifier.fillMaxSize().padding(padding)) { CharacterScreen() }
         }
     }
     HomeSettingsDrawer(
@@ -202,36 +214,438 @@ fun ItvMainScreen(
 }
 
 @Composable
-private fun TabPage(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
-    Column(modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)) { content() }
-}
-
-@Composable
 private fun RecordsScreen() {
     UsageRecordsContent()
 }
 
 @Composable
 private fun CharacterScreen() {
-    Text("캐릭터", style = MaterialTheme.typography.headlineMedium,
-        color = ItvGreen, fontWeight = FontWeight.Bold)
-    Text("나의 디지털 쉼표를 함께 만들어가요.", style = MaterialTheme.typography.bodyMedium)
-    Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp),
-        colors = CardDefaults.cardColors(containerColor = ItvMint), border = BorderStroke(1.dp, ItvLine)) {
-        Column(Modifier.fillMaxWidth().padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            PuppyMascot(Modifier.size(220.dp))
-            Text("강아지 친구", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            Text("나와 함께 쉬어가는 강아지 친구")
+    val context = LocalContext.current
+    val rewardFlow = remember { UserRewardStore.rewardState }
+    val currentReward by rewardFlow.collectAsState()
+    val userReward = currentReward ?: remember { UserRewardStore.getReward(context) }
+
+    val equipFlow = remember { UserEquipStore.equipState }
+    val currentEquip by equipFlow.collectAsState()
+    val equippedItems = if (currentEquip.isNotEmpty()) currentEquip else remember { UserEquipStore.getEquipped(context) }
+
+    var selectedSlot by remember { mutableStateOf(EquipSlot.HAT) }
+    val slotItems = remember(selectedSlot) { EquipCatalog.getItemsForSlot(selectedSlot) }
+
+    Column(
+        modifier = Modifier.fillMaxSize()
+    ) {
+        // 상단: 캐릭터 피팅룸 및 레벨/경험치 영역 (보관함을 내린 만큼 강아지와 경험치 바도 안정적으로 배치)
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .padding(top = 16.dp, bottom = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // 캐릭터 + 5개 코디 장착 슬롯
+            BoxWithConstraints(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                contentAlignment = Alignment.Center
+            ) {
+                val hOffset = minOf(maxWidth * 0.36f, 136.dp)
+                val vTopOffset = (-118).dp
+                val vMidOffset = (-6).dp
+                val vBottomOffset = 80.dp
+
+                // 중앙: 장착 아이템들이 오버레이 렌더링되는 강아지 캐릭터 + 바닥 그림자
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .offset(y = 24.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Canvas(
+                        modifier = Modifier
+                            .size(width = 160.dp, height = 22.dp)
+                            .align(Alignment.BottomCenter)
+                            .offset(y = 8.dp)
+                    ) {
+                        drawOval(
+                            color = Color.Black.copy(alpha = 0.07f),
+                            size = size
+                        )
+                    }
+                    EquippedPuppyMascot(
+                        equippedItems = equippedItems,
+                        modifier = Modifier.size(200.dp)
+                    )
+                }
+
+                // 1. 모자 (상단 중앙 - 강아지 머리 위로 겹치지 않게 배치)
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .offset(y = vTopOffset)
+                ) {
+                    EquipSlotCard(
+                        slot = EquipSlot.HAT,
+                        equippedItem = equippedItems[EquipSlot.HAT],
+                        isSelected = selectedSlot == EquipSlot.HAT,
+                        onClick = { selectedSlot = EquipSlot.HAT }
+                    )
+                }
+
+                // 2. 안경 (상단 좌측)
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .offset(x = -hOffset, y = vMidOffset)
+                ) {
+                    EquipSlotCard(
+                        slot = EquipSlot.GLASSES,
+                        equippedItem = equippedItems[EquipSlot.GLASSES],
+                        isSelected = selectedSlot == EquipSlot.GLASSES,
+                        onClick = { selectedSlot = EquipSlot.GLASSES }
+                    )
+                }
+
+                // 3. 코와 입 (상단 우측)
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .offset(x = hOffset, y = vMidOffset)
+                ) {
+                    EquipSlotCard(
+                        slot = EquipSlot.NOSE_MOUTH,
+                        equippedItem = equippedItems[EquipSlot.NOSE_MOUTH],
+                        isSelected = selectedSlot == EquipSlot.NOSE_MOUTH,
+                        onClick = { selectedSlot = EquipSlot.NOSE_MOUTH }
+                    )
+                }
+
+                // 4. 옷 (하단 좌측)
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .offset(x = -hOffset, y = vBottomOffset)
+                ) {
+                    EquipSlotCard(
+                        slot = EquipSlot.CLOTHES,
+                        equippedItem = equippedItems[EquipSlot.CLOTHES],
+                        isSelected = selectedSlot == EquipSlot.CLOTHES,
+                        onClick = { selectedSlot = EquipSlot.CLOTHES }
+                    )
+                }
+
+                // 5. 신발 (하단 우측)
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .offset(x = hOffset, y = vBottomOffset)
+                ) {
+                    EquipSlotCard(
+                        slot = EquipSlot.SHOES,
+                        equippedItem = equippedItems[EquipSlot.SHOES],
+                        isSelected = selectedSlot == EquipSlot.SHOES,
+                        onClick = { selectedSlot = EquipSlot.SHOES }
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(10.dp))
+
+            // 캐릭터 레벨 및 경험치 게이지
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = ItvMint,
+                border = BorderStroke(1.dp, ItvLine),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = ItvGreen
+                    ) {
+                        Text(
+                            text = "Lv.${userReward.currentLevel}",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                        )
+                    }
+
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "경험치",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = "${userReward.currentLevelExp} / ${userReward.nextLevelExpRequired} EXP (${(userReward.progressPercent * 100).toInt()}%)",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = ItvGreen
+                            )
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        LinearProgressIndicator(
+                            progress = { userReward.progressPercent },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(6.dp)
+                                .clip(RoundedCornerShape(3.dp)),
+                            color = ItvGreen,
+                            trackColor = Color.White.copy(alpha = 0.85f)
+                        )
+                    }
+                }
+            }
+        }
+
+        // 하단: 한 화면에 약 3줄 정도만 보이고 스크롤하여 내려볼 수 있는 5X8 (40칸) 인벤토리
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(245.dp),
+            shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, ItvLine),
+            shadowElevation = 6.dp
+        ) {
+            Column(
+                modifier = Modifier.fillMaxSize()
+            ) {
+                // 인벤토리 상단 헤더
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = ItvMint
+                        ) {
+                            Text(
+                                text = selectedSlot.label,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = ItvGreen,
+                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                            )
+                        }
+                        Text(
+                            text = "보관함",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = ItvGreen
+                        )
+                        Text(
+                            text = "(${slotItems.size}/40)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        // 현재 슬롯에 장착된 아이템이 있으면 [착용 해제] 버튼 노출
+                        val equippedInThisSlot = equippedItems[selectedSlot]
+                        if (equippedInThisSlot != null) {
+                            Surface(
+                                onClick = {
+                                    UserEquipStore.unequip(context, selectedSlot)
+                                },
+                                shape = RoundedCornerShape(8.dp),
+                                color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.3f))
+                            ) {
+                                Text(
+                                    text = "착용 해제",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                                )
+                            }
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = ItvMint.copy(alpha = 0.5f),
+                            border = BorderStroke(1.dp, ItvLine)
+                        ) {
+                            Text(
+                                text = "${userReward.currentPoints} P 보유",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = ItvGreen,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+                }
+
+                HorizontalDivider(color = ItvLine.copy(alpha = 0.6f))
+
+                // 5열 x 8행 = 40칸 스크롤 그리드 (key 지정 및 뷰 레이아웃 최적화로 60fps 부드러운 스크롤 제공)
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(5),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(bottom = 16.dp)
+                ) {
+                    items(
+                        count = 40,
+                        key = { index -> "equip_slot_${selectedSlot.name}_$index" }
+                    ) { index ->
+                        val item = slotItems.getOrNull(index)
+                        if (item != null) {
+                            val isEquipped = equippedItems[selectedSlot]?.id == item.id
+                            Surface(
+                                onClick = {
+                                    UserEquipStore.toggleEquip(context, item)
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (isEquipped) ItvMint else MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(
+                                    if (isEquipped) 2.dp else 1.2.dp,
+                                    if (isEquipped) ItvGreen else ItvLine
+                                ),
+                                shadowElevation = if (isEquipped) 3.dp else 0.5.dp,
+                                modifier = Modifier.aspectRatio(1f)
+                            ) {
+                                Box(
+                                    modifier = Modifier.fillMaxSize().padding(3.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Column(
+                                        modifier = Modifier.fillMaxSize(),
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.Center
+                                    ) {
+                                        Image(
+                                            painter = painterResource(item.iconRes),
+                                            contentDescription = item.name,
+                                            modifier = Modifier.size(28.dp),
+                                            contentScale = ContentScale.Fit
+                                        )
+                                        Spacer(Modifier.height(2.dp))
+                                        Text(
+                                            text = item.name,
+                                            fontSize = 9.sp,
+                                            fontWeight = if (isEquipped) FontWeight.Bold else FontWeight.Medium,
+                                            color = if (isEquipped) ItvGreen else MaterialTheme.colorScheme.onSurface,
+                                            maxLines = 1,
+                                            textAlign = TextAlign.Center
+                                        )
+                                    }
+
+                                    if (isEquipped) {
+                                        Surface(
+                                            shape = RoundedCornerShape(4.dp),
+                                            color = ItvGreen,
+                                            modifier = Modifier
+                                                .align(Alignment.TopEnd)
+                                                .padding(2.dp)
+                                        ) {
+                                            Text(
+                                                text = "착용",
+                                                fontSize = 7.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color.White,
+                                                modifier = Modifier.padding(horizontal = 3.dp, vertical = 1.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            // 빈 보관함 칸: 불필요한 터치 리플/인터랙션 생성 방지 및 가벼운 Box 기반 렌더링으로 최적화
+                            Box(
+                                modifier = Modifier
+                                    .aspectRatio(1f)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(MaterialTheme.colorScheme.surface)
+                                    .border(1.dp, ItvLine.copy(alpha = 0.5f), RoundedCornerShape(12.dp)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "${index + 1}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
-    Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp),
-        border = BorderStroke(1.dp, ItvLine),
-        colors = CardDefaults.cardColors(containerColor = ItvMint)) {
-        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("성장·꾸미기 연동 준비 중", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text("현재 강아지 캐릭터는 기본 모습입니다. 레벨, 보상, 꾸미기 저장 기능은 아직 연결되지 않았습니다.", style = MaterialTheme.typography.bodyMedium)
+}
+
+@Composable
+private fun EquipSlotCard(
+    slot: EquipSlot,
+    equippedItem: EquipItem?,
+    isSelected: Boolean,
+    onClick: () -> Unit
+) {
+    Surface(
+        onClick = onClick,
+        modifier = Modifier.size(54.dp, 54.dp),
+        shape = RoundedCornerShape(14.dp),
+        color = if (isSelected) ItvMint else MaterialTheme.colorScheme.surface,
+        border = BorderStroke(
+            if (isSelected) 2.dp else 1.2.dp,
+            if (isSelected) ItvGreen else (if (equippedItem != null) ItvGreen.copy(alpha = 0.6f) else ItvLine)
+        ),
+        shadowElevation = if (isSelected) 3.dp else 1.dp
+    ) {
+        Box(
+            modifier = Modifier.fillMaxSize().padding(4.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            if (equippedItem != null) {
+                Image(
+                    painter = painterResource(equippedItem.iconRes),
+                    contentDescription = equippedItem.name,
+                    modifier = Modifier.size(34.dp),
+                    contentScale = ContentScale.Fit
+                )
+            } else {
+                Text(
+                    text = slot.label,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (isSelected) ItvGreen else MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1
+                )
+            }
         }
     }
 }

@@ -85,8 +85,8 @@ class MainActivity : ComponentActivity() {
         val loginMarker = File(noBackupFilesDir, "login_completed_v1")
 
         setContent {
-            var showPermissionIntro by remember {
-                mutableStateOf(!introMarker.exists())
+            var showPermissionIntro by remember(forceOnboardingState) {
+                mutableStateOf(forceOnboardingState || !introMarker.exists())
             }
             var showLoginScreen by remember(forceOnboardingState) {
                 mutableStateOf(forceOnboardingState || (!loginMarker.exists() && AuthComposition.authRepository.currentUser.value == null))
@@ -107,7 +107,14 @@ class MainActivity : ComponentActivity() {
             ITVTheme {
                 if (showPermissionIntro) {
                     PermissionIntroDialog(
-                        onConfirm = { acknowledgeIntro() }
+                        onConfirm = { acknowledgeIntro() },
+                        onDismiss = if (forceOnboardingState) {
+                            {
+                                forceOnboardingState = false
+                                showPermissionIntro = false
+                                showLoginScreen = false
+                            }
+                        } else null
                     )
                 }
 
@@ -265,7 +272,8 @@ private fun openNotificationSettings(context: Context) {
  */
 @Composable
 private fun PermissionIntroDialog(
-    onConfirm: () -> Unit
+    onConfirm: () -> Unit,
+    onDismiss: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -293,8 +301,8 @@ private fun PermissionIntroDialog(
     val canConfirm = hasUsage && hasOverlay
 
     Dialog(
-        onDismissRequest = {},
-        properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false)
+        onDismissRequest = { onDismiss?.invoke() },
+        properties = DialogProperties(dismissOnBackPress = onDismiss != null, dismissOnClickOutside = false)
     ) {
         Surface(
             modifier = Modifier
@@ -318,7 +326,7 @@ private fun PermissionIntroDialog(
                         modifier = Modifier.size(36.dp)
                     )
                     Spacer(modifier = Modifier.width(10.dp))
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = "ITV 시청 습관 코칭",
                             fontSize = 17.sp,
@@ -330,6 +338,16 @@ private fun PermissionIntroDialog(
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                    }
+                    if (onDismiss != null) {
+                        IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
+                            Text(
+                                text = "✕",
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
                 }
 

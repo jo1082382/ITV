@@ -131,6 +131,11 @@ fun CoachingSettingsScreen(
                 onSelectTone = { store.updateTone(it) }
             )
 
+            HorizontalDivider(color = ItvLine.copy(alpha = 0.6f))
+
+            // 5. 추천 휴식 미션 목록 모아보기
+            RestMissionListSection()
+
             Spacer(modifier = Modifier.height(16.dp))
         }
     }
@@ -586,6 +591,157 @@ private fun CoachingToneSection(
                             lineHeight = 18.sp
                         )
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RestMissionListSection() {
+    var expanded by remember { mutableStateOf(false) }
+    var selectedCategory by remember { mutableStateOf("전체") }
+
+    val categories = listOf("전체", "목·경추 교정", "어깨·등 이완", "허리·척추 교정", "식탁·책상 거치", "공통 쿨다운", "강한 개입 (엎어두기)")
+    val allMissions = remember { com.example.itv.domain.coaching.RestMissionCatalog.ALL_RECOMMENDATIONS }
+    val filteredMissions = remember(selectedCategory) {
+        if (selectedCategory == "전체") allMissions
+        else allMissions.filter { it.category == selectedCategory }
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "📋 추천 휴식 미션 목록 (${allMissions.size}가지)",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = ItvGreen
+                )
+                TextButton(onClick = { expanded = !expanded }) {
+                    Text(
+                        text = if (expanded) "접기 ▲" else "목록 보기 ▼",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = ItvGreen
+                    )
+                }
+            }
+            Text(
+                text = "휴식 시 그 자리에서 15~30초간 간단히 실천할 수 있는 스트레칭 및 쿨다운 미션들입니다.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        if (expanded) {
+            // 카테고리 필터 칩
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                categories.take(4).forEach { cat ->
+                    FilterChip(
+                        selected = selectedCategory == cat,
+                        onClick = { selectedCategory = cat },
+                        label = { Text(cat, fontSize = 11.sp) }
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                categories.drop(4).forEach { cat ->
+                    FilterChip(
+                        selected = selectedCategory == cat,
+                        onClick = { selectedCategory = cat },
+                        label = { Text(cat, fontSize = 11.sp) }
+                    )
+                }
+            }
+
+            // 미션 카드 리스트
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                filteredMissions.forEach { mission ->
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (mission.isFacedownRequired) ItvMint else MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, if (mission.isFacedownRequired) ItvGreen.copy(alpha = 0.5f) else ItvLine)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Text(mission.icon, fontSize = 22.sp)
+                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        text = mission.title,
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (mission.isFacedownRequired) ItvGreen else MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Surface(
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = if (mission.isFacedownRequired) ItvGreen else MaterialTheme.colorScheme.surfaceVariant
+                                    ) {
+                                        Text(
+                                            text = mission.category,
+                                            fontSize = 9.sp,
+                                            color = if (mission.isFacedownRequired) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                                Text(
+                                    text = mission.action,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    lineHeight = 16.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // 접혀 있을 때 요약 카드
+            Card(
+                onClick = { expanded = true },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = ItvMint),
+                border = BorderStroke(1.dp, ItvLine)
+            ) {
+                Row(
+                    modifier = Modifier.padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(
+                            text = "총 ${allMissions.size}가지 미션 등록됨 (터치하여 펼치기)",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = ItvGreen
+                        )
+                        Text(
+                            text = "🐢 목 5종 · 🙆 어깨 5종 · 🧍 허리 4종 · 🍽️ 테이블 5종 · 🌬️ 공통 6종 · 🛑 엎어두기 4종",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                    Text("❯", color = ItvGreen, fontWeight = FontWeight.Bold)
                 }
             }
         }

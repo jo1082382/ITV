@@ -30,12 +30,29 @@ import com.example.itv.infrastructure.coaching.*
 
 class CoachingMonitorService : Service() {
     companion object {
+        const val ACTION_TRIGGER_TEST = "com.example.itv.TRIGGER_TEST"
+        const val EXTRA_FORCE_STRONG = "extra_force_strong"
+        const val EXTRA_DELAY_MS = "extra_delay_ms"
+
         @Volatile
         private var instanceRef: java.lang.ref.WeakReference<CoachingMonitorService>? = null
 
         fun notifyUserActivity(reason: String) {
             instanceRef?.get()?.let { service ->
                 service.handler.post { service.onUserActivity(reason) }
+            }
+        }
+
+        fun triggerTest(context: android.content.Context, forceStrong: Boolean = false, delayMs: Long = 0L) {
+            val intent = Intent(context, CoachingMonitorService::class.java).apply {
+                action = ACTION_TRIGGER_TEST
+                putExtra(EXTRA_FORCE_STRONG, forceStrong)
+                putExtra(EXTRA_DELAY_MS, delayMs)
+            }
+            if (Build.VERSION.SDK_INT >= 26) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
             }
         }
     }
@@ -157,9 +174,20 @@ class CoachingMonitorService : Service() {
         // Feedback waits until the reaction windows and any rest mission have finished.
     }
 
+    private var currentRecommendation: com.example.itv.domain.coaching.RestRecommendation? = null
+
     private fun startRestMission(id: String) {
         if(!running || !com.example.itv.composition.CoachingAccess.ready(this))return
-        missionController.begin(id,SystemClock.elapsedRealtime(),missionFromJev)
+        val tracker = com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this)
+        val posture = tracker.currentPosture()
+        val isStrong = getEffectiveIntensity() == CharacterIntensity.STRONG
+        val rec = currentRecommendation ?: com.example.itv.domain.coaching.RestMissionCatalog.pick(posture, isStrong).also {
+            currentRecommendation = it
+        }
+        if (rec.isFacedownRequired) {
+            tracker.startFacedownMonitoring()
+        }
+        missionController.begin(id, SystemClock.elapsedRealtime(), missionFromJev, requireFacedown = rec.isFacedownRequired)
     }
     private fun canContinueJevRetry(): Boolean {
         val original=missionJevContext ?: return false
@@ -184,7 +212,7 @@ class CoachingMonitorService : Service() {
         val reminderSec=TestCoachingPolicy.reminderMs(useJev)/1000L
         val prepSec=TestCoachingPolicy.missionStartMs(useJev)/1000L
         val restSec=TestCoachingPolicy.restMs(useJev)/1000L
-        overlayFactory.playReaction(root,title,reminderSec,prepSec,restSec) {
+        overlayFactory.playReaction(root,title,reminderSec,prepSec,restSec,currentRecommendation) {
             if(overlay===root && running) {
                 reactionInProgress=false
                 finished()
@@ -219,7 +247,12 @@ class CoachingMonitorService : Service() {
         if (WritingGuard.blockReason() != null) return
         if (!isRestMissionFailure && !transition && (ReelsProbe.screenState() == 1 || YoutubeProbe.screenState() == 1)) return
         val effectiveIntensity = getEffectiveIntensity()
-        val (root, params) = overlayFactory.retryOffer(::onChoice, intensityOverride = effectiveIntensity)
+        val isStrong = effectiveIntensity == CharacterIntensity.STRONG
+        val rec = currentRecommendation ?: com.example.itv.domain.coaching.RestMissionCatalog.pick(
+            com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this).currentPosture(),
+            isStrong
+        ).also { currentRecommendation = it }
+        val (root, params) = overlayFactory.retryOffer(::onChoice, intensityOverride = effectiveIntensity, recommendation = rec)
         try {
             wm.addView(root, params); overlay = root; retryVisible = true
             displayedPackage = if (isRestMissionFailure) null else JevObservationHub.foregroundPackage
@@ -251,7 +284,11 @@ class CoachingMonitorService : Service() {
         missionController.screenOff(SystemClock.elapsedRealtime())
     }
     private fun missionScreenOn() {
-        val wake = missionController.screenOn(SystemClock.elapsedRealtime())
+        val tracker = com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this)
+        val facedownObserved = if (currentRecommendation?.isFacedownRequired == true) {
+            tracker.stopFacedownMonitoring()
+        } else true
+        val wake = missionController.screenOn(SystemClock.elapsedRealtime(), isFacedownObserved = facedownObserved)
         if (wake == com.example.itv.domain.coaching.TestMissionWake.INCOMPLETE) {
             retryPending = true
             isRestMissionFailure = true
@@ -263,9 +300,9 @@ class CoachingMonitorService : Service() {
         if (!missionController.state.pending || !unlocked() || completionView != null) return
         if (!com.example.itv.composition.CoachingAccess.ready(this) || !Settings.canDrawOverlays(this)) return
         val reason = WritingGuard.blockReason()
-        if (reason != null && reason != "ITV 내부 화면 · 구조 탐색 생략 / 개입 보류") return
+        if (reason != null && reason.contains("작성 중")) return
         if (missionController.state.id == null) return
-        val (box, params) = overlayFactory.completion(::dismissCompletion)
+        val (box, params) = overlayFactory.completion(currentRecommendation, ::dismissCompletion)
         try {
             wm.addView(box, params); completionView = box
             missionController.completionDisplayed()
@@ -278,6 +315,7 @@ class CoachingMonitorService : Service() {
     private fun dismissCompletion() {
         completionView?.let { overlayFactory.removeControls(it); try { wm.removeView(it) } catch (_: Exception) {} }
         completionView = null
+        currentRecommendation = null
     }
     private val handler = Handler(Looper.getMainLooper())
     private val usageClock: com.example.itv.domain.coaching.RestUsageClock get() = progress.usageClock
@@ -414,6 +452,31 @@ class CoachingMonitorService : Service() {
             com.example.itv.composition.CoachingAccess.setDeveloperAutoEnabled(this, false)
             stopSelf(); return START_NOT_STICKY
         }
+        if (intent?.action == ACTION_TRIGGER_TEST) {
+            val forceStrong = intent.getBooleanExtra(EXTRA_FORCE_STRONG, false)
+            val delayMs = intent.getLongExtra(EXTRA_DELAY_MS, 0L)
+            if (!running) {
+                try {
+                    val open = PendingIntent.getActivity(this, 7100, Intent(this, com.example.itv.presentation.permissions.PermissionSettingsActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+                    val stop = PendingIntent.getService(this, 7101, Intent(this, CoachingMonitorService::class.java).setAction("STOP"), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+                    val notification = Notification.Builder(this, com.example.itv.composition.CoachingAccess.MONITOR)
+                        .setSmallIcon(R.drawable.ic_coaching_notification)
+                        .setContentTitle("강아지 휴식 제안 켜짐")
+                        .setContentText("개입 테스트 모드 동작 중")
+                        .setContentIntent(open).setOngoing(true)
+                        .addAction(Notification.Action.Builder(null, "감시 중지", stop).build()).build()
+                    if (Build.VERSION.SDK_INT >= 34) startForeground(7101, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+                    else startForeground(7101, notification)
+                    running = true
+                } catch (_: Exception) {}
+            }
+            if (delayMs > 0) {
+                handler.postDelayed({ triggerTestIntervention(forceStrong) }, delayMs)
+            } else {
+                triggerTestIntervention(forceStrong)
+            }
+            return START_NOT_STICKY
+        }
         if (!CoachingAutoStart.enabled(this) || !com.example.itv.composition.CoachingAccess.ready(this)) { stopSelf(); return START_NOT_STICKY }
         if (running) return START_NOT_STICKY
         try {
@@ -435,6 +498,40 @@ class CoachingMonitorService : Service() {
         observeUsage()
         handler.removeCallbacks(tick); handler.post(tick)
         return START_NOT_STICKY
+    }
+
+    fun triggerTestIntervention(forceStrong: Boolean = false) {
+        if (!Settings.canDrawOverlays(this)) return
+        removeOverlay()
+        dismissJevFeedback()
+        dismissCompletion()
+        val tracker = com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this)
+        val ambient = tracker.snapshot.value
+        val reasons = com.example.itv.domain.coaching.InterventionReasonResolver.resolveReasons(
+            isJev = false,
+            jevContext = null,
+            continuousUsedMs = 1_800_000L,
+            ambient = ambient,
+            shortformAppName = null
+        )
+        val effectiveIntensity = if (forceStrong) CharacterIntensity.STRONG else getEffectiveIntensity()
+        val isStrong = effectiveIntensity == CharacterIntensity.STRONG
+        val rec = com.example.itv.domain.coaching.RestMissionCatalog.pick(ambient.posture, isStrong)
+        currentRecommendation = rec
+        val (root, params) = overlayFactory.offer(::onChoice, reasons, intensityOverride = effectiveIntensity, recommendation = rec)
+        try {
+            wm.addView(root, params); overlay = root; offerFromJev = false
+            responseController.offered = true; waitingTransition = false; waitingYoutube = false
+            responseController.offerId = "test-" + java.util.UUID.randomUUID().toString().take(4)
+            overlayFactory.attachControls(
+                root = root,
+                onReady = { resetOfferTimeout("테스트 애니메이션 완료") },
+                onInteraction = { isInteracting -> onPuppyInteractionStateChanged(isInteracting) }
+            )
+            handler.removeCallbacks(offerTimeout); handler.postDelayed(offerTimeout, 30_000L)
+        } catch (_: Exception) {
+            removeOverlay()
+        }
     }
 
     private fun onYoutubeTransition() {
@@ -498,7 +595,10 @@ class CoachingMonitorService : Service() {
             shortformAppName = shortformApp
         )
         val effectiveIntensity = getEffectiveIntensity()
-        val (root, params) = overlayFactory.offer(::onChoice, reasons, intensityOverride = effectiveIntensity)
+        val isStrong = effectiveIntensity == CharacterIntensity.STRONG
+        val rec = com.example.itv.domain.coaching.RestMissionCatalog.pick(ambient.posture, isStrong)
+        currentRecommendation = rec
+        val (root, params) = overlayFactory.offer(::onChoice, reasons, intensityOverride = effectiveIntensity, recommendation = rec)
         try {
             wm.addView(root, params); overlay = root; offerFromJev = isJev
             displayedPackage = JevObservationHub.foregroundPackage.takeIf { SystemClock.elapsedRealtime() - JevObservationHub.checkedAt in 0..1500 }
