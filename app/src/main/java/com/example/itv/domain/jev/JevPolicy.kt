@@ -71,8 +71,12 @@ data class JevContext(
     val userEnvironmentState: String? = null,
     val lastInterventionOutcome: String? = null,
     val postInterventionActivity: Boolean = false,
-    val resistanceStreak: Int = 0
-)
+    val resistanceStreak: Int = 0,
+    val estimatedDayType: String? = null,
+    val dayTypeReason: String? = null
+) {
+    val isRestDay: Boolean get() = estimatedDayType == "REST_DAY"
+}
 
 object JevCandidatePolicy {
     fun isSwipeOverheated(c: JevContext): Boolean {
@@ -227,10 +231,10 @@ object JevCandidatePolicy {
     )
 
     /**
-     * 연속 시청 피로도 누적 선형 보간 (뇌과학적 전두엽 자제력 저하 반영):
+     * 연속 시청 피로도 누적 선형 보간 (뇌과학적 전두엽 자제력 저하 반영 및 Jev 모델의 연속 시청 가중치와 이중 증폭 방지 미세 조정):
      * 15분 미만: 0.0 (정상 집중)
-     * 15분 ~ 30분: 0%p -> -5%p (선형 증가)
-     * 30분 ~ 45분 이상: -5%p -> 최대 -10%p (선형 증가)
+     * 15분 ~ 30분: 0%p -> -2%p (선형 증가)
+     * 30분 ~ 45분 이상: -2%p -> 최대 -4%p (선형 증가)
      */
     fun computeContinuousFatigueDelta(c: JevContext): Double {
         val min = c.continuousMs / 60000.0
@@ -238,14 +242,14 @@ object JevCandidatePolicy {
             min < 15.0 -> 0.0
             min <= 30.0 -> {
                 val r = (min - 15.0) / 15.0
-                r * -0.05
+                r * -0.02
             }
             else -> {
                 val r = ((min - 30.0) / 15.0).coerceIn(0.0, 1.0)
-                -0.05 + (r * -0.05)
+                -0.02 + (r * -0.02)
             }
         }
-        return kotlin.math.round(delta.coerceIn(-0.10, 0.0) * 1000.0) / 1000.0
+        return kotlin.math.round(delta.coerceIn(-0.04, 0.0) * 1000.0) / 1000.0
     }
 
     /**
@@ -314,7 +318,7 @@ object JevCandidatePolicy {
         // 3. 취침 연계 환경 조도 및 화면 밝기 선형 증감: 취침전암실 (-15%p) ~ 평상시실내 (0%p) ~ 주간/밝은환경 (+15%p)
         val bedtimeDelta = computeBedtimeEnvironmentDelta(c)
 
-        // 4. 연속 시청 피로도 누적: 15분 미만(0%p) ~ 30분(-5%p) ~ 45분 이상(-10%p)
+        // 4. 연속 시청 피로도 누적: 15분 미만(0%p) ~ 30분(-2%p) ~ 45분 이상(-4%p)
         val fatigueDelta = computeContinuousFatigueDelta(c)
 
         // 5. 직전 개입 반응 이력 (나중에/무응답 후 시청 지속): -5%p ~ -10%p
@@ -335,15 +339,33 @@ object JevCandidatePolicy {
 
     /**
      * Calculates the dynamic re-evaluation interval (and required additional viewing)
-     * using continuous linear interpolation between 60s and 300s based on the probability gap.
-     * When gap is 0 (or probability >= threshold), returns 60s.
-     * When gap is >= 20%p (0.20), returns 300s.
+     * based on the probability gap (threshold - probability).
+     *
+     * Dynamic interval ranges from 30s to 360s across wide tiers:
+     * - Small gap (<= 15%p): 30s ~ 90s (fast re-evaluation for near-threshold states)
+     * - Medium gap (15%p ~ 30%p): 90s ~ 210s (moderate watching before re-evaluation)
+     * - Large gap (30%p ~ 50%p+): 210s ~ 360s (relaxed re-evaluation when far below threshold)
      */
     fun calculateDynamicInterval(threshold: Double, probability: Double?): Int {
         if (probability == null || !probability.isFinite()) return 300
         val gap = (threshold - probability).coerceAtLeast(0.0)
-        val ratio = (gap / 0.20).coerceIn(0.0, 1.0)
-        return kotlin.math.round(60.0 + (300.0 - 60.0) * ratio).toInt()
+        val sec = when {
+            gap <= 0.0 -> 30.0
+            gap <= 0.15 -> {
+                val r = gap / 0.15
+                30.0 + (90.0 - 30.0) * r
+            }
+            gap <= 0.30 -> {
+                val r = (gap - 0.15) / 0.15
+                90.0 + (210.0 - 90.0) * r
+            }
+            gap <= 0.50 -> {
+                val r = (gap - 0.30) / 0.20
+                210.0 + (360.0 - 210.0) * r
+            }
+            else -> 360.0
+        }
+        return kotlin.math.round(sec).toInt()
     }
 
     /** Concise, human-readable summary of how and why the effective probability threshold changed. */
@@ -407,12 +429,18 @@ object JevCandidatePolicy {
         responseAgeMs in 0..settings.resultTtlSeconds * 1000L
 }
 
-/** No interpolation across unknown observations. A new session requires 600s verified continuous app absence. */
+/** No interpolation across unknown observations. Session boundary is governed by standard timeout and rest rules. */
 class JevSessionTracker(private val newId: () -> String) {
+    companion object {
+        const val INTERRUPTION_TOLERANCE_MS = 90_000L  // 90초 이탈 유예 시간
+        const val RECOGNIZED_REST_MS = 180_000L         // 3분 완전 휴식 인정 시간 (세션 종료/리셋)
+        const val SESSION_TIMEOUT_MS = 900_000L         // 15분 부재 세션 만료 시간
+    }
     data class AppState(
         var id: String, var totalMs: Long = 0, var continuousMs: Long = 0,
         var awayMs: Long = 0, var entered: Boolean = false,
         var nonConfirmedMs: Long = 0,
+        var screenOffMs: Long = 0,
         /** Continuous viewing of the most recent run; kept after reset for test inspection only. */
         var lastRunContinuousMs: Long = 0,
         val returns: MutableList<Long> = mutableListOf()
@@ -433,14 +461,20 @@ class JevSessionTracker(private val newId: () -> String) {
             val state = states.getOrPut(app) { AppState(newId()) }
             if (pkg == app && previousPkg != app) {
                 val verifiedAway = state.awayMs + if (contiguous && previousPkg != null) delta else 0L
-                if (verifiedAway >= 600_000L) {
+                val verifiedScreenOff = state.screenOffMs + if (contiguous && previousPkg == "LOCKED") delta else 0L
+                if (verifiedAway >= SESSION_TIMEOUT_MS || verifiedScreenOff >= RECOGNIZED_REST_MS) {
                     state.id = newId(); state.totalMs = 0
                 }
                 if (state.entered && previousPkg != null) state.returns.add(now)
                 state.entered = true
             }
-            if (pkg != null && pkg != app && previousPkg != null && previousPkg != app && contiguous) state.awayMs += delta
-            else if (pkg == app || pkg == null || !contiguous) state.awayMs = 0
+            if (pkg != null && pkg != app && previousPkg != null && previousPkg != app && contiguous) {
+                state.awayMs += delta
+                if (pkg == "LOCKED") state.screenOffMs += delta else state.screenOffMs = 0L
+            } else if (pkg == app || pkg == null || !contiguous) {
+                state.awayMs = 0L
+                state.screenOffMs = 0L
+            }
             if (confirmedPkg == app && contiguous) {
                 if (previousConfirmed == app || state.continuousMs > 0L) {
                     state.continuousMs += delta; state.totalMs += delta
@@ -454,18 +488,19 @@ class JevSessionTracker(private val newId: () -> String) {
                 // Continuous usage within the same target app (e.g. YouTube Home or Instagram Feed/Stories):
                 // do not reset continuousMs or advance nonConfirmedMs.
                 state.nonConfirmedMs = 0L
-            } else if (pkg == "LOCKED" || !contiguous) {
-                // Screen turned off/locked or non-contiguous gap (> 1.5s): reset continuous viewing
+            } else if (!contiguous && previousPkg != "LOCKED" && pkg != "LOCKED") {
+                // Unobserved/unknown gap while active: reset continuous viewing
                 state.continuousMs = 0L; state.nonConfirmedMs = 0L
             } else {
-                // In another app or after leaving the target app: only reset after 15s of rest/non-viewing
+                // In another app, or screen turned off/locked:
+                // Only reset continuous viewing if nonConfirmedMs exceeds INTERRUPTION_TOLERANCE_MS (90초)
                 state.nonConfirmedMs += delta
-                if (state.nonConfirmedMs >= 15_000L) {
+                if (state.nonConfirmedMs >= INTERRUPTION_TOLERANCE_MS) {
                     state.continuousMs = 0L
                 }
             }
             if (state.continuousMs > 0L) state.lastRunContinuousMs = state.continuousMs
-            state.returns.removeAll { now - it >= 600_000L || it > now }
+            state.returns.removeAll { now - it >= SESSION_TIMEOUT_MS || it > now }
         }
         previousAt = now; previousPkg = pkg
         if (!inspectingItv) previousConfirmed = confirmedPkg
@@ -479,10 +514,17 @@ class JevSessionTracker(private val newId: () -> String) {
     fun restore(pkg: String, id: String, totalMs: Long, entered: Boolean) {
         states[pkg] = AppState(id,totalMs.coerceAtLeast(0),entered=entered)
     }
-    /** Reset session state for a package when a new calendar day starts or >= 10 minutes of real absence elapsed. */
+    /** Reset session state for a package when a new calendar day starts or session timeout elapsed. */
     fun resetSession(pkg: String) {
         states[pkg] = AppState(newId())
         if (previousPkg == pkg) previousPkg = null
         if (previousConfirmed == pkg) previousConfirmed = null
+    }
+    /** Reset continuous viewing and non-confirmed counters while keeping total session time intact (e.g. on rest mission success). */
+    fun resetContinuous(pkg: String) {
+        states[pkg]?.let {
+            it.continuousMs = 0L
+            it.nonConfirmedMs = 0L
+        }
     }
 }

@@ -110,9 +110,62 @@ class LoginViewModel(
             result.fold(
                 onSuccess = { profile ->
                     val accountDesc = profile.email?.let { " ($it)" } ?: ""
-                    _uiState.value = AuthUiState.Success("구글 본계정$accountDesc 으로 정상 연결되었습니다!")
+                    _uiState.value = AuthUiState.Success("구글 본계정$accountDesc 으로 정상 연결(병합)되었습니다!")
                 },
                 onFailure = { _uiState.value = AuthUiState.Error(it.localizedMessage ?: "계정 연동 실패") }
+            )
+        }
+    }
+
+    fun linkGuestWithKakao(context: Context) {
+        viewModelScope.launch {
+            _uiState.value = AuthUiState.Loading
+            val kakaoResult = KakaoAuthClient.signIn(context)
+            kakaoResult.fold(
+                onSuccess = { profile ->
+                    val result = authService.signInWithKakao(profile)
+                    result.fold(
+                        onSuccess = {
+                            val desc = profile.email?.let { " ($it)" } ?: ""
+                            _uiState.value = AuthUiState.Success("카카오 계정$desc 으로 정상 연동(병합)되었습니다!")
+                        },
+                        onFailure = { _uiState.value = AuthUiState.Error(it.localizedMessage ?: "카카오 연동 실패") }
+                    )
+                },
+                onFailure = { error ->
+                    if (error is ClientError && error.reason == ClientErrorCause.Cancelled) {
+                        _uiState.value = AuthUiState.Idle
+                    } else {
+                        _uiState.value = AuthUiState.Error(error.localizedMessage ?: "카카오 연동 실패")
+                    }
+                }
+            )
+        }
+    }
+
+    fun linkGuestWithNaver(context: Context) {
+        viewModelScope.launch {
+            _uiState.value = AuthUiState.Loading
+            val naverResult = NaverAuthClient.signIn(context)
+            naverResult.fold(
+                onSuccess = { profile ->
+                    val result = authService.signInWithNaver(profile)
+                    result.fold(
+                        onSuccess = {
+                            val desc = profile.email?.let { " ($it)" } ?: ""
+                            _uiState.value = AuthUiState.Success("네이버 계정$desc 으로 정상 연동(병합)되었습니다!")
+                        },
+                        onFailure = { _uiState.value = AuthUiState.Error(it.localizedMessage ?: "네이버 연동 실패") }
+                    )
+                },
+                onFailure = { error ->
+                    val msg = error.localizedMessage ?: "네이버 연동 실패"
+                    if (msg.contains("cancel", ignoreCase = true) || msg.contains("취소", ignoreCase = true)) {
+                        _uiState.value = AuthUiState.Idle
+                    } else {
+                        _uiState.value = AuthUiState.Error(msg)
+                    }
+                }
             )
         }
     }

@@ -28,7 +28,6 @@ internal class RoomShortformPersistence(context: Context, private val ownerId: S
         db.withTransaction {
             val owner = db.dao().owner(ownerId)
             if (owner == null) db.dao().insertOwner(OwnerEntity(ownerId, "GUEST", createdAt = System.currentTimeMillis()))
-            else check(owner.ownerType == "GUEST" && owner.authUid == null) { "로컬 게스트 소유자를 확인해 주세요." }
             val receipt = dao.receipt(importKey)
             if (receipt != null) {
                 check(receipt.ownerId == ownerId) { "이전된 기록의 소유자가 다릅니다." }

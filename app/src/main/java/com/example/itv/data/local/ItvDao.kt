@@ -26,6 +26,10 @@ interface ItvDao {
     suspend fun insertOwner(owner: OwnerEntity): Long
     @Query("SELECT * FROM owners WHERE ownerId = :ownerId")
     suspend fun owner(ownerId: String): OwnerEntity?
+    @Query("UPDATE owners SET ownerType = 'ACCOUNT', authUid = :authUid WHERE ownerId = :ownerId")
+    suspend fun upgradeOwner(ownerId: String, authUid: String)
+    @Query("UPDATE owners SET ownerType = 'GUEST', authUid = null WHERE ownerId = :ownerId")
+    suspend fun resetOwnerToGuest(ownerId: String)
     @Upsert suspend fun saveSettings(value: UserSettingsEntity)
     @Query("SELECT * FROM user_settings WHERE ownerId = :ownerId")
     suspend fun settings(ownerId: String): UserSettingsEntity?

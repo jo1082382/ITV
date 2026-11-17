@@ -75,10 +75,53 @@ fun LoginScreen(
 ) {
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsState()
+    val currentUser by viewModel.currentUser.collectAsState()
+    val isGuest = currentUser?.isAnonymous == true
     val lastProvider = remember { viewModel.getLastLoginProvider() }
     var showAllLoginOptions by remember { mutableStateOf(lastProvider == null) }
     var showIntroDialog by remember { mutableStateOf(false) }
     var activeSocialLogin by remember { mutableStateOf<SocialLoginType?>(null) }
+    var pendingLinkProvider by remember { mutableStateOf<AuthProvider?>(null) }
+
+    fun requestSocialLogin(provider: AuthProvider) {
+        if (isGuest) {
+            pendingLinkProvider = provider
+        } else {
+            when (provider) {
+                AuthProvider.GOOGLE -> {
+                    onGoogleSignInRequested { idToken ->
+                        viewModel.signInWithGoogle(idToken)
+                    }
+                }
+                AuthProvider.KAKAO -> viewModel.signInWithKakao(context)
+                AuthProvider.NAVER -> viewModel.signInWithNaver(context)
+                else -> {}
+            }
+        }
+    }
+
+    pendingLinkProvider?.let { provider ->
+        GuestAccountLinkDialog(
+            provider = provider,
+            onConfirm = {
+                val target = provider
+                pendingLinkProvider = null
+                when (target) {
+                    AuthProvider.GOOGLE -> {
+                        onGoogleSignInRequested { idToken ->
+                            viewModel.signInWithGoogle(idToken)
+                        }
+                    }
+                    AuthProvider.KAKAO -> viewModel.signInWithKakao(context)
+                    AuthProvider.NAVER -> viewModel.signInWithNaver(context)
+                    else -> {}
+                }
+            },
+            onDismiss = {
+                pendingLinkProvider = null
+            }
+        )
+    }
 
     LaunchedEffect(uiState) {
         when (val state = uiState) {
@@ -196,11 +239,7 @@ fun LoginScreen(
                                 contentColor = Color(0xFF1F1F1F),
                                 enabled = uiState !is AuthUiState.Loading,
                                 icon = { GoogleLogoIcon() },
-                                onClick = {
-                                    onGoogleSignInRequested { idToken ->
-                                        viewModel.signInWithGoogle(idToken)
-                                    }
-                                }
+                                onClick = { requestSocialLogin(AuthProvider.GOOGLE) }
                             )
                         }
                         AuthProvider.KAKAO -> {
@@ -210,9 +249,7 @@ fun LoginScreen(
                                 contentColor = Color(0xFF191919),
                                 enabled = uiState !is AuthUiState.Loading,
                                 icon = { KakaoLogoIcon() },
-                                onClick = {
-                                    viewModel.signInWithKakao(context)
-                                }
+                                onClick = { requestSocialLogin(AuthProvider.KAKAO) }
                             )
                         }
                         AuthProvider.NAVER -> {
@@ -222,9 +259,7 @@ fun LoginScreen(
                                 contentColor = Color.White,
                                 enabled = uiState !is AuthUiState.Loading,
                                 icon = { NaverLogoIcon() },
-                                onClick = {
-                                    viewModel.signInWithNaver(context)
-                                }
+                                onClick = { requestSocialLogin(AuthProvider.NAVER) }
                             )
                         }
                         else -> {}
@@ -254,11 +289,7 @@ fun LoginScreen(
                         contentColor = Color(0xFF1F1F1F),
                         enabled = uiState !is AuthUiState.Loading,
                         icon = { GoogleLogoIcon() },
-                        onClick = {
-                            onGoogleSignInRequested { idToken ->
-                                viewModel.signInWithGoogle(idToken)
-                            }
-                        }
+                        onClick = { requestSocialLogin(AuthProvider.GOOGLE) }
                     )
 
                     // (2) 카카오로 시작
@@ -268,9 +299,7 @@ fun LoginScreen(
                         contentColor = Color(0xFF191919),
                         enabled = uiState !is AuthUiState.Loading,
                         icon = { KakaoLogoIcon() },
-                        onClick = {
-                            viewModel.signInWithKakao(context)
-                        }
+                        onClick = { requestSocialLogin(AuthProvider.KAKAO) }
                     )
 
                     // (3) 네이버로 시작
@@ -280,9 +309,7 @@ fun LoginScreen(
                         contentColor = Color.White,
                         enabled = uiState !is AuthUiState.Loading,
                         icon = { NaverLogoIcon() },
-                        onClick = {
-                            viewModel.signInWithNaver(context)
-                        }
+                        onClick = { requestSocialLogin(AuthProvider.NAVER) }
                     )
 
                     // (4) 게스트로 시작 (원클릭 시작)

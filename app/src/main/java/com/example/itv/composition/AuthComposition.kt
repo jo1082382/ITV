@@ -20,7 +20,7 @@ object AuthComposition {
 
     val authRepository: AuthRepository by lazy {
         val sessionStore = appContext?.let { com.example.itv.infrastructure.auth.LocalSessionStore(it) }
-        FirebaseAuthRepository(sessionStore = sessionStore)
+        FirebaseAuthRepository(sessionStore = sessionStore, appContext = appContext)
     }
 
     val authService: AuthService by lazy {

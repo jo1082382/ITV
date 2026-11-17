@@ -99,7 +99,34 @@ internal object ShortformPersonalStatsStore {
         val totalPhoneTodayMs: Long,
         val shortformShareOfPhoneRatio: Double?,
         val periodShareOfAppRatio: Double?,
-        val periodShareOfPhoneRatio: Double?
+        val periodShareOfPhoneRatio: Double?,
+
+        // 5. Bimodal day clustering (일과 날 vs 쉬는 날 시청 패턴)
+        // 5-A. 숏폼 사용량 기준
+        val workdayAvgDailyMs: Long = 0L,
+        val workdayAvgSessionMs: Long = 0L,
+        val restdayAvgDailyMs: Long = 0L,
+        val restdayAvgSessionMs: Long = 0L,
+        val daySplitThresholdMs: Long = 0L,
+        val isBimodalConfident: Boolean = false,
+        val bimodalRatio: Double = 1.0,
+        val estimatedWorkdayCount: Int = 0,
+        val estimatedRestdayCount: Int = 0,
+
+        // 5-B. 휴대폰 총 사용량 기준 (기기 전체 일별 총 사용시간 군집화)
+        val phoneWorkdayAvgDailyMs: Long = 0L,
+        val phoneRestdayAvgDailyMs: Long = 0L,
+        val phoneSplitThresholdMs: Long = 0L,
+        val isPhoneBimodalConfident: Boolean = false,
+        val phoneBimodalRatio: Double = 1.0,
+        val phoneEstimatedWorkdayCount: Int = 0,
+        val phoneEstimatedRestdayCount: Int = 0,
+        val todayEstimatedDayTypeByPhone: com.example.itv.domain.records.EstimatedDayType? = null,
+
+        // 5-C. Hybrid Calendar + Usage Day-type determination (오늘 일과/휴일 종합 판정)
+        val hybridEstimatedDayType: com.example.itv.domain.records.EstimatedDayType? = null,
+        val hybridDayTypeReason: String? = null,
+        val effectiveSessionMsForToday: Long = 0L
     )
 
     data class PersonalizedSummary(
@@ -147,6 +174,10 @@ internal object ShortformPersonalStatsStore {
     private var cachedPersonalAvgSpmByPkg: Map<String, Double> = emptyMap()
     @Volatile
     private var cachedTotalPhoneTodayMs: Long = 0L
+    @Volatile
+    private var cachedBimodalClusters: com.example.itv.domain.records.DayTypeClusterResult? = null
+    @Volatile
+    private var cachedPhoneBimodalClusters: com.example.itv.domain.records.DayTypeClusterResult? = null
 
     data class QuickPersonalMetrics(
         val avgSessionMs: Long,
@@ -158,7 +189,18 @@ internal object ShortformPersonalStatsStore {
         val avg7dDailyMinutes: Double?,
         val todayVs7dRatio: Double?,
         val personalAvgSpm: Double?,
-        val shortformShareOfPhoneRatio: Double? = null
+        val shortformShareOfPhoneRatio: Double? = null,
+        val workdayAvgSessionMs: Long? = null,
+        val restdayAvgSessionMs: Long? = null,
+        val daySplitThresholdMs: Long? = null,
+        val isBimodalConfident: Boolean = false,
+        val phoneWorkdayAvgDailyMs: Long? = null,
+        val phoneRestdayAvgDailyMs: Long? = null,
+        val phoneSplitThresholdMs: Long? = null,
+        val isPhoneBimodalConfident: Boolean = false,
+        val estimatedDayType: com.example.itv.domain.records.EstimatedDayType? = null,
+        val effectiveAvgSessionMs: Long? = null,
+        val dayTypeReason: String? = null
     )
 
     private fun pkgOf(app: ShortformApp): String = when (app) {
@@ -213,15 +255,64 @@ internal object ShortformPersonalStatsStore {
         }
         cached7dAvgByPkg = result7d
         cachedPersonalAvgSpmByPkg = resultSpm
+
+        // Build combined daily profiles across all packages for bimodal day clustering
+        val combinedDaily30d = linkedMapOf<LocalDate, Long>()
+        for (row in allDbRows) {
+            val d = runCatching { LocalDate.parse(row.localDate) }.getOrNull() ?: continue
+            if (!d.isBefore(start30d) && !d.isAfter(todayDate) && (row.observed || row.durationMs > 0L)) {
+                combinedDaily30d[d] = (combinedDaily30d[d] ?: 0L) + row.durationMs
+            }
+        }
+        val liveInsta = runCatching { ShortformDailyStore.today(appCtx, "instagram").ms }.getOrDefault(0L)
+        val liveYt = runCatching { ShortformDailyStore.today(appCtx, "youtube").ms }.getOrDefault(0L)
+        if (liveInsta + liveYt > 0L) {
+            combinedDaily30d[todayDate] = maxOf(combinedDaily30d[todayDate] ?: 0L, liveInsta + liveYt)
+        }
+        val sessionsByDate = synchronized(this) { sessions.groupBy { it.date } }
+        val clusterProfiles = combinedDaily30d.map { (date, dailyMs) ->
+            val daySessions = (sessionsByDate[date.toString()] ?: emptyList()).map { it.durationMs }
+            com.example.itv.domain.records.DayUsageProfile(
+                date = date,
+                totalDurationMs = dailyMs,
+                sessions = daySessions
+            )
+        }
+        cachedBimodalClusters = com.example.itv.domain.records.DayTypeUsageClusterer.cluster(clusterProfiles)
+
         val usm = appCtx.getSystemService(Context.USAGE_STATS_SERVICE) as? android.app.usage.UsageStatsManager
-        val todayStartWall = todayDate.atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
-        val stats = runCatching {
-            usm?.queryUsageStats(android.app.usage.UsageStatsManager.INTERVAL_DAILY, todayStartWall, System.currentTimeMillis())
+        val zone = ZoneId.systemDefault()
+        val nowWall = System.currentTimeMillis()
+        val start30dWall = start30d.atStartOfDay(zone).toInstant().toEpochMilli()
+        val allDailyStats = runCatching {
+            usm?.queryUsageStats(android.app.usage.UsageStatsManager.INTERVAL_DAILY, start30dWall, nowWall)
         }.getOrNull()
-        val phoneMs = stats?.filter { it.totalTimeInForeground > 0L }?.sumOf { it.totalTimeInForeground } ?: 0L
+
+        val phoneDailyMap = linkedMapOf<LocalDate, Long>()
+        allDailyStats?.forEach { stat ->
+            if (stat.totalTimeInForeground > 0L) {
+                val d = Instant.ofEpochMilli(stat.firstTimeStamp).atZone(zone).toLocalDate()
+                if (!d.isBefore(start30d) && !d.isAfter(todayDate)) {
+                    phoneDailyMap[d] = (phoneDailyMap[d] ?: 0L) + stat.totalTimeInForeground
+                }
+            }
+        }
+        val todayStartWall = todayDate.atStartOfDay(zone).toInstant().toEpochMilli()
+        val todayStats = runCatching {
+            usm?.queryUsageStats(android.app.usage.UsageStatsManager.INTERVAL_DAILY, todayStartWall, nowWall)
+        }.getOrNull()
+        val phoneMs = todayStats?.filter { it.totalTimeInForeground > 0L }?.sumOf { it.totalTimeInForeground } ?: 0L
         if (phoneMs > 0L) {
             cachedTotalPhoneTodayMs = phoneMs
+            phoneDailyMap[todayDate] = maxOf(phoneDailyMap[todayDate] ?: 0L, phoneMs)
         }
+        val phoneClusterProfiles = phoneDailyMap.filter { it.value >= 60_000L }.map { (date, dailyMs) ->
+            com.example.itv.domain.records.DayUsageProfile(
+                date = date,
+                totalDurationMs = dailyMs
+            )
+        }
+        cachedPhoneBimodalClusters = com.example.itv.domain.records.DayTypeUsageClusterer.cluster(phoneClusterProfiles)
     }
 
     private fun expireStaleRunIfNeeded(pkg: String, run: ActiveRun, nowElapsed: Long, nowWall: Long) {
@@ -285,7 +376,6 @@ internal object ShortformPersonalStatsStore {
         val appSessions = sessions.filter { it.packageName == pkg }
         val basisSessions = if (appSessions.size >= 2) appSessions else sessions
         val avgSessionMs = calculateRepresentativeSessionMs(basisSessions)
-        val avgSessionMinutes = if (avgSessionMs >= 30_000L) round2(avgSessionMs / 60_000.0) else null
 
         val activeRunMs = run?.takeIf {
             it.id.isNotEmpty() && nowElapsed - it.lastConfirmedElapsed in 0L until SESSION_GRACE_MS
@@ -326,17 +416,56 @@ internal object ShortformPersonalStatsStore {
             round2((todayMs.toDouble() / effectivePhoneMs.toDouble()).coerceIn(0.0, 1.0))
         } else null
 
+        val bimodal = cachedBimodalClusters
+        val workdayAvgSessionMs = bimodal?.takeIf { it.isConfident }?.workdayAvgSessionMs
+        val restdayAvgSessionMs = bimodal?.takeIf { it.isConfident }?.restdayAvgSessionMs
+        val splitThresholdMs = bimodal?.splitThresholdMs
+        val isConfident = bimodal?.isConfident ?: false
+
+        val phoneBimodal = cachedPhoneBimodalClusters
+        val phoneWorkdayAvgDailyMs = phoneBimodal?.workdayAvgDailyMs
+        val phoneRestdayAvgDailyMs = phoneBimodal?.restdayAvgDailyMs
+        val phoneSplitThresholdMs = phoneBimodal?.splitThresholdMs
+        val isPhoneConfident = phoneBimodal?.isConfident ?: false
+
+        val todayDate = LocalDate.now()
+        val hybridDecision = com.example.itv.domain.records.HybridDayTypeClassifier.classify(
+            date = todayDate,
+            phoneTotalTodayMs = effectivePhoneMs,
+            shortformTodayMs = todayMs,
+            phoneCluster = phoneBimodal,
+            shortformCluster = bimodal,
+            globalAvgSessionMs = avgSessionMs,
+            globalAvgDailyMs = avg7dMs
+        )
+        val dynamicSessionBaselineMs = hybridDecision.effectiveAvgSessionMs.takeIf { it >= 30_000L } ?: avgSessionMs
+        val dynamicAvgSessionMinutes = if (dynamicSessionBaselineMs >= 30_000L) round2(dynamicSessionBaselineMs / 60_000.0) else null
+        val dynamicSessionVsAvgRatio = if (dynamicSessionBaselineMs >= 30_000L && effectiveCurrentSessionMs > 0L) {
+            round2(effectiveCurrentSessionMs.toDouble() / dynamicSessionBaselineMs.toDouble())
+        } else sessionVsAvgRatio
+
         return QuickPersonalMetrics(
-            avgSessionMs = avgSessionMs,
-            avgSessionMinutes = avgSessionMinutes,
-            sessionVsAvgRatio = sessionVsAvgRatio,
+            avgSessionMs = dynamicSessionBaselineMs,
+            avgSessionMinutes = dynamicAvgSessionMinutes,
+            sessionVsAvgRatio = dynamicSessionVsAvgRatio,
             todayDurationMs = todayMs,
             todayShortformMinutes = todayShortformMinutes,
             avg7dDailyMs = avg7dMs,
             avg7dDailyMinutes = avg7dDailyMinutes,
             todayVs7dRatio = todayVs7dRatio,
             personalAvgSpm = personalAvgSpm,
-            shortformShareOfPhoneRatio = shortformShareRatio
+            shortformShareOfPhoneRatio = shortformShareRatio,
+            workdayAvgSessionMs = workdayAvgSessionMs,
+            restdayAvgSessionMs = restdayAvgSessionMs,
+            daySplitThresholdMs = splitThresholdMs,
+            isBimodalConfident = isConfident,
+            phoneWorkdayAvgDailyMs = phoneWorkdayAvgDailyMs,
+            phoneRestdayAvgDailyMs = phoneRestdayAvgDailyMs,
+            phoneSplitThresholdMs = phoneSplitThresholdMs,
+            isPhoneBimodalConfident = isPhoneConfident,
+            estimatedDayType = hybridDecision.estimatedType,
+            effectiveAvgSessionMs = dynamicSessionBaselineMs,
+            dayTypeReason = hybridDecision.reason
         )
     }
 
@@ -643,6 +772,44 @@ internal object ShortformPersonalStatsStore {
         } ?: 0L
         val avgPhonePeriodActiveDayMs = totalPhonePeriodActiveMs / activePhoneDaysInPeriod
 
+        // 30-day device-level phone total usage bimodal clustering
+        val phoneDailyMap = linkedMapOf<LocalDate, Long>()
+        val usm = context.getSystemService(Context.USAGE_STATS_SERVICE) as? android.app.usage.UsageStatsManager
+        val zone = ZoneId.systemDefault()
+        val start30dWall = start30d.atStartOfDay(zone).toInstant().toEpochMilli()
+        val allDailyStats = runCatching {
+            usm?.queryUsageStats(android.app.usage.UsageStatsManager.INTERVAL_DAILY, start30dWall, nowWall)
+        }.getOrNull()
+        allDailyStats?.forEach { stat ->
+            if (stat.totalTimeInForeground > 0L) {
+                val d = Instant.ofEpochMilli(stat.firstTimeStamp).atZone(zone).toLocalDate()
+                if (!d.isBefore(start30d) && !d.isAfter(todayDate)) {
+                    phoneDailyMap[d] = (phoneDailyMap[d] ?: 0L) + stat.totalTimeInForeground
+                }
+            }
+        }
+        periodUsageReport?.dailyTotals?.forEach { (date, minutes) ->
+            val ms = (minutes * 60_000.0).toLong()
+            if (ms > 0L && !date.isBefore(start30d) && !date.isAfter(todayDate)) {
+                phoneDailyMap[date] = maxOf(phoneDailyMap[date] ?: 0L, ms)
+            }
+        }
+        if (totalPhoneTodayMs > 0L) {
+            phoneDailyMap[todayDate] = maxOf(phoneDailyMap[todayDate] ?: 0L, totalPhoneTodayMs)
+        }
+        val phoneClusterProfiles = phoneDailyMap.filter { it.value >= 60_000L }.map { (date, dailyMs) ->
+            com.example.itv.domain.records.DayUsageProfile(
+                date = date,
+                totalDurationMs = dailyMs
+            )
+        }
+        val phoneClusterResult = if (phoneClusterProfiles.size >= 2) {
+            com.example.itv.domain.records.DayTypeUsageClusterer.cluster(phoneClusterProfiles)
+        } else {
+            cachedPhoneBimodalClusters ?: com.example.itv.domain.records.DayTypeUsageClusterer.cluster(phoneClusterProfiles)
+        }
+        cachedPhoneBimodalClusters = phoneClusterResult
+
         fun buildMetrics(
             filter: TargetFilter,
             dailyMap: Map<LocalDate, DailyAgg>,
@@ -833,6 +1000,27 @@ internal object ShortformPersonalStatsStore {
                 (periodShortformDailyAvgMs.toDouble() / effectivePeriodPhoneDailyMs.toDouble()).coerceIn(0.0, 1.0)
             } else shortformShareOfPhoneRatio
 
+            val dayProfiles = days30.map { dayAgg ->
+                val dateStr = dayAgg.date.toString()
+                val daySessions = sessions30d.filter { it.date == dateStr }.map { it.durationMs }
+                com.example.itv.domain.records.DayUsageProfile(
+                    date = dayAgg.date,
+                    totalDurationMs = dayAgg.durationMs,
+                    sessions = daySessions
+                )
+            }
+            val bimodalCluster = com.example.itv.domain.records.DayTypeUsageClusterer.cluster(dayProfiles)
+
+            val hybridDecision = com.example.itv.domain.records.HybridDayTypeClassifier.classify(
+                date = todayDate,
+                phoneTotalTodayMs = effectivePhoneMs,
+                shortformTodayMs = todayMs,
+                phoneCluster = phoneClusterResult,
+                shortformCluster = bimodalCluster,
+                globalAvgSessionMs = avgSessionMs,
+                globalAvgDailyMs = avg7dDailyMs
+            )
+
             return PersonalizedTargetMetrics(
                 filter = filter,
                 todayDurationMs = todayMs,
@@ -879,7 +1067,27 @@ internal object ShortformPersonalStatsStore {
                 totalPhoneTodayMs = effectivePhoneMs,
                 shortformShareOfPhoneRatio = shortformShareOfPhoneRatio,
                 periodShareOfAppRatio = periodShareOfAppRatio,
-                periodShareOfPhoneRatio = periodShareOfPhoneRatio
+                periodShareOfPhoneRatio = periodShareOfPhoneRatio,
+                workdayAvgDailyMs = bimodalCluster.workdayAvgDailyMs,
+                workdayAvgSessionMs = bimodalCluster.workdayAvgSessionMs,
+                restdayAvgDailyMs = bimodalCluster.restdayAvgDailyMs,
+                restdayAvgSessionMs = bimodalCluster.restdayAvgSessionMs,
+                daySplitThresholdMs = bimodalCluster.splitThresholdMs,
+                isBimodalConfident = bimodalCluster.isConfident,
+                bimodalRatio = bimodalCluster.clusterRatio,
+                estimatedWorkdayCount = bimodalCluster.workdayDays.size,
+                estimatedRestdayCount = bimodalCluster.restdayDays.size,
+                phoneWorkdayAvgDailyMs = phoneClusterResult.workdayAvgDailyMs,
+                phoneRestdayAvgDailyMs = phoneClusterResult.restdayAvgDailyMs,
+                phoneSplitThresholdMs = phoneClusterResult.splitThresholdMs,
+                isPhoneBimodalConfident = phoneClusterResult.isConfident,
+                phoneBimodalRatio = phoneClusterResult.clusterRatio,
+                phoneEstimatedWorkdayCount = phoneClusterResult.workdayDays.size,
+                phoneEstimatedRestdayCount = phoneClusterResult.restdayDays.size,
+                todayEstimatedDayTypeByPhone = if (effectivePhoneMs > 0L) phoneClusterResult.classify(effectivePhoneMs) else null,
+                hybridEstimatedDayType = hybridDecision.estimatedType,
+                hybridDayTypeReason = hybridDecision.reason,
+                effectiveSessionMsForToday = hybridDecision.effectiveAvgSessionMs
             )
         }
 

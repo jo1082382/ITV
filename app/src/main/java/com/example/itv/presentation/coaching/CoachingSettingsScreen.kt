@@ -136,7 +136,90 @@ fun CoachingSettingsScreen(
             // 5. 추천 휴식 미션 목록 모아보기
             RestMissionListSection()
 
+            HorizontalDivider(color = ItvLine.copy(alpha = 0.6f))
+
+            // 6. 야간 3분기 케어 & 캐릭터 미리보기
+            NightCarePreviewSection()
+
             Spacer(modifier = Modifier.height(16.dp))
+        }
+    }
+}
+
+@Composable
+private fun NightCarePreviewSection() {
+    val context = LocalContext.current
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, ItvLine)
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text("🌙", fontSize = 18.sp)
+                Text(
+                    text = "야간 수면 케어 & 캐릭터 미리보기",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = ItvGreen
+                )
+            }
+            Text(
+                text = "어두운 암실에서 숏폼 진입 시 발동되는 3대 수면 케어(마음 비우기 노트, 흑백 모드, ASMR)와 강아지 개입 모션을 미리 테스트해볼 수 있습니다.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick = {
+                        com.example.itv.presentation.sleep.BedtimeCareController.getInstance(context).showBedtimeCareDialog()
+                    },
+                    modifier = Modifier.weight(1.1f),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text("🌙 3분기 팝업", fontSize = 11.5.sp, maxLines = 1)
+                }
+                Button(
+                    onClick = {
+                        com.example.itv.presentation.sleep.BedtimeCareController.getInstance(context).startGrayscaleMode(forceManual = true)
+                    },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF334155)),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text("🖤 흑백", fontSize = 11.5.sp, maxLines = 1)
+                }
+                Button(
+                    onClick = {
+                        com.example.itv.presentation.sleep.BedtimeCareController.getInstance(context).stopGrayscaleMode()
+                    },
+                    modifier = Modifier.weight(1.1f),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0F766E)),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text("🤍 흑백 취소", fontSize = 11.5.sp, maxLines = 1)
+                }
+            }
+            Button(
+                onClick = {
+                    context.startActivity(Intent(context, com.example.itv.presentation.character.CompanionPreviewActivity::class.java))
+                },
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(containerColor = ItvGreen),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text("🐶 강아지 개입 및 야간 종합 테스트 열기", fontWeight = FontWeight.Bold)
+            }
         }
     }
 }
@@ -552,15 +635,26 @@ private fun CoachingToneSection(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Row(
+                    modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text("💬", fontSize = 16.sp)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text("💬", fontSize = 16.sp)
+                        Text(
+                            text = "캐릭터 대사 미리보기 (${selectedTone.title})",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = ItvGreen
+                        )
+                    }
                     Text(
-                        text = "캐릭터 대사 미리보기 (${selectedTone.title})",
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = ItvGreen
+                        text = "상황별 랜덤 발화 적용됨 🎲",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
                     )
                 }
 

@@ -2,6 +2,11 @@ package com.example.itv.domain.coaching
 
 /** Existing test settings, NOT finalized SDS production rules. */
 internal object TestCoachingPolicy {
+    // 표준 통합 시간 기준
+    const val INTERRUPTION_TOLERANCE_MS = 90_000L   // 이탈 유예 시간: 90초 (1분 30초)
+    const val RECOGNIZED_REST_MS = 180_000L          // 자발적 휴식 인정 시간: 180초 (3분)
+    const val SESSION_TIMEOUT_MS = 900_000L          // 세션 만료 시간: 900초 (15분)
+
     // 테스트 모드 (강아지 캐릭터 빠른 확인용)
     const val INTERVENTION_MS = 30_000L
     const val REMINDER_MS = 30_000L
@@ -20,6 +25,7 @@ internal object TestCoachingPolicy {
     fun reminderMs(isJev: Boolean): Long = if (isJev) JEV_REMINDER_MS else REMINDER_MS
     fun missionStartMs(isJev: Boolean): Long = if (isJev) JEV_MISSION_START_MS else MISSION_START_MS
     fun restMs(isJev: Boolean): Long = if (isJev) JEV_REST_MS else REST_MS
+    fun naturalRestMs(isJev: Boolean): Long = if (isJev) RECOGNIZED_REST_MS else REST_MS
 }
 internal enum class TestMissionWake { NONE, INCOMPLETE, SUCCESS }
 internal class TestRestMission {

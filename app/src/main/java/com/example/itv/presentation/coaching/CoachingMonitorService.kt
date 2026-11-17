@@ -57,6 +57,7 @@ class CoachingMonitorService : Service() {
         }
     }
     private val jev by lazy { JevRuntime.get(this) }
+    private val bedtimeCareController by lazy { com.example.itv.presentation.sleep.BedtimeCareController.getInstance(this) }
     private fun testMode() = CoachingAutoStart.testModeEnabled(this)
     private fun jevMode() = !testMode() && JevFeature.available() && jev.enabled
     private val jevUiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -293,6 +294,17 @@ class CoachingMonitorService : Service() {
             retryPending = true
             isRestMissionFailure = true
             handler.postDelayed({ checkRetry(transition = true) }, 300L)
+        } else if (wake == com.example.itv.domain.coaching.TestMissionWake.SUCCESS) {
+            onMissionRestSuccess()
+        }
+    }
+    private fun onMissionRestSuccess() {
+        retryPending = false
+        isRestMissionFailure = false
+        usageClock.clear()
+        resetOfferState()
+        if (jevMode()) {
+            jev.onMissionRestSuccess()
         }
     }
     private fun checkMission() {
@@ -346,7 +358,10 @@ class CoachingMonitorService : Service() {
                 missionScreenOff()
                 progress.observe(SystemClock.elapsedRealtime(), false, overlay != null)
             } else {
-                if (intent.action == Intent.ACTION_SCREEN_ON) missionScreenOn()
+                if (intent.action == Intent.ACTION_SCREEN_ON) {
+                    missionScreenOn()
+                    bedtimeCareController.showMorningBriefingIfNeeded(JevObservationHub.foregroundPackage)
+                }
                 observeUsage()
                 checkMission()
             }
@@ -423,7 +438,7 @@ class CoachingMonitorService : Service() {
             else -> "조건 재확인/표시 처리 중"
         }
         DeveloperStatus.value = DeveloperSnapshot(now, running, usageClock.usedMs,
-            usageClock.restMs, interventionMs, TestCoachingPolicy.REST_MS,
+            usageClock.restMs, interventionMs, TestCoachingPolicy.naturalRestMs(jevMode()),
             ((responseController.retryAt ?: now) - now).coerceAtLeast(0L), screen, decision)
     }
     override fun onBind(intent: Intent?) = null
@@ -587,6 +602,15 @@ class CoachingMonitorService : Service() {
             else -> null
         }
         val ambient = com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this).snapshot.value
+        if (ambient.isBedtimeCandidate) {
+            responseController.offered = true
+            if (isJev) jev.shown()
+            InterventionJournal.add(this, jevOfferId ?: java.util.UUID.randomUUID().toString().take(8), "취침 케어 개입 표시 (3분기)")
+            bedtimeCareController.showBedtimeCareDialog {
+                responseController.offered = false
+            }
+            return
+        }
         val reasons = com.example.itv.domain.coaching.InterventionReasonResolver.resolveReasons(
             isJev = isJev,
             jevContext = if (isJev) jev.state.value.context else null,

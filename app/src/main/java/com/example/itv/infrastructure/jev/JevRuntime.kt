@@ -111,6 +111,8 @@ class JevRuntime private constructor(context: Context) {
     private var displayReceipt: Job?=null
     private var inFlight: Job?=null
     private var safeSince: Long?=null
+    private var darkSince: Long?=null
+    private var suddenDarkTriggeredSession: String?=null
     private var savedAt=0L
     private var loggedAt=0L
     private var loggedReason=""
@@ -135,8 +137,8 @@ class JevRuntime private constructor(context: Context) {
                         val a=json.optJSONObject(pkg) ?: continue
                         val savedDate=a.optString("lastActiveDate","")
                         val savedWall=a.optLong("lastActiveWallMs",0L)
-                        val activeAcrossMidnight=savedWall>0L && (nowWall-savedWall) in 0L until 15_000L
-                        val sessionStillRecent=savedWall>0L && (nowWall-savedWall) in 0L until 600_000L &&
+                        val activeAcrossMidnight=savedWall>0L && (nowWall-savedWall) in 0L until JevSessionTracker.INTERRUPTION_TOLERANCE_MS
+                        val sessionStillRecent=savedWall>0L && (nowWall-savedWall) in 0L until JevSessionTracker.SESSION_TIMEOUT_MS &&
                             (savedDate==todayStr || activeAcrossMidnight)
                         if(sessionStillRecent) {
                             lastActiveDate[pkg]=todayStr
@@ -245,7 +247,9 @@ class JevRuntime private constructor(context: Context) {
             userEnvironmentState = ambient.userEnvironmentState.name,
             lastInterventionOutcome = outcome,
             postInterventionActivity = isPostActive,
-            resistanceStreak = resistanceStreak
+            resistanceStreak = resistanceStreak,
+            estimatedDayType = personal.estimatedDayType?.name,
+            dayTypeReason = personal.dayTypeReason
         )
     }
     fun tick(unlocked: Boolean, missionActive: Boolean, offerVisible: Boolean) {
@@ -268,15 +272,17 @@ class JevRuntime private constructor(context: Context) {
             val prevWall=lastActiveWallMs[targetPkg] ?: 0L
             val currentlyActive=(unlocked && pkg==targetPkg) ||
                 ((tracker.states[targetPkg]?.continuousMs ?: 0L)>0L) ||
-                (prevWall>0L && (nowWall-prevWall) in 0L until 15_000L)
+                (prevWall>0L && (nowWall-prevWall) in 0L until JevSessionTracker.INTERRUPTION_TOLERANCE_MS)
             val dateChangedWhileAway=prevDate!=null && prevDate!=todayStr && !currentlyActive
-            val inactiveExpired=prevWall>0L && (nowWall-prevWall>=600_000L || nowWall<prevWall)
-            if(dateChangedWhileAway || inactiveExpired) {
+            val inactiveExpired=prevWall>0L && (nowWall-prevWall>=JevSessionTracker.SESSION_TIMEOUT_MS || nowWall<prevWall)
+            val screenOffRestExpired=!unlocked && prevWall>0L && (nowWall-prevWall>=JevSessionTracker.RECOGNIZED_REST_MS)
+            if(dateChangedWhileAway || inactiveExpired || screenOffRestExpired) {
                 tracker.resetSession(targetPkg)
                 controls.remove(targetPkg)
                 lastActiveDate.remove(targetPkg)
                 lastActiveWallMs.remove(targetPkg)
                 if(lastObservedContext?.packageName==targetPkg)lastObservedContext=null
+                suddenDarkTriggeredSession = null
             } else if(prevDate!=null && prevDate!=todayStr) {
                 // Actively watching across 00:00 midnight: preserve the ongoing session without resetting
                 lastActiveDate[targetPkg]=todayStr
@@ -320,7 +326,27 @@ class JevRuntime private constructor(context: Context) {
             getAppSuppressionInfo(targetPkg, now, nowWall)
         }
         val reasons=if(c!=null)JevCandidatePolicy.reasons(c,s) else emptyList()
-        val block=when {
+        val isDarkAmbient = c != null && (c.ambientLux ?: 999f) <= 15f && !c.isNearOrOccluded
+        if (isDarkAmbient) {
+            if (darkSince == null) darkSince = now
+        } else {
+            darkSince = null
+            if (c != null && (c.ambientLux ?: 0f) >= 30f) {
+                suddenDarkTriggeredSession = null
+            }
+        }
+        val isSustainedDarkness = darkSince != null && (now - darkSince!! >= 5000L)
+        val suddenDarknessEvent = isSustainedDarkness && c != null && (suddenDarkTriggeredSession != c.sessionId)
+        val initialProbeEligible = c != null && c.continuousMs >= 90_000L && control?.asked != true
+
+        val effectiveReasons = when {
+            reasons.isNotEmpty() -> reasons
+            suddenDarknessEvent -> listOf("SUDDEN_DARK_ENVIRONMENT")
+            initialProbeEligible -> listOf("INITIAL_90S_PROBE")
+            else -> emptyList()
+        }
+
+        val block = when {
             !s.collectionConsent -> "외부 전송 동의 필요"
             !store.tokenConfigured.value -> "테스트 토큰 필요"
             !CoachingConsentStore.granted(appContext) -> "기존 사용량 수집 동의 필요"
@@ -331,10 +357,10 @@ class JevRuntime private constructor(context: Context) {
             offerVisible -> "개입 표시 중"
             control?.suppressedSession==c.sessionId -> {
                 val info = suppressionMap[c.packageName]
-                val remSec = info?.sessionResetRemainingSeconds ?: 600L
+                val remSec = info?.sessionResetRemainingSeconds ?: (JevSessionTracker.SESSION_TIMEOUT_MS / 1000L)
                 val remM = remSec / 60
                 val remS = remSec % 60
-                "현재 사용 구간 재제안 중단 (앱 10분 미사용 시 만료 · 남은 시간: ${remM}분 ${remS}초)"
+                "현재 사용 구간 재제안 중단 (앱 15분 미사용 시 만료 · 남은 시간: ${remM}분 ${remS}초)"
             }
             (control?.deferUntil ?: 0)>now -> {
                 if(control?.deferUntil==Long.MAX_VALUE) "재부팅으로 보류 시각 확인 불가 · 상태 초기화 필요"
@@ -345,7 +371,7 @@ class JevRuntime private constructor(context: Context) {
                     "‘나중에’ 일시 보류 중 (남은 시간: ${remM}분 ${remS}초)"
                 }
             }
-            reasons.isEmpty() -> "호출 조건 미충족"
+            effectiveReasons.isEmpty() -> "호출 조건 미충족"
             else -> null
         }
         val result=approval
@@ -369,16 +395,21 @@ class JevRuntime private constructor(context: Context) {
             loggedReason=block;loggedAt=now
             scope.launch { runCatching { repository.observation(c,s,block) }.onFailure { store.notice.value="상황 기록 저장 실패" } }
         }
+
         if(block==null && c!=null && control!=null && approval==null && inFlight?.isActive!=true &&
             (safeSince?.let { now-it>=5000 }==true)) {
-            val eligible=!control.asked || (now-control.at>=intervalSec*1000L &&
+            val regularTimeElapsed = !control.asked || (now-control.at>=intervalSec*1000L &&
                 c.sessionMs-control.total>=intervalSec*1000L)
+            val eligible = regularTimeElapsed || suddenDarknessEvent
             if(eligible) {
+                if (suddenDarknessEvent) {
+                    suddenDarkTriggeredSession = c.sessionId
+                }
                 control.asked=true;control.at=now;control.total=c.sessionMs
                 persist()
                 inFlight=scope.launch {
                     try {
-                        val answer=repository.evaluate(c,s,"LIVE",reasons.joinToString("|"))
+                        val answer=repository.evaluate(c,s,"LIVE",effectiveReasons.joinToString("|"))
                         val effThreshold = JevCandidatePolicy.effectiveThreshold(s, c)
                         val dynamicSec = JevCandidatePolicy.calculateDynamicInterval(effThreshold, answer.probability)
                         val gap = (effThreshold - answer.probability).coerceAtLeast(0.0)
@@ -494,10 +525,10 @@ class JevRuntime private constructor(context: Context) {
         }
         if (control?.suppressedSession == a.captured.sessionId) {
             val info = getAppSuppressionInfo(pkg, now, System.currentTimeMillis())
-            val remSec = info.sessionResetRemainingSeconds ?: 600L
+            val remSec = info.sessionResetRemainingSeconds ?: (JevSessionTracker.SESSION_TIMEOUT_MS / 1000L)
             val remM = remSec / 60
             val remS = remSec % 60
-            return "현재 사용 구간에서 이미 사용자가 응답하여 재개입 억제 중 (앱 10분 미사용 시 만료 · 남은 시간: ${remM}분 ${remS}초)"
+            return "현재 사용 구간에서 이미 사용자가 응답하여 재개입 억제 중 (앱 15분 미사용 시 만료 · 남은 시간: ${remM}분 ${remS}초)"
         }
         if ((control?.deferUntil ?: 0) > now) {
             val remainSec = maxOf(0L, ((control?.deferUntil ?: 0L) - now) / 1000L)
@@ -581,6 +612,32 @@ class JevRuntime private constructor(context: Context) {
             }.onFailure { store.notice.value="미션 기록 저장 실패" }
         }
     }
+    fun onMissionRestSuccess() {
+        val fg = JevObservationHub.foregroundPackage
+        val targetPkg = fg?.takeIf { store.settings.value.targets(it) }
+            ?: displayedApproval?.captured?.packageName
+            ?: approval?.captured?.packageName
+            ?: lastObservedContext?.packageName
+        if (targetPkg != null) {
+            tracker.resetContinuous(targetPkg)
+            controls[targetPkg]?.let {
+                it.suppressedSession = tracker.states[targetPkg]?.id
+                it.deferUntil = SystemClock.elapsedRealtime() + 300_000L // 5분 재개입 억제 쿨타임
+                it.asked = false
+            }
+        } else {
+            for (pkg in listOf(JevSettings.INSTAGRAM, JevSettings.YOUTUBE)) {
+                tracker.resetContinuous(pkg)
+                controls[pkg]?.let {
+                    it.suppressedSession = tracker.states[pkg]?.id
+                    it.deferUntil = SystemClock.elapsedRealtime() + 300_000L
+                    it.asked = false
+                }
+            }
+        }
+        approval = null
+        displayedApproval = null
+    }
     @Volatile var lastSuppressionReason: String? = null
         private set
     @Volatile var lastSuppressionAt: Long = 0L
@@ -637,7 +694,7 @@ class JevRuntime private constructor(context: Context) {
         val awayMs = maxOf(frame?.awayMs ?: 0L, awayWallMs)
 
         val sessionResetRemainingSeconds = if (isSuppressed) {
-            maxOf(0L, (600_000L - awayMs + 999L) / 1000L)
+            maxOf(0L, (JevSessionTracker.SESSION_TIMEOUT_MS - awayMs + 999L) / 1000L)
         } else null
 
         val deferRemainingSeconds = if (isDeferred) {
@@ -655,14 +712,14 @@ class JevRuntime private constructor(context: Context) {
                     val remM = sessionResetRemainingSeconds / 60
                     val remS = sessionResetRemainingSeconds % 60
                     if (awayMs < 5_000L) {
-                        "쉬기/닫기로 개입 억제 중 · 앱을 닫고 10분간 미사용 시 세션 만료 (남은 시간: ${remM}분 ${remS}초)"
+                        "쉬기/닫기로 개입 억제 중 · 앱을 닫고 15분간 미사용 시 세션 만료 (남은 시간: ${remM}분 ${remS}초)"
                     } else {
                         val awayM = (awayMs / 1000L) / 60
                         val awayS = (awayMs / 1000L) % 60
-                        "쉬기/닫기로 개입 억제 중 · 세션 만료까지 ${remM}분 ${remS}초 남음 (부재 경과: ${awayM}분 ${awayS}초 / 10분)"
+                        "쉬기/닫기로 개입 억제 중 · 세션 만료까지 ${remM}분 ${remS}초 남음 (부재 경과: ${awayM}분 ${awayS}초 / 15분)"
                     }
                 } else {
-                    "10분 미사용으로 세션 만료 완료 · 앱 재진입 시 새 세션으로 개입 활성화"
+                    "15분 미사용으로 세션 만료 완료 · 앱 재진입 시 새 세션으로 개입 활성화"
                 }
             }
             isDeferred -> {

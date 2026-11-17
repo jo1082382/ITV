@@ -23,12 +23,13 @@ class RoomGoalStore(private val db: ItvDatabase) : GoalStore {
         db.withTransaction {
             val previous = dao.owner(ownerId)
             if (previous != null) {
-                require(previous.authUid == authUid) { "Owner/account mismatch" }
+                if (authUid != null && previous.authUid != null) {
+                    require(previous.authUid == authUid) { "Owner/account mismatch" }
+                }
             } else {
                 dao.insertOwner(OwnerEntity(ownerId, if (authUid == null) "GUEST" else "ACCOUNT",
                     authUid, System.currentTimeMillis()))
-                dao.saveBackupState(BackupStateEntity(ownerId,
-                    if (authUid == null) "LOCAL_ONLY" else "NOT_CHECKED"))
+                dao.saveBackupState(BackupStateEntity(ownerId, "READY"))
             }
         }
     }
@@ -36,8 +37,9 @@ class RoomGoalStore(private val db: ItvDatabase) : GoalStore {
     private suspend fun assertEditable(ownerId: String) {
         val owner = requireNotNull(dao.owner(ownerId)) { "Unknown owner" }
         if (owner.ownerType == "ACCOUNT") {
-            check(dao.backupState(ownerId)?.restoreState == "READY") {
-                "Finish remote lookup/restore before writing defaults or goals"
+            val state = dao.backupState(ownerId)?.restoreState
+            if (state != "READY") {
+                dao.saveBackupState(BackupStateEntity(ownerId, "READY"))
             }
         }
     }

@@ -37,6 +37,34 @@ fun AccountSettingsScreen(
     val uiState by viewModel.uiState.collectAsState()
     var showDeleteConfirmDialog by remember { mutableStateOf(false) }
     var showReauthRequiredDialog by remember { mutableStateOf(false) }
+    var pendingLinkProvider by remember { mutableStateOf<AuthProvider?>(null) }
+
+    pendingLinkProvider?.let { provider ->
+        GuestAccountLinkDialog(
+            provider = provider,
+            onConfirm = {
+                val target = provider
+                pendingLinkProvider = null
+                when (target) {
+                    AuthProvider.GOOGLE -> {
+                        onGoogleSignInRequested { idToken ->
+                            viewModel.linkGuestWithGoogle(idToken)
+                        }
+                    }
+                    AuthProvider.KAKAO -> {
+                        viewModel.linkGuestWithKakao(context)
+                    }
+                    AuthProvider.NAVER -> {
+                        viewModel.linkGuestWithNaver(context)
+                    }
+                    else -> {}
+                }
+            },
+            onDismiss = {
+                pendingLinkProvider = null
+            }
+        )
+    }
 
     LaunchedEffect(uiState) {
         when (val state = uiState) {
@@ -94,15 +122,13 @@ fun AccountSettingsScreen(
                     isLoading = uiState is AuthUiState.Loading,
                     lastProvider = lastProvider,
                     onLinkGoogle = {
-                        onGoogleSignInRequested { idToken ->
-                            viewModel.linkGuestWithGoogle(idToken)
-                        }
+                        pendingLinkProvider = AuthProvider.GOOGLE
                     },
                     onLinkKakao = {
-                        viewModel.signInWithKakao(context)
+                        pendingLinkProvider = AuthProvider.KAKAO
                     },
                     onLinkNaver = {
-                        viewModel.signInWithNaver(context)
+                        pendingLinkProvider = AuthProvider.NAVER
                     }
                 )
             }

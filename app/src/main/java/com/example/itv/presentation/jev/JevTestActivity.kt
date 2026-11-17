@@ -77,7 +77,7 @@ private fun JevTestScreen(vm: JevTestViewModel,onBack: ()->Unit,modifier: Modifi
         Text("Jev 공동 테스트",Modifier.padding(horizontal=20.dp),style=MaterialTheme.typography.headlineSmall,
             fontWeight=FontWeight.Bold,color=ItvGreen)
         PrimaryScrollableTabRow(selectedTabIndex=page,edgePadding=12.dp) {
-            listOf("연결","판단 설정","상태·기록","개입 기록","실시간 측정 테스트","파지 각도·목 부담 감지").forEachIndexed { i,title ->
+            listOf("연결","판단 설정","개입 기록","실시간 측정 테스트","파지 각도·목 부담 감지").forEachIndexed { i,title ->
                 Tab(selected=page==i,onClick={page=i},text={Text(title)})
             }
         }
@@ -91,9 +91,8 @@ private fun JevTestScreen(vm: JevTestViewModel,onBack: ()->Unit,modifier: Modifi
                 when(page) {
                     0 -> ConnectionPage(vm,s,busy)
                     1 -> SettingsPage(vm,s,busy)
-                    2 -> RecordsPage(vm,busy)
-                    3 -> InterventionHistoryPage()
-                    4 -> ObservationTestPage(vm,busy)
+                    2 -> InterventionHistoryPage()
+                    3 -> ObservationTestPage(vm,busy)
                     else -> PostureTestPage(busy)
                 }
             }
@@ -210,7 +209,6 @@ private fun SettingsPage(vm: JevTestViewModel,s: JevSettings,busy: Boolean) {
     var probability by rememberSaveable(s.revision){mutableStateOf((s.probabilityThreshold*100).toString())}
     var personalizedOn by rememberSaveable(s.revision){mutableStateOf(s.personalizedEnabled)}
     var ttl by rememberSaveable(s.revision){mutableStateOf(s.resultTtlSeconds.toString())}
-    var later by rememberSaveable(s.revision){mutableStateOf(s.laterSeconds.toString())}
     var error by remember {mutableStateOf<String?>(null)}
     TestSection("실행 모드") {
         Toggle("테스트 모드 (30초 시청 개입 · 10초 무응답 · 30초 재판단 · 10초 내 15초 휴식)",testMode,{
@@ -240,7 +238,7 @@ private fun SettingsPage(vm: JevTestViewModel,s: JevSettings,busy: Boolean) {
         Numeric("응답 유효시간 (초, 최대 300)",ttl,{ttl=it},!busy)
         Text("확률 기준을 통과해도 작성·잠금·보류·미션·상황 변경 시에는 표시하지 않습니다. 숏폼의 다음 전환 시점에 다시 확인합니다.",style=MaterialTheme.typography.bodySmall)
     }
-    TestSection("재평가·호출 제한 (동적 선형 보간)") {
+    TestSection("재평가·호출 제한 (동적 자동 조절)") {
         val liveState by vm.runtime.state.collectAsState()
         val dynInterval = liveState.dynamicIntervalSeconds ?: 300
         val lastGap = liveState.lastProbabilityGap
@@ -251,17 +249,17 @@ private fun SettingsPage(vm: JevTestViewModel,s: JevSettings,busy: Boolean) {
             modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
         ) {
-            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
-                    text = "동적 재평가 간격 & 추가 시청: ${dynInterval}초 (${"%.1f".format(dynInterval / 60.0)}분)",
+                    text = "실시간 재평가 간격 & 추가 시청: ${dynInterval}초 (${"%.1f".format(dynInterval / 60.0)}분)",
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.primary
                 )
                 Text(
                     text = if (lastGap != null) {
-                        "직전 평가 확률 격차: -${"%.1f".format(lastGap * 100)}%p → 선형 보간(${dynInterval}초) 적용 중"
+                        "직전 평가 확률 격차: -${"%.1f".format(lastGap * 100)}%p → 동적 보간(${dynInterval}초) 적용 중"
                     } else {
-                        "첫 평가 전 기본 간격: 300초 (첫 확률 평가 후 60~300초 선형 보간으로 자동 조정)"
+                        "첫 평가 전 기본 간격: 300초 (첫 확률 평가 후 30~360초 동적 보간으로 자동 조정)"
                     },
                     style = MaterialTheme.typography.bodyMedium
                 )
@@ -272,19 +270,19 @@ private fun SettingsPage(vm: JevTestViewModel,s: JevSettings,busy: Boolean) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+                HorizontalDivider(modifier = Modifier.padding(vertical = 2.dp), color = MaterialTheme.colorScheme.outlineVariant)
                 Text(
-                    text = "기기 일일 호출 한도: 무제한 (기기별 제한 삭제됨)",
+                    text = "• 격차 ≤ 15%p (기준치 근접/초과): 30초 ~ 90초 (빠른 재평가)\n" +
+                           "• 격차 15%p ~ 30%p (중간 격차): 90초 ~ 210초 (1.5 ~ 3.5분)\n" +
+                           "• 격차 30%p ~ 50%p+ (큰 격차): 210초 ~ 360초 (3.5 ~ 6.0분)\n" +
+                           "• '나중에'·무응답 시: 5분(300초) 쿨다운 대기 후 재개\n" +
+                           "• 기기 일일 호출 한도: 무제한 (비용 최적화 자동 관리)",
                     style = MaterialTheme.typography.bodySmall,
-                    color = ItvGreen
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    lineHeight = 18.sp
                 )
             }
         }
-        Numeric("나중에·무응답 보류 (초)", later, { later = it }, !busy)
-        Text(
-            text = "‘나중에’를 누르거나 15초간 응답이 없어 강아지가 내려갔을 때, 사용자를 즉시 다시 방해하지 않도록 다음 개입을 일시 보류(대기)하는 쿨다운 시간입니다.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
     }
     error?.let {Text(it,color=MaterialTheme.colorScheme.error)}
     Button(enabled=!busy,onClick={
@@ -297,166 +295,11 @@ private fun SettingsPage(vm: JevTestViewModel,s: JevSettings,busy: Boolean) {
                 bedtimeEnabled=bedtimeOn,bedtimeDelayMinutes=int(bedtimeDelay,"취침 지연"),bedtimeWindowMinutes=int(bedtimeWindow,"취침 적용 시간"),
                 probabilityThreshold=p/100.0,personalizedEnabled=personalizedOn,reevaluateSeconds=300,
                 additionalViewingSeconds=300,resultTtlSeconds=int(ttl,"응답 유효시간"),
-                laterSeconds=int(later,"보류 시간"),dailyLimit=999999).validated()
+                laterSeconds=s.laterSeconds,dailyLimit=999999).validated()
             error=null;vm.save(next)
         } catch(e:Exception) {error=e.message}
     },modifier=Modifier.fillMaxWidth()) {Text("판단 설정 저장")}
     OutlinedButton(enabled=!busy,onClick={vm.save(JevSettings(testerId=s.testerId,collectionConsent=s.collectionConsent))},modifier=Modifier.fillMaxWidth()) {Text("초기 시험 설정으로 복원")}
-}
-
-@Composable
-private fun RecordsPage(vm: JevTestViewModel,busy: Boolean) {
-    val context = LocalContext.current
-    val live by vm.runtime.state.collectAsState()
-    val s by vm.store.settings.collectAsState()
-    val missionActive by vm.runtime.missionActiveState.collectAsState()
-    val trials by vm.store.dao.trials().collectAsState(initial=emptyList())
-    val feedback by vm.store.dao.pendingFeedback().collectAsState(initial=emptyList())
-    val pending by vm.store.dao.pendingCount().collectAsState(initial=0)
-    val failed by vm.store.dao.failedCount().collectAsState(initial=0)
-    var confirmReset by remember {mutableStateOf(false)}
-    TestSection("실시간 관측·판단") {
-        Text(live.status)
-        if (live.targetAppSuppression.isNotEmpty()) {
-            Spacer(modifier = Modifier.height(4.dp))
-            live.targetAppSuppression.forEach { (pkg, info) ->
-                val appName = if (pkg == JevSettings.YOUTUBE) "YouTube 쇼츠" else "Instagram 릴스"
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = when {
-                        info.isSuppressed -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.45f)
-                        info.isDeferred -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.45f)
-                        info.isAsked -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f)
-                        else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-                    },
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
-                ) {
-                    Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = appName,
-                                fontWeight = FontWeight.Bold,
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = when {
-                                    info.isSuppressed -> "• 쉬기/닫기 세션 억제"
-                                    info.isDeferred -> "• ‘나중에’ 보류"
-                                    info.isAsked -> "• 재평가 대기"
-                                    else -> "• 관측 대기"
-                                },
-                                style = MaterialTheme.typography.bodySmall,
-                                fontWeight = FontWeight.SemiBold,
-                                color = when {
-                                    info.isSuppressed -> MaterialTheme.colorScheme.error
-                                    info.isDeferred -> MaterialTheme.colorScheme.tertiary
-                                    info.isAsked -> MaterialTheme.colorScheme.secondary
-                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
-                                }
-                            )
-                        }
-                        Text(
-                            text = info.statusText,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                    }
-                }
-            }
-            Spacer(modifier = Modifier.height(4.dp))
-        }
-        live.context?.let { c ->
-            val effThreshold = JevCandidatePolicy.effectiveThreshold(s, c)
-            Text("전면 대상: ${c.packageName}\n연속 ${c.continuousMs/1000}초 · 구간 ${c.sessionMs/1000}초\n최근 10분 재진입 ${c.returns10m}회 · 현재 관측 범위 ${c.returnsObservedSeconds}초")
-            Text("개인화: 기준 세션(${c.personalAvgSessionMinutes?.let { "${it}분" } ?: "-"}) 대비 ${c.sessionVsAvgRatio?.let { "${(it * 100).roundToInt()}%" } ?: "집계 중"} · 7일 일평균(${c.avg7dDailyMinutes?.let { "${it}분" } ?: "-"}) 대비 오늘(${c.todayShortformMinutes?.let { "${it}분" } ?: "-"}) ${c.todayVs7dRatio?.let { "${(it * 100).roundToInt()}%" } ?: "집계 중"}")
-            Text("스와이프: 1분 유효 SPM ${c.effectiveSpm1m ?: 0.0} (세션 평균 ${c.effectiveSessionSpm ?: 0.0} / 개인 평균 ${c.personalAvgSpm ?: 0.0}) · 가속도 ${c.swipeAccel1m ?: 0.0} · 고속 연속 ${c.fastSwipeStreak}회 · 과열 ${if (c.swipeOverheated) "감지됨" else "정상"}")
-            val envDesc = when {
-                c.isNearOrOccluded -> "센서 가림 감지 (0cm 근접)"
-                c.ambientLux != null && c.ambientLux <= 15f -> "암실 저조도 (${c.ambientLux.toInt()} lx)"
-                c.ambientLux != null -> "실내 조명 (${c.ambientLux.toInt()} lx)"
-                else -> "조도 미측정"
-            }
-            val bedtimeDistDesc = c.bedtimeDistanceMinutes?.let {
-                if (it < 0) "취침 ${-it}분 전" else if (it == 0) "취침 시각" else "취침 ${it}분 경과"
-            } ?: "취침거리 미측정"
-            Text("환경·취침: $envDesc · 화면 ${c.screenBrightness?.let { "$it/255" } ?: "-"} · $bedtimeDistDesc")
-            Text("품질: ${c.quality} · 취침 초과: ${c.bedtimePassedMinutes?.let { "$it 분" } ?: "미적용"}")
-            Text("적용 개입 확률 기준: ${"%.1f".format(effThreshold * 100)}% (${JevCandidatePolicy.thresholdBreakdown(s, c)})")
-        } ?: Text("ITV 화면에서는 숏폼 관측을 중단합니다. 대상 앱을 사용한 뒤 돌아와 요청 기록을 확인하세요.")
-        Text("전송 대기 $pending 건 · 확인이 필요한 실패 $failed 건")
-        OutlinedButton(onClick={vm.retryUploads()},enabled=!busy,modifier=Modifier.fillMaxWidth()) {Text("기록 전송 재시도")}
-        OutlinedButton(onClick={confirmReset=true},enabled=!busy,modifier=Modifier.fillMaxWidth()) {Text("테스트 관측 상태 초기화")}
-        Spacer(modifier = Modifier.height(6.dp))
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.45f)),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            val context = LocalContext.current
-            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("🚀 초기 화면(온보딩) 테스트 이동", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                Text(
-                    "현재의 사용 기록·목표·로그인 계정은 그대로 보존한 채, 앱을 처음 켰을 때 나오는 '권한 설정'과 '로그인 창' 화면으로 이동하여 변경 사항을 확인합니다.",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Button(
-                    onClick = {
-                        val intent = Intent(context, MainActivity::class.java).apply {
-                            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                            putExtra(MainActivity.EXTRA_FORCE_ONBOARDING, true)
-                        }
-                        context.startActivity(intent)
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary)
-                ) {
-                    Text("초기 화면으로 이동 (권한/로그인 테스트)", fontWeight = FontWeight.Bold)
-                }
-            }
-        }
-        OutlinedButton(
-            onClick = {
-                context.startActivity(Intent(context, CompanionPreviewActivity::class.java))
-            },
-            enabled = !busy,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("🐶 캐릭터 상호작용 미리보기 열기")
-        }
-    }
-    if(confirmReset) AlertDialog(onDismissRequest={confirmReset=false},title={Text("테스트 관측 상태를 초기화할까요?")},
-        text={Text("현재 구간·재평가·보류·구간 억제 상태만 초기화합니다. 기존 사용량·목표·서버 기록·저장된 평가 결과는 유지됩니다.")},
-        confirmButton={TextButton(onClick={confirmReset=false;vm.runtime.resetTestObservation()}){Text("초기화")}},
-        dismissButton={TextButton(onClick={confirmReset=false}){Text("취소")}})
-    feedback.firstOrNull()?.let { trial ->
-        TestSection("미완료 개입 평가 · ${trial.id.take(8)}") {
-            if(missionActive) Text("미션이 끝난 뒤 개입 시점의 적절성을 평가해 주세요.")
-            else key(trial.id) { FeedbackForm(busy){vm.feedback(trial.id,it)} }
-        }
-    }
-    Text("최근 요청 30건",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
-    if(trials.isEmpty())Text("아직 요청 기록이 없습니다.")
-    trials.forEach { trial ->
-        TestSection("${trial.testerId} · ${trial.source} · ${trial.id.take(8)}") {
-            Text(Instant.ofEpochMilli(trial.createdAt).atZone(ZoneId.systemDefault()).format(DateTimeFormatter.ofPattern("MM.dd HH:mm:ss")))
-            Text("상태: ${trial.state} · 확률: ${trial.probability?.let { "%.1f%%".format(it*100) } ?: "없음"}")
-            Text("실제 표시: ${if(trial.displayedAt==null)"없음" else "있음"} · 평가: ${trial.feedbackStatus ?: "대상 아님"}${trial.feedbackScore?.let { " · $it 점" } ?: ""}")
-            trial.error?.let {Text("오류: $it",color=MaterialTheme.colorScheme.error)}
-            if(trial.state in setOf("PENDING","UNKNOWN")) OutlinedButton(onClick={vm.retry(trial.id)},enabled=!busy) {Text("동일 요청 결과 확인")}
-        }
-    }
-}
-@Composable
-private fun FeedbackForm(busy: Boolean,onSubmit: (Int?)->Unit) {
-    var score by rememberSaveable {mutableStateOf<Int?>(null)}
-    Text("이번 개입은 적절했나요?")
-    Text("0점 매우 부적절 · 5점 보통 · 10점 매우 적절",style=MaterialTheme.typography.bodySmall)
-    Slider(value=score?.toFloat() ?: 5f,onValueChange={score=it.roundToInt()},valueRange=0f..10f,steps=9,enabled=!busy)
-    Text(score?.let {"선택: $it 점"} ?: "점수를 선택해 주세요.")
-    Button(onClick={onSubmit(score)},enabled=!busy && score!=null,modifier=Modifier.fillMaxWidth()) {Text("평가 제출")}
-    TextButton(onClick={onSubmit(null)},enabled=!busy) {Text("건너뛰기")}
 }
 
 /** Frozen measurement used for the probability check; changes only when the user presses refresh. */
@@ -638,6 +481,9 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
                     else -> r
                 }
             }
+            val ambientSnapshot = remember(refreshTick) {
+                com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(context).snapshot.value
+            }
 
             // 1. 시청 & 재진입 요약 박스
             CompactCheckGroup("1. 시청 시간 · 재진입") {
@@ -708,9 +554,6 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
                     value = "$bedtimeStatusStr$bedtimeDeltaStr",
                     highlight = adj.bedtimeDelta < 0
                 )
-                val ambientSnapshot = remember(refreshTick) {
-                    com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(context).snapshot.value
-                }
                 val postureStr = when (ambientSnapshot.posture) {
                     com.example.itv.domain.coaching.UserPosture.LYING_DOWN -> "수평/하향 각도 (전면 ${ambientSnapshot.pitchDegrees?.toInt() ?: 0}° · 경추 고하중 🐢)"
                     com.example.itv.domain.coaching.UserPosture.SITTING_OR_STANDING -> "정면 파지 각도 (전면 ${ambientSnapshot.pitchDegrees?.toInt() ?: 0}° · 어깨/허리 긴장 🙆)"
@@ -722,6 +565,40 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
                     label = "파지 각도 및 하중",
                     value = postureStr,
                     highlight = ambientSnapshot.posture == com.example.itv.domain.coaching.UserPosture.LYING_DOWN
+                )
+            }
+
+            // 2-1. 취침 전 환경 및 점수 판정 (Bedtime Score)
+            CompactCheckGroup("취침 전 환경 및 점수 판정 (Bedtime Score)") {
+                val score = ambientSnapshot.bedtimeScore
+                val isCandidate = ambientSnapshot.isBedtimeCandidate
+                CompactCheckRow(
+                    label = "취침 확신도 점수 (60점 이상)",
+                    value = "${score}점 / 100점 · ${if (isCandidate) "취침 케어 개입 대상 확정 ✅" else "일상 활동 상태 (미대상) ❌"}",
+                    highlight = isCandidate
+                )
+                CompactCheckRow(
+                    label = "점수 계산 내역",
+                    value = ambientSnapshot.bedtimeScoreBreakdown
+                )
+                val chargingText = when (ambientSnapshot.isCharging) {
+                    true -> "충전기 연결됨 (+15점) 🔌"
+                    false -> "미연결 (0점)"
+                    else -> "확인 대기 (0점)"
+                }
+                val wifiText = when (ambientSnapshot.isWifiConnected) {
+                    true -> "Wi-Fi 연결됨 (+10점) 📶"
+                    false -> "모바일 데이터/미연결 (0점)"
+                    else -> "확인 대기 (0점)"
+                }
+                CompactCheckRow(
+                    label = "소프트 맥락 (배터리·네트워크)",
+                    value = "$chargingText · $wifiText"
+                )
+                CompactCheckRow(
+                    label = "숏폼 진입 시 동작",
+                    value = if (isCandidate) "취침 3분기 케어(마음비우기/흑백모드/ASMR) 화면 발동" else "일반 숏폼 피로도/과열 개입 모델 적용",
+                    highlight = isCandidate
                 )
             }
 
@@ -816,7 +693,7 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
             }
             CompactCheckGroup("4. 동적 재평가 · 추가 시청") {
                 CompactCheckRow(
-                    label = "동적 간격 (60~300초)",
+                    label = "동적 간격 (30~360초)",
                     value = intervalDesc
                 )
                 CompactCheckRow(
@@ -905,6 +782,7 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
     }
 
     TestSection("테스트 도구") {
+        val context = LocalContext.current
         Text("YouTube와 Instagram의 실시간 스와이프 카운터와 세션을 초기화하여 새 테스트를 진행할 수 있습니다.", style = MaterialTheme.typography.bodySmall)
         OutlinedButton(
             onClick = {
@@ -918,6 +796,43 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
             modifier = Modifier.fillMaxWidth()
         ) {
             Text("스와이프 수 & Jev 관측 상태 초기화")
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.45f)),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("🚀 초기 화면(온보딩) 테스트 이동", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                Text(
+                    "현재의 사용 기록·목표·로그인 계정은 그대로 보존한 채, 앱을 처음 켰을 때 나오는 '권한 설정'과 '로그인 창' 화면으로 이동하여 변경 사항을 확인합니다.",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Button(
+                    onClick = {
+                        val intent = Intent(context, com.example.itv.MainActivity::class.java).apply {
+                            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                            putExtra(com.example.itv.MainActivity.EXTRA_FORCE_ONBOARDING, true)
+                        }
+                        context.startActivity(intent)
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary)
+                ) {
+                    Text("초기 화면으로 이동 (권한/로그인 테스트)", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+        OutlinedButton(
+            onClick = {
+                context.startActivity(Intent(context, CompanionPreviewActivity::class.java))
+            },
+            enabled = !busy,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("🐶 캐릭터 상호작용 미리보기 열기")
         }
     }
 }

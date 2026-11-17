@@ -5,6 +5,7 @@ import com.example.itv.infrastructure.observation.youtube.YoutubeProbe
 
 import android.accessibilityservice.AccessibilityService
 import android.content.Intent
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -71,6 +72,7 @@ open class WritingGuardService : AccessibilityService() {
     }
     override fun onServiceConnected() {
         super.onServiceConnected()
+        activeInstance = this
         WritingGuard.connected = true
         handler.removeCallbacks(poll)
         handler.post(poll)
@@ -172,6 +174,7 @@ open class WritingGuardService : AccessibilityService() {
         disconnect(); return super.onUnbind(intent)
     }
     private fun disconnect() {
+        if (activeInstance === this) activeInstance = null
         YoutubeProbe.enabled = false
         YoutubeProbe.clearBaseline()
         com.example.itv.infrastructure.storage.shortform.ShortformStores.pause()
@@ -182,4 +185,18 @@ open class WritingGuardService : AccessibilityService() {
         WritingGuard.checkedAt = 0L
     }
     override fun onDestroy() { disconnect(); super.onDestroy() }
+
+    companion object {
+        @Volatile
+        var activeInstance: AccessibilityService? = null
+
+        fun lockScreen(): Boolean {
+            val service = activeInstance ?: return false
+            return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN)
+            } else {
+                false
+            }
+        }
+    }
 }

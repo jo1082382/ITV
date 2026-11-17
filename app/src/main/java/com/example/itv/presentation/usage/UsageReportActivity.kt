@@ -3,6 +3,8 @@ import com.example.itv.domain.records.*
 import com.example.itv.composition.queryNightReport
 import com.example.itv.composition.queryUsageReport
 import com.example.itv.infrastructure.storage.shortform.ShortformPersonalStatsStore
+import com.example.itv.infrastructure.storage.MonthlyUsageArchiveStore
+import com.example.itv.infrastructure.storage.MonthlyArchiveSummary
 
 
 import androidx.compose.foundation.lazy.LazyRow
@@ -99,6 +101,11 @@ fun UsageRecordsContent(modifier: Modifier = Modifier) {
     var loading by remember { mutableStateOf(true) }
     var revision by remember { mutableIntStateOf(0) }
 
+    var selectedPastMonth by rememberSaveable { mutableStateOf<String?>(null) }
+    var pastMonthMenuExpanded by remember { mutableStateOf(false) }
+    val availablePastMonths = remember { MonthlyUsageArchiveStore.getAvailablePastMonthKeys() }
+    var pastMonthlySummary by remember { mutableStateOf<MonthlyArchiveSummary?>(null) }
+
     // Runs only while this tab is composed and the Activity is resumed.
     val owner = context.hostActivity()
     LaunchedEffect(owner) {
@@ -109,6 +116,16 @@ fun UsageRecordsContent(modifier: Modifier = Modifier) {
                 delay(60.seconds)
                 revision++
             }
+        }
+    }
+    LaunchedEffect(selectedPastMonth, revision) {
+        val targetMonth = selectedPastMonth
+        if (targetMonth != null) {
+            pastMonthlySummary = withContext(Dispatchers.IO) {
+                MonthlyUsageArchiveStore.getMonthlySummary(context, targetMonth)
+            }
+        } else {
+            pastMonthlySummary = null
         }
     }
     LaunchedEffect(days) { selected = null }
@@ -126,6 +143,17 @@ fun UsageRecordsContent(modifier: Modifier = Modifier) {
             report = result.first
             todayForComparison = result.second
             if (result.third != null) shortformSummary = result.third
+
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    MonthlyUsageArchiveStore.syncDailySnapshot(
+                        context = context,
+                        todayUsageReport = result.second,
+                        periodUsageReport = result.first,
+                        nightReport = nights
+                    )
+                }
+            }
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -144,7 +172,20 @@ fun UsageRecordsContent(modifier: Modifier = Modifier) {
         nights = null
         nightError = null
         try {
-            nights = withContext(Dispatchers.IO) { queryNightReport(context, 0) }
+            val loadedNights = withContext(Dispatchers.IO) { queryNightReport(context, 0) }
+            nights = loadedNights
+            todayForComparison?.let { todayRep ->
+                withContext(Dispatchers.IO) {
+                    runCatching {
+                        MonthlyUsageArchiveStore.syncDailySnapshot(
+                            context = context,
+                            todayUsageReport = todayRep,
+                            periodUsageReport = report,
+                            nightReport = loadedNights
+                        )
+                    }
+                }
+            }
         } catch (e: kotlinx.coroutines.CancellationException) { throw e }
         catch (_: Exception) { nightError = "화면 기록을 조회하지 못했습니다." }
     }
@@ -163,12 +204,12 @@ item(key="ai_history_open") {
  }
 }
 item {
-
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             listOf(1 to "오늘", 7 to "1주일", 30 to "1달").forEach { (n, title) ->
                 val periodColor = periodColor(n)
+                val isSelected = selectedPastMonth == null && days == n
                 FilterChip(
-                    selected = days == n,
+                    selected = isSelected,
                     colors = FilterChipDefaults.filterChipColors(
                         containerColor = periodColor.copy(alpha = 0.03f),
                         labelColor = MaterialTheme.colorScheme.onSurface,
@@ -176,27 +217,92 @@ item {
                         selectedLabelColor = ChartInk
                     ),
                     border = BorderStroke(
-                        if (days == n) 2.5.dp else 1.dp,
-                        if (days == n) periodColor else periodColor.copy(alpha = 0.25f)
+                        if (isSelected) 2.5.dp else 1.dp,
+                        if (isSelected) periodColor else periodColor.copy(alpha = 0.25f)
                     ),
-                    onClick = { days = n },
+                    onClick = {
+                        selectedPastMonth = null
+                        days = n
+                    },
                     label = { Text(title, Modifier.fillMaxWidth(), textAlign = TextAlign.Center) },
                     modifier = Modifier.weight(1f)
                 )
             }
+            val isPastSelected = selectedPastMonth != null
+            val pastColor = Color(0xFF6750A4)
+            Box(modifier = Modifier.weight(1.3f)) {
+                FilterChip(
+                    selected = isPastSelected,
+                    colors = FilterChipDefaults.filterChipColors(
+                        containerColor = pastColor.copy(alpha = 0.03f),
+                        labelColor = MaterialTheme.colorScheme.onSurface,
+                        selectedContainerColor = pastColor.copy(alpha = 0.18f),
+                        selectedLabelColor = ChartInk
+                    ),
+                    border = BorderStroke(
+                        if (isPastSelected) 2.5.dp else 1.dp,
+                        if (isPastSelected) pastColor else pastColor.copy(alpha = 0.25f)
+                    ),
+                    onClick = { pastMonthMenuExpanded = true },
+                    label = {
+                        val labelText = if (selectedPastMonth != null) {
+                            val monthNum = selectedPastMonth!!.split("-").getOrNull(1)?.toIntOrNull() ?: 0
+                            "${monthNum}월 ▼"
+                        } else {
+                            "지나간 달 ▼"
+                        }
+                        Text(labelText, Modifier.fillMaxWidth(), textAlign = TextAlign.Center, maxLines = 1)
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                DropdownMenu(
+                    expanded = pastMonthMenuExpanded,
+                    onDismissRequest = { pastMonthMenuExpanded = false }
+                ) {
+                    availablePastMonths.forEachIndexed { index, key ->
+                        val parts = key.split("-")
+                        val y = parts.getOrNull(0) ?: ""
+                        val m = parts.getOrNull(1)?.toIntOrNull() ?: 0
+                        val displayLabel = "${y}년 ${m}월 (${index + 1}달 전)"
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    displayLabel,
+                                    fontWeight = if (selectedPastMonth == key) FontWeight.Bold else FontWeight.Normal
+                                )
+                            },
+                            onClick = {
+                                selectedPastMonth = key
+                                pastMonthMenuExpanded = false
+                            }
+                        )
+                    }
+                }
+            }
         }
-
 }
 item {
         Text(
-            if (days == 1) "오늘 00:00부터 조회 시점까지" else "오늘을 포함한 최근 ${days}일 · 시간대별 하루 평균",
+            if (selectedPastMonth != null) {
+                val parts = selectedPastMonth!!.split("-")
+                val y = parts.getOrNull(0) ?: ""
+                val m = parts.getOrNull(1)?.toIntOrNull() ?: ""
+                "${y}년 ${m}월 아카이브 요약 리포트 (최대 6개월 보관)"
+            } else if (days == 1) {
+                "오늘 00:00부터 조회 시점까지"
+            } else {
+                "오늘을 포함한 최근 ${days}일 · 시간대별 하루 평균"
+            },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-
 }
-item {
-
+if (selectedPastMonth != null) {
+    item(key = "past_monthly_report") {
+        PastMonthlyReportCard(selectedPastMonth!!, pastMonthlySummary)
+    }
+} else {
+    item {
         if (loading && report == null) {
             OutlinedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
                 Column(Modifier.fillMaxWidth().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally,
@@ -206,9 +312,8 @@ item {
                 }
             }
         }
-
-}
-item {
+    }
+    item {
         error?.let { message ->
             OutlinedCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
                 Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -222,95 +327,88 @@ item {
                 }
             }
         }
-
-}
-item(key = "summary_toggle") {
-    RecordSectionToggle("🕒", "요약", periodColor(days), summaryOpen) { summaryOpen = !summaryOpen }
-}
-report?.let { data ->
-if (summaryOpen) {
-item {
-
-            OutlinedCard(
-                Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                colors = CardDefaults.outlinedCardColors(containerColor = RecordContentGreen, contentColor = ChartInk)
-            ) {
-                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("기간 요약", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    SummaryValue("확인된 총사용시간", summaryDuration(data.total))
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                    if (data.days > 1) {
-                        SummaryValue("하루 평균", summaryDuration(data.total / data.days))
-                    }
-                    UsageHighlights(data)
-
-                }
-            }
-
-}
-}
-}
-item(key = "shortform_personal_toggle") {
-    RecordSectionToggle("🎬", "숏폼 사용량", periodColor(days), shortformOpen) { shortformOpen = !shortformOpen }
-}
-if (shortformOpen) {
-item(key = "shortform_personal_section") {
-    ShortformPersonalUsageSection(shortformSummary, days)
-}
-}
-item(key = "hourly_toggle") {
-    RecordSectionToggle("📊", "시간대별 사용량", periodColor(days), hourlyOpen) { hourlyOpen = !hourlyOpen }
-}
-report?.let { data ->
-if (hourlyOpen) {
-if (days > 1) {
-dailyDetailItems?.invoke(this)
-} else {
-item(key = "hourly_usage_chart", contentType = "hourly_chart") {
-            UsageChart(data, selected) { selected = it }
-
-}
-
-        
-            val detailHour = selected
-            if (detailHour != null && detailHour in data.values.indices) {
-                item(key = "detail_header") {
-                    TextButton(onClick = { selected = null }) { Text("시간대별 상세 접기") }
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("$detailHour:00–${detailHour + 1}:00", fontWeight = FontWeight.Bold)
-                        Text("${if (data.days == 1) "오늘 사용시간" else "하루 평균 사용시간"} ${hourlyDuration(data.values[detailHour])}")
-                        Text(if (data.days == 1) "이 시간대에 사용한 앱" else "앱별 시간대 하루 평균", style = MaterialTheme.typography.titleMedium)
+    }
+    item(key = "summary_toggle") {
+        RecordSectionToggle("🕒", "요약", periodColor(days), summaryOpen) { summaryOpen = !summaryOpen }
+    }
+    report?.let { data ->
+        if (summaryOpen) {
+            item {
+                OutlinedCard(
+                    Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    colors = CardDefaults.outlinedCardColors(containerColor = RecordContentGreen, contentColor = ChartInk)
+                ) {
+                    Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text("기간 요약", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        SummaryValue("확인된 총사용시간", summaryDuration(data.total))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        if (data.days > 1) {
+                            SummaryValue("하루 평균", summaryDuration(data.total / data.days))
+                        }
+                        UsageHighlights(data)
                     }
                 }
-                item(key = "today_shortform_hour_$detailHour") {
-                    ShortformHourPanel(LocalDate.now().toString(), detailHour)
+            }
+        }
+    }
+    item(key = "shortform_personal_toggle") {
+        RecordSectionToggle("🎬", "숏폼 사용량", periodColor(days), shortformOpen) { shortformOpen = !shortformOpen }
+    }
+    if (shortformOpen) {
+        item(key = "shortform_personal_section") {
+            ShortformPersonalUsageSection(shortformSummary, days)
+        }
+    }
+    item(key = "hourly_toggle") {
+        RecordSectionToggle("📊", "시간대별 사용량", periodColor(days), hourlyOpen) { hourlyOpen = !hourlyOpen }
+    }
+    report?.let { data ->
+        if (hourlyOpen) {
+            if (days > 1) {
+                dailyDetailItems?.invoke(this)
+            } else {
+                item(key = "hourly_usage_chart", contentType = "hourly_chart") {
+                    UsageChart(data, selected) { selected = it }
                 }
-                val apps = data.hourlyApps.getOrNull(detailHour).orEmpty().filter { it.minutes >= 1.0 }
-                if (apps.isEmpty()) item { Text("확인된 앱 사용 내역이 없습니다.") }
-                items(count = apps.size, key = { index -> "app_${apps[index].packageName}" }) { index ->
-                    AppUsageCard(apps[index], periodColor(data.days))
+                val detailHour = selected
+                if (detailHour != null && detailHour in data.values.indices) {
+                    item(key = "detail_header") {
+                        TextButton(onClick = { selected = null }) { Text("시간대별 상세 접기") }
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("$detailHour:00–${detailHour + 1}:00", fontWeight = FontWeight.Bold)
+                            Text("${if (data.days == 1) "오늘 사용시간" else "하루 평균 사용시간"} ${hourlyDuration(data.values[detailHour])}")
+                            Text(if (data.days == 1) "이 시간대에 사용한 앱" else "앱별 시간대 하루 평균", style = MaterialTheme.typography.titleMedium)
+                        }
+                    }
+                    item(key = "today_shortform_hour_$detailHour") {
+                        ShortformHourPanel(LocalDate.now().toString(), detailHour)
+                    }
+                    val apps = data.hourlyApps.getOrNull(detailHour).orEmpty().filter { it.minutes >= 1.0 }
+                    if (apps.isEmpty()) item { Text("확인된 앱 사용 내역이 없습니다.") }
+                    items(count = apps.size, key = { index -> "app_${apps[index].packageName}" }) { index ->
+                        AppUsageCard(apps[index], periodColor(data.days))
+                    }
                 }
             }
-
-}
-}
-}
-item(key = "goals_toggle") {
-    RecordSectionToggle("🚩", "목표와 비교", periodColor(days), goalsOpen) { goalsOpen = !goalsOpen }
-}
-if (goalsOpen) {
-item(key = "goal_comparison") {
-    GoalComparisonSection(comparisonGoals, report, todayForComparison)
-}
-}
-item(key = "night_toggle") {
-    RecordSectionToggle("🛏️", "취침 추정", periodColor(days), nightOpen) { nightOpen = !nightOpen }
-}
-if (nightOpen) {
-item(key = "night_comparison") {
-    NightSummary(nights, nightError, days)
-}
+        }
+    }
+    item(key = "goals_toggle") {
+        RecordSectionToggle("🚩", "목표와 비교", periodColor(days), goalsOpen) { goalsOpen = !goalsOpen }
+    }
+    if (goalsOpen) {
+        item(key = "goal_comparison") {
+            GoalComparisonSection(comparisonGoals, report, todayForComparison)
+        }
+    }
+    item(key = "night_toggle") {
+        RecordSectionToggle("🛏️", "취침 추정", periodColor(days), nightOpen) { nightOpen = !nightOpen }
+    }
+    if (nightOpen) {
+        item(key = "night_comparison") {
+            NightSummary(nights, nightError, days)
+        }
+    }
 }
 
     }
@@ -575,3 +673,165 @@ private fun RecordSectionToggle(icon: String, title: String, periodTint: Color, 
 
 /** Hour-bin labels use minutes consistently with the chart axis. */
 internal fun hourlyDuration(minutes: Double): String = "${minutes.roundToLong()}분"
+
+@Composable
+internal fun PastMonthlyReportCard(monthKey: String, summary: MonthlyArchiveSummary?) {
+    val parts = monthKey.split("-")
+    val year = parts.getOrNull(0) ?: ""
+    val month = parts.getOrNull(1)?.toIntOrNull() ?: ""
+    val monthTitle = "${year}년 ${month}월"
+
+    if (summary == null || summary.activeDays == 0) {
+        OutlinedCard(
+            Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(24.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            colors = CardDefaults.outlinedCardColors(containerColor = RecordContentGreen, contentColor = ChartInk)
+        ) {
+            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("$monthTitle 기록이 없습니다", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text(
+                    "안드로이드 운영체제(OS)의 자체 사용 통계는 약 10~14일간만 보존되어, 앱 설치 이전의 지난달 기록은 시스템에서 이미 자동 정리되어 비어 있는 것이 정상입니다.\n\n" +
+                    "앞으로는 앱이 매일의 스마트폰 사용량, 숏폼 시청, 취침/수면 추정, 평일/주말 판정 데이터를 기기 내부 저장소에 안전하게 기록하여, 이번 달부터 최대 6개월간 영구 보존됩니다.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = ChartInk.copy(alpha = 0.85f)
+                )
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color.White.copy(alpha = 0.6f)
+                ) {
+                    Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("💡", style = MaterialTheme.typography.titleMedium)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "현재부터 6개월간 매달의 사용량 변화와 휴일/일과 패턴을 비교해볼 수 있어요.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = ChartSecondary
+                        )
+                    }
+                }
+            }
+        }
+        return
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        // 1. 월간 총 사용량 요약 카드
+        OutlinedCard(
+            Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(24.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            colors = CardDefaults.outlinedCardColors(containerColor = RecordContentGreen, contentColor = ChartInk)
+        ) {
+            Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("🕒", style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.width(6.dp))
+                    Text("$monthTitle 총 사용량 요약", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                }
+                SummaryValue("기록된 일수", "${summary.activeDays}일")
+                SummaryValue("총 사용시간", summaryDuration(summary.totalPhoneMs / 60000.0))
+                SummaryValue("하루 평균", summaryDuration(summary.phoneDailyAvgMs / 60000.0))
+            }
+        }
+
+        // 2. 숏폼 사용 요약 카드
+        OutlinedCard(
+            Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(24.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            colors = CardDefaults.outlinedCardColors(containerColor = RecordContentGreen, contentColor = ChartInk)
+        ) {
+            Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("🎬", style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.width(6.dp))
+                    Text("$monthTitle 숏폼 시청 요약", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                }
+                SummaryValue("월간 숏폼 총 시청시간", summaryDuration(summary.shortformTotalMs / 60000.0))
+                SummaryValue("하루 평균 숏폼 시청", summaryDuration(summary.shortformDailyAvgMs / 60000.0))
+                SummaryValue("1회 세션 평균", summaryDuration(summary.shortformSessionAvgMs / 60000.0))
+            }
+        }
+
+        // 3. 일과 날 vs 쉬는 날 패턴 카드
+        OutlinedCard(
+            Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(24.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            colors = CardDefaults.outlinedCardColors(containerColor = RecordContentGreen, contentColor = ChartInk)
+        ) {
+            Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("⚖️", style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.width(6.dp))
+                    Text("일과 날 vs 쉬는 날 패턴", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                }
+                SummaryValue("판정 일수", "일과 ${summary.workdayDaysCount}일 / 쉬는 날 ${summary.restdayDaysCount}일")
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                SummaryValue("일과 날 스마트폰 평균", summaryDuration(summary.workdayPhoneAvgMs / 60000.0))
+                SummaryValue("쉬는 날 스마트폰 평균", summaryDuration(summary.restdayPhoneAvgMs / 60000.0))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                SummaryValue("일과 날 숏폼 평균", summaryDuration(summary.workdayShortformAvgMs / 60000.0))
+                SummaryValue("쉬는 날 숏폼 평균", summaryDuration(summary.restdayShortformAvgMs / 60000.0))
+            }
+        }
+
+        // 4. 취침 / 수면 추정 카드
+        if (summary.displayBedtime != null || summary.displayWakeup != null) {
+            OutlinedCard(
+                Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(24.dp),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                colors = CardDefaults.outlinedCardColors(containerColor = RecordContentGreen, contentColor = ChartInk)
+            ) {
+                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("🛏️", style = MaterialTheme.typography.titleMedium)
+                        Spacer(Modifier.width(6.dp))
+                        Text("취침 및 수면 추정", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    }
+                    summary.displayBedtime?.let { SummaryValue("평균 취침 시각", it) }
+                    summary.displayWakeup?.let { SummaryValue("평균 기상 시각", it) }
+                }
+            }
+        }
+
+        // 5. 일별 기록 내역
+        if (summary.dailyRecords.isNotEmpty()) {
+            OutlinedCard(
+                Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(24.dp),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                colors = CardDefaults.outlinedCardColors(containerColor = Color.White, contentColor = ChartInk)
+            ) {
+                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("일별 기록 상세 (${summary.dailyRecords.size}일)", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    summary.dailyRecords.sortedByDescending { it.date }.forEach { rec ->
+                        Row(
+                            Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column {
+                                Text(rec.date, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
+                                Text(
+                                    "${if (rec.dayType == "REST_DAY") "쉬는 날" else "일과 날"} · 숏폼 ${summaryDuration(rec.shortformMs / 60000.0)}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = ChartSecondary
+                                )
+                            }
+                            Text(
+                                summaryDuration(rec.totalPhoneMs / 60000.0),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+

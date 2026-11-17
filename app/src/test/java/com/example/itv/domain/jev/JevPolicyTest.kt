@@ -80,9 +80,43 @@ class JevPolicyTest {
         tracker.observe((seconds+1)*1000L,JevSettings.INSTAGRAM,JevSettings.INSTAGRAM)
         return before to tracker.states.getValue(JevSettings.INSTAGRAM).id
     }
-    @Test fun sessionBoundaryIsExactly600VerifiedSeconds() {
-        val same=sessionAfterAway(599);assertEquals(same.first,same.second)
-        val fresh=sessionAfterAway(600);assertNotEquals(fresh.first,fresh.second)
+    @Test fun sessionBoundaryIsExactly900VerifiedSeconds() {
+        val same=sessionAfterAway(899);assertEquals(same.first,same.second)
+        val fresh=sessionAfterAway(900);assertNotEquals(fresh.first,fresh.second)
+    }
+    @Test fun screenOffFor3MinutesResetsSessionImmediately() {
+        var id=0
+        val tracker=JevSessionTracker {"id-${id++}"}
+        tracker.observe(0,JevSettings.INSTAGRAM,JevSettings.INSTAGRAM)
+        val before=tracker.states.getValue(JevSettings.INSTAGRAM).id
+        tracker.observe(1000,"LOCKED",null)
+        for(i in 2..180) tracker.observe(i*1000L,"LOCKED",null)
+        tracker.observe(181_000L,JevSettings.INSTAGRAM,JevSettings.INSTAGRAM)
+        val after=tracker.states.getValue(JevSettings.INSTAGRAM).id
+        assertNotEquals(before, after)
+    }
+    @Test fun interruptionUnder90SecondsPreservesContinuousViewing() {
+        val tracker=JevSessionTracker {"id"}
+        tracker.observe(0,JevSettings.INSTAGRAM,JevSettings.INSTAGRAM)
+        tracker.observe(1000,JevSettings.INSTAGRAM,JevSettings.INSTAGRAM)
+        assertEquals(1000L, tracker.states.getValue(JevSettings.INSTAGRAM).continuousMs)
+        for(i in 2..60) tracker.observe(i*1000L,"com.kakao.talk",null)
+        tracker.observe(61_000L,JevSettings.INSTAGRAM,JevSettings.INSTAGRAM)
+        assertEquals(2000L, tracker.states.getValue(JevSettings.INSTAGRAM).continuousMs)
+    }
+    @Test fun resetContinuousClearsContinuousViewingWhilePreservingSessionTotals() {
+        val tracker = JevSessionTracker { "session-1" }
+        tracker.observe(0, JevSettings.INSTAGRAM, JevSettings.INSTAGRAM)
+        tracker.observe(1000, JevSettings.INSTAGRAM, JevSettings.INSTAGRAM)
+        val state = tracker.states.getValue(JevSettings.INSTAGRAM)
+        assertEquals(1000L, state.totalMs)
+        assertEquals(1000L, state.continuousMs)
+
+        // 미션 휴식 성공 시 resetContinuous 호출
+        tracker.resetContinuous(JevSettings.INSTAGRAM)
+        assertEquals(1000L, state.totalMs)
+        assertEquals(0L, state.continuousMs)
+        assertEquals("session-1", state.id)
     }
     @Test fun restartRestoresTotalsButNotContinuousViewing() {
         val tracker=JevSessionTracker {"new"}
@@ -140,16 +174,16 @@ class JevPolicyTest {
         assertEquals(0.0, adj10.fatigueDelta, 0.001)
         assertEquals(0.0, adj10.resistanceDelta, 0.001)
 
-        // 2. 30분 연속 시청: 피로도 -5%p
+        // 2. 30분 연속 시청: 피로도 -2%p
         val base30 = base.copy(continuousMs = 1800_000L)
         val adj30 = JevCandidatePolicy.computeThresholdAdjustment(s, base30)
-        assertEquals(-0.05, adj30.fatigueDelta, 0.001)
+        assertEquals(-0.02, adj30.fatigueDelta, 0.001)
         assertTrue("CONTINUOUS_FATIGUE" in JevCandidatePolicy.reasons(base30, s))
 
-        // 3. 45분 이상 연속 시청: 피로도 최대 -10%p
+        // 3. 45분 이상 연속 시청: 피로도 최대 -4%p
         val base45 = base.copy(continuousMs = 2700_000L)
         val adj45 = JevCandidatePolicy.computeThresholdAdjustment(s, base45)
-        assertEquals(-0.10, adj45.fatigueDelta, 0.001)
+        assertEquals(-0.04, adj45.fatigueDelta, 0.001)
 
         // 4. 직전 개입에서 '나중에' 선택 후 계속 시청: 저항 -5%p
         val resistedLater = base.copy(
@@ -170,7 +204,7 @@ class JevPolicyTest {
         val adjIgnored = JevCandidatePolicy.computeThresholdAdjustment(s, ignoredNoResponse)
         assertEquals(-0.06, adjIgnored.resistanceDelta, 0.001)
 
-        // 6. 30분 연속 시청 + 나중에 연속 2회 미룸: 피로(-5%p) + 저항(-8%p) = -13%p 보정 (0.80 -> 0.67)
+        // 6. 30분 연속 시청 + 나중에 연속 2회 미룸: 피로(-2%p) + 저항(-8%p) = -10%p 보정 (0.80 -> 0.70)
         val combined = base.copy(
             continuousMs = 1800_000L,
             lastInterventionOutcome = "LATER",
@@ -178,9 +212,9 @@ class JevPolicyTest {
             resistanceStreak = 2
         )
         val adjCombined = JevCandidatePolicy.computeThresholdAdjustment(s, combined)
-        assertEquals(-0.05, adjCombined.fatigueDelta, 0.001)
+        assertEquals(-0.02, adjCombined.fatigueDelta, 0.001)
         assertEquals(-0.08, adjCombined.resistanceDelta, 0.001)
-        assertEquals(0.67, adjCombined.effectiveThreshold, 0.001)
+        assertEquals(0.70, adjCombined.effectiveThreshold, 0.001)
     }
     @Test fun bedtimeEnvironmentThresholdAdjustment() {
         val s = JevSettings(probabilityThreshold = 0.50, personalizedEnabled = true)
@@ -261,5 +295,30 @@ class JevPolicyTest {
         assertEquals(1000L,afterReset.totalMs)
         assertEquals(1000L,afterReset.continuousMs)
         assertEquals(0,afterReset.returns.size)
+    }
+
+    @Test fun dynamicReevaluationIntervalTiers() {
+        // null or non-finite -> 기본 300초
+        assertEquals(300, JevCandidatePolicy.calculateDynamicInterval(0.80, null))
+        assertEquals(300, JevCandidatePolicy.calculateDynamicInterval(0.80, Double.NaN))
+
+        // 1. 기준 초과 또는 일치 (gap <= 0%p): 최단 30초
+        assertEquals(30, JevCandidatePolicy.calculateDynamicInterval(0.80, 0.85))
+        assertEquals(30, JevCandidatePolicy.calculateDynamicInterval(0.80, 0.80))
+
+        // 2. 작은 격차 (0%p < gap <= 15%p): 30초 ~ 90초 (빠른 재평가)
+        assertEquals(60, JevCandidatePolicy.calculateDynamicInterval(0.80, 0.725)) // gap 7.5%p -> 60초
+        assertEquals(90, JevCandidatePolicy.calculateDynamicInterval(0.80, 0.65))  // gap 15.0%p -> 90초
+
+        // 3. 중간 격차 (15%p < gap <= 30%p): 90초 ~ 210초
+        assertEquals(150, JevCandidatePolicy.calculateDynamicInterval(0.80, 0.575)) // gap 22.5%p -> 150초
+        assertEquals(210, JevCandidatePolicy.calculateDynamicInterval(0.80, 0.50))  // gap 30.0%p -> 210초
+
+        // 4. 큰 격차 (30%p < gap <= 50%p): 210초 ~ 360초
+        assertEquals(285, JevCandidatePolicy.calculateDynamicInterval(0.80, 0.40)) // gap 40.0%p -> 285초
+        assertEquals(360, JevCandidatePolicy.calculateDynamicInterval(0.80, 0.30)) // gap 50.0%p -> 360초
+
+        // 5. 50%p 초과 격차: 최대 360초 고정
+        assertEquals(360, JevCandidatePolicy.calculateDynamicInterval(0.80, 0.10)) // gap 70.0%p -> 360초
     }
 }

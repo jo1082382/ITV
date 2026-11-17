@@ -5,6 +5,9 @@
     <uses-permission
         android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions" />
+    <uses-permission
+        android:name="android.permission.WRITE_SECURE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.INTERNET" />
 
@@ -87,6 +90,15 @@
         <activity
             android:name=".presentation.coaching.YoutubeProbeActivity"
             android:exported="false" />
-    <activity android:name=".presentation.usage.AiHistoryActivity" android:exported="false" />
+        <activity android:name=".presentation.usage.AiHistoryActivity" android:exported="false" />
+
+        <!-- 수면 ASMR 알림창 제어 리시버 (앱 진입 없이 알림창에서 즉시 끄기) -->
+        <receiver
+            android:name=".infrastructure.sleep.AsmrStopReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.example.itv.ACTION_STOP_ASMR" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

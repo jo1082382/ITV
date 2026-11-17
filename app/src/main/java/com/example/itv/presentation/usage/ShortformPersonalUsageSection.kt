@@ -28,6 +28,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.example.itv.domain.records.EstimatedDayType
 import com.example.itv.infrastructure.storage.shortform.ShortformPersonalStatsStore
 import com.example.itv.infrastructure.storage.shortform.ShortformPersonalStatsStore.PersonalizedSummary
 import com.example.itv.infrastructure.storage.shortform.ShortformPersonalStatsStore.PersonalizedTargetMetrics
@@ -558,6 +559,91 @@ private fun PersonalizedMetricsContent(m: PersonalizedTargetMetrics, accent: Col
                 )
             }
         }
+    }
+
+    // 4. 일과 날 vs 쉬는 날 하이브리드 판정 & 개입 연동 (캘린더 요일 + 총 사용량 + 숏폼)
+    PersonalSubCard(title = "4. 일과 날 vs 쉬는 날 하이브리드 판정 & 개입 연동", accent = accent) {
+        val todayDecisionText = when (m.hybridEstimatedDayType) {
+            EstimatedDayType.REST_DAY -> "오늘(현재)은 쉬는 날(휴일) 모드가 적용 중입니다."
+            EstimatedDayType.WORKDAY -> "오늘(현재)은 일과 날(루틴) 모드가 적용 중입니다."
+            null -> "오늘 일과/휴일 모드를 학습 및 판정 중입니다."
+        }
+        val reasonText = m.hybridDayTypeReason ?: when {
+            m.isPhoneBimodalConfident ->
+                "최근 휴대폰 총 사용량(${m.phoneEstimatedWorkdayCount}일 일과 / ${m.phoneEstimatedRestdayCount}일 휴일)과 캘린더 요일을 결합하여 기준선을 안정적으로 도출했습니다."
+            else ->
+                "기록이 더 누적될수록 캘린더 요일과 사용량 결합 모델이 더욱 정밀해집니다."
+        }
+
+        Text(todayDecisionText, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = CardInk)
+        Text(reasonText, style = MaterialTheme.typography.bodySmall, color = CardSubInk)
+
+        if (m.effectiveSessionMsForToday > 0L) {
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = accent.copy(alpha = 0.08f),
+                border = BorderStroke(1.dp, accent.copy(alpha = 0.20f))
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("오늘 적용 1회 세션 기준선", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold, color = CardInk)
+                    Text(
+                        "${formatFullDuration(m.effectiveSessionMsForToday)} (${m.hybridEstimatedDayType?.label ?: "기준"})",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Bold,
+                        color = accent
+                    )
+                }
+            }
+        }
+
+        HorizontalDivider(color = ItvLine)
+
+        // ① 휴대폰 전체 일별 총 사용량 기준
+        Text("① 휴대폰 일별 총 사용량 기준 (기기 전체)", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = CardInk)
+        MetricKeyValueRow(
+            leftLabel = "일과 날 총 사용량",
+            leftValue = "${formatFullDuration(m.phoneWorkdayAvgDailyMs)} (${m.phoneEstimatedWorkdayCount}일 평균)",
+            rightLabel = "쉬는 날 총 사용량",
+            rightValue = "${formatFullDuration(m.phoneRestdayAvgDailyMs)} (${m.phoneEstimatedRestdayCount}일 평균)"
+        )
+        MetricKeyValueRow(
+            leftLabel = "총 사용량 구분 기준",
+            leftValue = "하루 총 ${formatFullDuration(m.phoneSplitThresholdMs)}",
+            rightLabel = "오늘 활동 판정",
+            rightValue = when (m.todayEstimatedDayTypeByPhone) {
+                EstimatedDayType.REST_DAY -> "쉬는 날 패턴 (${formatFullDuration(m.totalPhoneTodayMs)})"
+                EstimatedDayType.WORKDAY -> "일과 날 패턴 (${formatFullDuration(m.totalPhoneTodayMs)})"
+                null -> if (m.totalPhoneTodayMs > 0L) formatFullDuration(m.totalPhoneTodayMs) else "집계 중"
+            }
+        )
+
+        HorizontalDivider(color = ItvLine)
+
+        // ② 숏폼 시청 사용량 기준
+        Text("② 숏폼 시청 사용량 기준 ($targetTitle)", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = CardInk)
+        MetricKeyValueRow(
+            leftLabel = "일과 날 숏폼 일평균",
+            leftValue = "${formatFullDuration(m.workdayAvgDailyMs)} (세션 ${formatFullDuration(m.workdayAvgSessionMs)})",
+            rightLabel = "쉬는 날 숏폼 일평균",
+            rightValue = "${formatFullDuration(m.restdayAvgDailyMs)} (세션 ${formatFullDuration(m.restdayAvgSessionMs)})"
+        )
+        MetricKeyValueRow(
+            leftLabel = "숏폼 구분 기준",
+            leftValue = "일일 ${formatFullDuration(m.daySplitThresholdMs)}",
+            rightLabel = "숏폼 패턴 신뢰도",
+            rightValue = if (m.isBimodalConfident) "안정적 (차이 뚜렷)" else "학습 중 (기록 ${m.estimatedWorkdayCount + m.estimatedRestdayCount}일)"
+        )
+
+        HorizontalDivider(color = ItvLine)
+        Text(
+            "💡 캘린더 요일(평일/주말) 사전 확률과 사용량을 하이브리드 결합하여 쉬는 날에는 여유 세션을 허용하고, 일과 날에는 조기 집중 개입을 실행합니다. (총 사용량은 Android 시스템 보관 주기 10~14일치 기반 집계)",
+            style = MaterialTheme.typography.bodySmall,
+            color = CardSubInk
+        )
     }
 }
 

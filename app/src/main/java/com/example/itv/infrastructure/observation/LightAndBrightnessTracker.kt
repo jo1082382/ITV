@@ -10,6 +10,9 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -71,7 +74,12 @@ data class AmbientSnapshot(
     val rollDegrees: Float? = null,
     val gravityZ: Float? = null,
     val postureExplanation: String = "자세 판별 대기 중",
-    val isStationary: Boolean = false
+    val isStationary: Boolean = false,
+    val isCharging: Boolean? = null,
+    val isWifiConnected: Boolean? = null,
+    val bedtimeScore: Int = 0,
+    val isBedtimeCandidate: Boolean = false,
+    val bedtimeScoreBreakdown: String = ""
 )
 
 class LightAndBrightnessTracker(context: Context) : SensorEventListener {
@@ -496,6 +504,10 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         if (old.bedtimePhase != new.bedtimePhase) return true
         if (old.posture != new.posture) return true
         if (old.isStationary != new.isStationary) return true
+        if (old.bedtimeScore != new.bedtimeScore) return true
+        if (old.isBedtimeCandidate != new.isBedtimeCandidate) return true
+        if (old.isCharging != new.isCharging) return true
+        if (old.isWifiConnected != new.isWifiConnected) return true
         val oldPitch = old.pitchDegrees ?: 0f
         val newPitch = new.pitchDegrees ?: 0f
         if (abs(newPitch - oldPitch) >= 2f) return true
@@ -714,6 +726,93 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
             isNear, lux, isCurrentlyStationary
         )
 
+        // 배터리 소모 0을 위해 시간대나 암실/자세 조건 중 일부가 통과되었을 때만 1회성 소프트 맥락 조회
+        val isBedtimeTimeWindow = bedtimePhase == BedtimePhase.APPROACHING || bedtimePhase == BedtimePhase.PAST_BEDTIME
+        val isLikelyNight = isBedtimeTimeWindow || isDarkAmbient || posture == com.example.itv.domain.coaching.UserPosture.LYING_DOWN
+
+        var isCharging: Boolean? = null
+        var isWifi: Boolean? = null
+
+        if (isLikelyNight) {
+            try {
+                val batteryIntent = appContext.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+                val plugged = batteryIntent?.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1) ?: -1
+                isCharging = plugged == BatteryManager.BATTERY_PLUGGED_AC ||
+                             plugged == BatteryManager.BATTERY_PLUGGED_USB ||
+                             plugged == BatteryManager.BATTERY_PLUGGED_WIRELESS
+            } catch (_: Exception) {}
+
+            try {
+                val cm = appContext.getSystemService(ConnectivityManager::class.java)
+                val activeNetwork = cm?.activeNetwork
+                val caps = cm?.getNetworkCapabilities(activeNetwork)
+                isWifi = caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+            } catch (_: Exception) {}
+        }
+
+        // 취침 확신도 점수 계산 (100점 만점)
+        var score = 0
+        val breakdownList = mutableListOf<String>()
+
+        // 1) 시간대 (최대 35점)
+        when (bedtimePhase) {
+            BedtimePhase.PAST_BEDTIME -> {
+                score += 35
+                breakdownList.add("심야취침(+35)")
+            }
+            BedtimePhase.APPROACHING -> {
+                score += 25
+                breakdownList.add("취침임박(+25)")
+            }
+            else -> {}
+        }
+
+        // 2) 암실/조도 (최대 35점)
+        if (lux != null) {
+            when {
+                lux <= 5f -> {
+                    score += 35
+                    breakdownList.add("암실(+35)")
+                }
+                lux <= 15f -> {
+                    score += 25
+                    breakdownList.add("어두움(+25)")
+                }
+                lux <= 30f -> {
+                    score += 10
+                    breakdownList.add("약한조명(+10)")
+                }
+            }
+        }
+
+        // 3) 자세 (누움 최대 20점)
+        if (posture == com.example.itv.domain.coaching.UserPosture.LYING_DOWN) {
+            score += 20
+            breakdownList.add("누운자세(+20)")
+        }
+
+        // 4) 정지 상태 (가만히 있음 최대 10점)
+        if (isCurrentlyStationary) {
+            score += 10
+            breakdownList.add("정지상태(+10)")
+        }
+
+        // 5) [보조 소프트 맥락] 충전 중 (+15점)
+        if (isCharging == true) {
+            score += 15
+            breakdownList.add("충전중(+15)")
+        }
+
+        // 6) [보조 소프트 맥락] Wi-Fi 연결 (+10점)
+        if (isWifi == true) {
+            score += 10
+            breakdownList.add("Wi-Fi(+10)")
+        }
+
+        val bedtimeScore = score.coerceIn(0, 100)
+        val isBedtimeCandidate = bedtimeScore >= 60
+        val bedtimeScoreBreakdown = if (breakdownList.isEmpty()) "점수 없음 (0점)" else breakdownList.joinToString(" · ")
+
         return AmbientSnapshot(
             lux = lux,
             proximityDistanceCm = proximity,
@@ -737,7 +836,12 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
             rollDegrees = pitchRoll.second,
             gravityZ = currentGz,
             postureExplanation = postureExplain,
-            isStationary = isCurrentlyStationary
+            isStationary = isCurrentlyStationary,
+            isCharging = isCharging,
+            isWifiConnected = isWifi,
+            bedtimeScore = bedtimeScore,
+            isBedtimeCandidate = isBedtimeCandidate,
+            bedtimeScoreBreakdown = bedtimeScoreBreakdown
         )
     }
 

@@ -1,11 +1,16 @@
 package com.example.itv.presentation.character
 
 import android.app.Activity
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.View
 import android.widget.Button
 import android.widget.FrameLayout
@@ -16,8 +21,10 @@ import com.example.itv.domain.coaching.InterventionReasonResolver
 import com.example.itv.domain.coaching.RestMissionCatalog
 import com.example.itv.domain.coaching.RestRecommendation
 import com.example.itv.domain.coaching.UserPosture
+import com.example.itv.infrastructure.coaching.UserCoachingSettingsStore
 import com.example.itv.infrastructure.observation.LightAndBrightnessTracker
 import com.example.itv.presentation.coaching.CoachingOverlayFactory
+import com.example.itv.presentation.sleep.BedtimeCareController
 
 /**
  * Shares the production coaching overlay scene in ONE Activity window.
@@ -35,6 +42,28 @@ class CompanionPreviewActivity : Activity() {
     private var current: View? = null
     private var selected = false
     private var activeRecommendation: RestRecommendation? = null
+
+    private var missionActive = false
+    private var missionOffAt = 0L
+    private val missionRestDurationMs = 15_000L
+    private var lastIntensity: CharacterIntensity = CharacterIntensity.NORMAL
+
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                Intent.ACTION_SCREEN_OFF -> {
+                    if (missionActive) {
+                        missionOffAt = SystemClock.elapsedRealtime()
+                    }
+                }
+                Intent.ACTION_SCREEN_ON -> {
+                    if (missionActive) {
+                        checkMissionWake()
+                    }
+                }
+            }
+        }
+    }
 
     private val sensorUpdater = object : Runnable {
         override fun run() {
@@ -88,21 +117,21 @@ class CompanionPreviewActivity : Activity() {
         // 2. Action buttons bar
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(dp(8), dp(4), dp(8), dp(4))
+            setPadding(dp(6), dp(4), dp(6), dp(4))
             setBackgroundColor(Color.rgb(238, 242, 246))
         }
         fun button(text: String, isPrimary: Boolean = false, action: () -> Unit) {
             val btn = Button(this).apply {
                 this.text = text
                 textSize = 11.5f
-                setPadding(dp(4), dp(4), dp(4), dp(4))
+                setPadding(dp(2), dp(2), dp(2), dp(2))
                 if (isPrimary) {
                     setTextColor(Color.WHITE)
                     setBackgroundColor(Color.rgb(46, 125, 50))
                 }
                 setOnClickListener { action() }
             }
-            bar.addView(btn, LinearLayout.LayoutParams(0, dp(44), 1f).apply {
+            bar.addView(btn, LinearLayout.LayoutParams(0, dp(42), 1f).apply {
                 setMargins(dp(2), 0, dp(2), 0)
             })
         }
@@ -113,6 +142,34 @@ class CompanionPreviewActivity : Activity() {
         button("완료") { show("complete") }
         button("닫기") { finish() }
         column.addView(bar)
+
+        // 야간 케어 전용 제어 바 (3분기, 흑백, 흑백 취소)
+        val nightBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(6), dp(3), dp(6), dp(3))
+            setBackgroundColor(Color.parseColor("#1E293B"))
+        }
+        fun nightButton(text: String, bgColor: Int, action: () -> Unit) {
+            val btn = Button(this).apply {
+                this.text = text
+                textSize = 11.5f
+                setTextColor(Color.WHITE)
+                setBackgroundColor(bgColor)
+                setPadding(dp(2), dp(2), dp(2), dp(2))
+                setOnClickListener { action() }
+            }
+            nightBar.addView(btn, LinearLayout.LayoutParams(0, dp(40), 1f).apply {
+                setMargins(dp(2), 0, dp(2), 0)
+            })
+        }
+        nightButton("🌙 야간 3분기", Color.parseColor("#334155")) { show("night_care") }
+        nightButton("🖤 흑백", Color.parseColor("#475569")) {
+            com.example.itv.presentation.sleep.BedtimeCareController.getInstance(this).startGrayscaleMode(forceManual = true)
+        }
+        nightButton("🤍 흑백 취소", Color.parseColor("#0F766E")) {
+            com.example.itv.presentation.sleep.BedtimeCareController.getInstance(this).stopGrayscaleMode()
+        }
+        column.addView(nightBar)
 
         // 3. Companion display host area
         host = FrameLayout(this).apply {
@@ -129,12 +186,44 @@ class CompanionPreviewActivity : Activity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_SCREEN_ON)
+        }
+        registerReceiver(screenReceiver, filter)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        try { unregisterReceiver(screenReceiver) } catch (_: Exception) {}
+    }
+
     override fun onResume() {
         super.onResume()
         tracker.start()
         tracker.startContinuousPostureListening()
         handler.removeCallbacks(sensorUpdater)
         handler.post(sensorUpdater)
+        if (missionActive) {
+            checkMissionWake()
+        }
+    }
+
+    private fun checkMissionWake() {
+        if (!missionActive) return
+        val now = SystemClock.elapsedRealtime()
+        val duration = now - missionOffAt
+        if (duration < missionRestDurationMs) {
+            val remainSec = ((missionRestDurationMs - duration) / 1000L).coerceAtLeast(1L)
+            statusText.text = "아직 시간 안 됨! (${remainSec}초 남음)"
+            show("retry")
+        } else {
+            missionActive = false
+            statusText.text = "휴식 미션 성공! 뼈다귀 보상을 받아보세요."
+            show("complete")
+        }
     }
 
     override fun onPause() {
@@ -144,7 +233,7 @@ class CompanionPreviewActivity : Activity() {
         tracker.stop()
     }
 
-    private fun updateStatusDisplay() {
+    private fun updateStatusDisplay(overrideMsg: String? = null) {
         val snap = tracker.snapshot.value
         val postureName = when (snap.posture) {
             UserPosture.LYING_DOWN -> "수평/하향 각도 (목 하중 부담)"
@@ -156,9 +245,14 @@ class CompanionPreviewActivity : Activity() {
         val pitchStr = snap.pitchDegrees?.let { "%.1f°".format(it) } ?: "-"
         val rollStr = snap.rollDegrees?.let { "%.1f°".format(it) } ?: "-"
         val luxStr = snap.lux?.let { "%.1f lx".format(it) } ?: "-"
+        val bedtimeScoreStr = "${snap.bedtimeScore}점(${if (snap.isBedtimeCandidate) "취침확정" else "일상"})"
 
         val currentRec = activeRecommendation ?: RestMissionCatalog.pick(snap.posture, isStrong = false)
-        statusText.text = "현재 감지: [$postureName | P:${pitchStr} R:${rollStr} L:${luxStr}]\n추천 미션: [${currentRec.category}] ${currentRec.title}"
+        if (overrideMsg != null) {
+            statusText.text = overrideMsg
+        } else if (!missionActive) {
+            statusText.text = "현재 감지: [$postureName | P:${pitchStr} R:${rollStr} L:${luxStr}]\n취침확신도: $bedtimeScoreStr · 추천 미션: [${currentRec.category}] ${currentRec.title}"
+        }
 
         val reward = com.example.itv.infrastructure.reward.UserRewardStore.getReward(this)
         rewardText.text = "성장 현황: Lv.${reward.currentLevel} (${reward.currentLevelExp}/${reward.nextLevelExpRequired} EXP) · ${reward.currentPoints} P (미션 완료: ${reward.totalCompletedMissions}회)"
@@ -179,15 +273,25 @@ class CompanionPreviewActivity : Activity() {
         current?.let { factory.detachPreview(it) }
         current = null
         selected = false
+        BedtimeCareController.getInstance(this).dismissCurrentDialog()
     }
 
     private fun show(mode: String) {
         if (!::factory.isInitialized || host.width == 0) return
         clear()
 
+        if (mode == "night_care") {
+            BedtimeCareController.getInstance(this).showBedtimeCareDialog(containerHost = host) {
+                updateStatusDisplay()
+            }
+            return
+        }
+
         val snap = tracker.snapshot.value
-        val isStrong = (mode == "offer_strong")
-        val intensity = if (isStrong) CharacterIntensity.STRONG else CharacterIntensity.NORMAL
+        val userSettingIntensity = UserCoachingSettingsStore.getInstance(this).loadSettings().characterIntensity
+        val isStrong = (mode == "offer_strong" || (mode == "retry" && lastIntensity == CharacterIntensity.STRONG))
+        val intensity = if (isStrong) CharacterIntensity.STRONG else userSettingIntensity
+        lastIntensity = intensity
         val rec = RestMissionCatalog.pick(snap.posture, isStrong)
         activeRecommendation = rec
 
@@ -218,32 +322,38 @@ class CompanionPreviewActivity : Activity() {
         }
         current = scene.first
         factory.attachPreview(scene.first, scene.second)
-        updateStatusDisplay()
-
-        if (mode == "complete") {
-            handler.postDelayed({ clear() }, 10_000L)
-        }
     }
 
-    private fun choose(title: String, retry: Boolean) {
-        val root = current ?: return
+    private fun choose(title: String, isRetry: Boolean) {
         if (selected) return
         selected = true
+        val root = current ?: return
         factory.disableControls(root)
-        factory.playReaction(root, title, recommendation = activeRecommendation) {
-            if (current === root) {
+
+        if (title == "쉬기") {
+            val rec = activeRecommendation ?: RestMissionCatalog.pick(tracker.snapshot.value.posture, lastIntensity == CharacterIntensity.STRONG)
+            val restSec = missionRestDurationMs / 1000L
+            factory.playReaction(root, "쉬기", 10L, 10L, restSec, rec) {
+                // 사용자가 "미션 확인" 버튼을 눌렀을 때
+                missionActive = true
+                missionOffAt = SystemClock.elapsedRealtime()
                 clear()
-                if (title == "쉬기") {
-                    handler.postDelayed({ show("retry") }, com.example.itv.domain.coaching.TestCoachingPolicy.MISSION_START_MS)
-                }
+                statusText.text = "휴식 미션 진행 중 (${restSec}초). 화면을 껐다가 다시 켜보세요!"
             }
+            return
         }
+
+        handler.postDelayed({
+            if (!isFinishing) show("complete")
+        }, 1200L)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        clear()
+        try { unregisterReceiver(screenReceiver) } catch (_: Exception) {}
+        handler.removeCallbacksAndMessages(null)
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
-
-    override fun onDestroy() {
-        if (::factory.isInitialized) clear()
-        super.onDestroy()
-    }
 }

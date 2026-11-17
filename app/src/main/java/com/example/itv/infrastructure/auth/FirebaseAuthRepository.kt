@@ -16,7 +16,8 @@ import kotlin.coroutines.resumeWithException
 
 class FirebaseAuthRepository(
     private val auth: FirebaseAuth = FirebaseAuth.getInstance(),
-    private val sessionStore: LocalSessionStore? = null
+    private val sessionStore: LocalSessionStore? = null,
+    private val appContext: android.content.Context? = null
 ) : AuthRepository {
 
     private val _currentUser = MutableStateFlow<UserProfile?>(
@@ -38,53 +39,145 @@ class FirebaseAuthRepository(
         }
     }
 
+    private suspend fun syncLocalOwnerAccount(authUid: String) {
+        val ctx = appContext ?: return
+        runCatching {
+            val db = com.example.itv.data.local.ItvDatabase.get(ctx)
+            val dao = db.dao()
+            val existing = dao.owner("demo-guest")
+            if (existing != null) {
+                dao.upgradeOwner("demo-guest", authUid)
+            } else {
+                dao.insertOwner(com.example.itv.data.local.OwnerEntity(
+                    ownerId = "demo-guest",
+                    ownerType = "ACCOUNT",
+                    authUid = authUid,
+                    createdAt = System.currentTimeMillis()
+                ))
+            }
+            dao.saveBackupState(com.example.itv.data.local.BackupStateEntity(
+                ownerId = "demo-guest",
+                restoreState = "READY"
+            ))
+        }
+    }
+
+    private suspend fun syncLocalOwnerGuest() {
+        val ctx = appContext ?: return
+        runCatching {
+            val db = com.example.itv.data.local.ItvDatabase.get(ctx)
+            val dao = db.dao()
+            val existing = dao.owner("demo-guest")
+            if (existing != null) {
+                dao.resetOwnerToGuest("demo-guest")
+            } else {
+                dao.insertOwner(com.example.itv.data.local.OwnerEntity(
+                    ownerId = "demo-guest",
+                    ownerType = "GUEST",
+                    authUid = null,
+                    createdAt = System.currentTimeMillis()
+                ))
+            }
+            dao.saveBackupState(com.example.itv.data.local.BackupStateEntity(
+                ownerId = "demo-guest",
+                restoreState = "READY"
+            ))
+        }
+    }
+
     override suspend fun signInAsGuest(): Result<UserProfile> = runCatching {
         sessionStore?.clearSession()
         val authResult = auth.signInAnonymously().awaitTask()
         val user = authResult.user ?: throw IllegalStateException("익명 로그인 사용자 정보를 가져올 수 없습니다.")
+        syncLocalOwnerGuest()
         user.toDomain()
     }
 
     override suspend fun signInWithGoogle(idToken: String): Result<UserProfile> = runCatching {
+        val guestUser = auth.currentUser?.takeIf { it.isAnonymous }
         sessionStore?.clearSession()
         val credential = GoogleAuthProvider.getCredential(idToken, null)
-        val authResult = auth.signInWithCredential(credential).awaitTask()
-        val user = authResult.user ?: throw IllegalStateException("구글 로그인 사용자 정보를 가져올 수 없습니다.")
+
+        val targetUser: FirebaseUser = if (guestUser != null) {
+            try {
+                // 1. 게스트 계정에 구글 계정 연동 시도 (새로운 구글 계정인 경우)
+                val authResult = guestUser.linkWithCredential(credential).awaitTask()
+                authResult.user ?: guestUser
+            } catch (collision: com.google.firebase.auth.FirebaseAuthUserCollisionException) {
+                // 2. 이미 존재하는 구글 계정인 경우:
+                // 기존 게스트(익명) 계정을 파이어베이스에서 완전히 삭제합니다!
+                android.util.Log.i("ITV_AUTH", "Google account already exists. Deleting anonymous guest account from Firebase...")
+                try {
+                    guestUser.delete().awaitTask()
+                    android.util.Log.i("ITV_AUTH", "Anonymous guest account deleted successfully.")
+                } catch (e: Exception) {
+                    android.util.Log.w("ITV_AUTH", "Failed to delete anonymous user: ${e.message}")
+                }
+                // 기존 구글 계정으로 로그인하여 전환
+                val authResult = auth.signInWithCredential(credential).awaitTask()
+                authResult.user ?: throw collision
+            }
+        } else {
+            val authResult = auth.signInWithCredential(credential).awaitTask()
+            authResult.user ?: throw IllegalStateException("구글 로그인 사용자 정보를 가져올 수 없습니다.")
+        }
+
         sessionStore?.setLastProvider(AuthProvider.GOOGLE)
-        user.toDomain()
+        syncLocalOwnerAccount(targetUser.uid)
+        targetUser.toDomain()
     }
 
     override suspend fun signInWithKakao(profile: UserProfile): Result<UserProfile> = runCatching {
+        val guestUser = auth.currentUser?.takeIf { it.isAnonymous }
+        if (guestUser != null) {
+            android.util.Log.i("ITV_AUTH", "Deleting anonymous guest account upon Kakao sign in...")
+            runCatching { guestUser.delete().awaitTask() }
+        }
         sessionStore?.saveSession(profile)
         _currentUser.value = profile
+        syncLocalOwnerAccount(profile.uid)
         profile
     }
 
     override suspend fun signInWithNaver(profile: UserProfile): Result<UserProfile> = runCatching {
+        val guestUser = auth.currentUser?.takeIf { it.isAnonymous }
+        if (guestUser != null) {
+            android.util.Log.i("ITV_AUTH", "Deleting anonymous guest account upon Naver sign in...")
+            runCatching { guestUser.delete().awaitTask() }
+        }
         sessionStore?.saveSession(profile)
         _currentUser.value = profile
+        syncLocalOwnerAccount(profile.uid)
         profile
     }
 
     override suspend fun linkGuestWithGoogle(idToken: String): Result<UserProfile> = runCatching {
         val user = auth.currentUser ?: throw IllegalStateException("연동할 현재 게스트 로그인 세션이 없습니다.")
         val credential = GoogleAuthProvider.getCredential(idToken, null)
-        try {
+        val targetUser: FirebaseUser = try {
             val authResult = user.linkWithCredential(credential).awaitTask()
             val linkedUser = authResult.user ?: user
             sessionStore?.clearSession()
             sessionStore?.setLastProvider(AuthProvider.GOOGLE)
-            linkedUser.toDomain()
+            linkedUser
         } catch (collision: com.google.firebase.auth.FirebaseAuthUserCollisionException) {
             // 이미 다른 기기 등에서 가입된 기존 구글 계정이 존재하는 경우:
-            // 임시 게스트 세션을 버리고, 원래의 구글 본계정으로 로그인하여 전환합니다.
-            android.util.Log.i("ITV_AUTH", "Google account already exists. Discarding guest and switching to existing Google account.")
+            // 임시 게스트 계정을 파이어베이스에서 완전히 삭제하고, 원래 구글 본계정으로 전환합니다!
+            android.util.Log.i("ITV_AUTH", "Google account already exists. Deleting anonymous guest account from Firebase...")
+            try {
+                user.delete().awaitTask()
+                android.util.Log.i("ITV_AUTH", "Anonymous guest account deleted successfully.")
+            } catch (e: Exception) {
+                android.util.Log.w("ITV_AUTH", "Failed to delete anonymous user: ${e.message}")
+            }
             val authResult = auth.signInWithCredential(credential).awaitTask()
             val existingUser = authResult.user ?: throw collision
             sessionStore?.clearSession()
             sessionStore?.setLastProvider(AuthProvider.GOOGLE)
-            existingUser.toDomain()
+            existingUser
         }
+        syncLocalOwnerAccount(targetUser.uid)
+        targetUser.toDomain()
     }
 
     override suspend fun signOut(): Result<Unit> = runCatching {
