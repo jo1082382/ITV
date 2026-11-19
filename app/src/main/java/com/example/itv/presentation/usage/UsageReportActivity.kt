@@ -53,11 +53,27 @@ import java.util.Locale
 import kotlin.math.roundToLong
 import kotlin.time.Duration.Companion.seconds
 
-private val ChartSurface = Color(0xFFFDFDFF)
-internal val RecordContentGreen = Color(0xFFEAF4D8)
-private val ChartInk = Color(0xFF1E2433)
-private val ChartSecondary = Color(0xFF505A74)
-private val ChartGrid = Color(0xFFE2E6F0)
+import com.example.itv.presentation.components.LocalDarkTheme
+
+private val ChartSurface: Color
+    @Composable
+    get() = if (LocalDarkTheme.current) Color(0xFF161C18) else Color(0xFFFDFDFF)
+
+internal val RecordContentGreen: Color
+    @Composable
+    get() = if (LocalDarkTheme.current) Color(0xFF1E2620) else Color(0xFFEAF4D8)
+
+private val ChartInk: Color
+    @Composable
+    get() = if (LocalDarkTheme.current) Color(0xFFE2EBE4) else Color(0xFF1E2433)
+
+private val ChartSecondary: Color
+    @Composable
+    get() = if (LocalDarkTheme.current) Color(0xFFA6B7A9) else Color(0xFF505A74)
+
+private val ChartGrid: Color
+    @Composable
+    get() = if (LocalDarkTheme.current) Color(0xFF35463A) else Color(0xFFE2E6F0)
 private fun periodColor(days: Int): Color = when (days) {
     1 -> Color(0xFF1751D0)
     7 -> Color(0xFFE2661E)
@@ -353,7 +369,7 @@ if (selectedPastMonth != null) {
         }
     }
     item(key = "shortform_personal_toggle") {
-        RecordSectionToggle("🎬", "숏폼 사용량", periodColor(days), shortformOpen) { shortformOpen = !shortformOpen }
+        RecordSectionToggle("📱", "휴대폰 전체 및 숏폼 세션·사용량 분석", periodColor(days), shortformOpen) { shortformOpen = !shortformOpen }
     }
     if (shortformOpen) {
         item(key = "shortform_personal_section") {
@@ -461,6 +477,7 @@ internal fun UsageChart(data: Report, selected: Int?, onSelect: (Int) -> Unit) {
                 ) {
                     itemsIndexed(data.values, key = { hour, _ -> hour }) { hour, value ->
                         val height = (if (value >= 1.0) value.coerceIn(0.0, axisMax) / axisMax * 180 else 0.0).toFloat().dp
+                        val gridColor = ChartGrid
                         Column(
                             Modifier.width(72.dp).clickable { onSelect(hour) },
                             horizontalAlignment = Alignment.CenterHorizontally
@@ -471,7 +488,7 @@ internal fun UsageChart(data: Report, selected: Int?, onSelect: (Int) -> Unit) {
                                     .drawBehind {
                                         for (tick in 0..4) {
                                             val y = tick * 45.dp.toPx()
-                                            drawLine(ChartGrid, Offset(0f, y), Offset(size.width, y), 1.dp.toPx())
+                                            drawLine(gridColor, Offset(0f, y), Offset(size.width, y), 1.dp.toPx())
                                         }
                                     },
                                 contentAlignment = Alignment.BottomCenter

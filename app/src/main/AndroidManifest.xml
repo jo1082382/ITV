@@ -100,5 +100,14 @@
                 <action android:name="com.example.itv.ACTION_STOP_ASMR" />
             </intent-filter>
         </receiver>
+
+        <!-- 수면 화면 모드 알림창 제어 리시버 (앱 진입 없이 알림창에서 즉시 색상 복원) -->
+        <receiver
+            android:name=".infrastructure.sleep.GrayscaleStopReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.example.itv.ACTION_STOP_GRAYSCALE" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

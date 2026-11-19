@@ -78,8 +78,13 @@ class CoachingMonitorService : Service() {
     private val progress: CoachingProgressCoordinator by lazy {
         CoachingProgressCoordinator(responseController, object : CoachingProgressEffects {
             override fun status(value: String) { com.example.itv.composition.CoachingAccess.state(this@CoachingMonitorService, value) }
-            override fun hideOffer() { removeOverlay(); nm.cancel(7102) }
-            override fun showOffer() { showPuppy() }
+            override fun hideOffer() {
+                if (overlayFactory.isStrong(overlay) && unlocked()) return
+                if (overlay != null && !observer.snapshot().isActivelyWriting() && unlocked()) return
+                removeOverlay()
+                nm.cancel(7102)
+            }
+            override fun showOffer() { showPuppy(transition = false) }
         })
     }
     private val overlayFactory: CoachingOverlayFactory by lazy { CoachingOverlayFactory(this) }
@@ -91,6 +96,8 @@ class CoachingMonitorService : Service() {
     private var lastJevMode: Boolean? = null
     private var missionJevSettings: JevSettings?=null
     private var missionJevContext: JevContext?=null
+    private var lastOfferedIntensity: CharacterIntensity? = null
+    private var activeMissionIntensity: CharacterIntensity? = null
 
     private fun getEffectiveIntensity(): CharacterIntensity {
         val base = UserCoachingSettingsStore.getInstance(this).loadSettings().characterIntensity
@@ -106,10 +113,11 @@ class CoachingMonitorService : Service() {
             if(missionFromJev && !canContinueJevRetry()) { removeOverlay();return }
             when (title) {
                 "쉬기" -> {
-                    escalationTracker.reset()
+                    val retryId = missionController.state.id ?: java.util.UUID.randomUUID().toString().take(8)
+                    startRestMission(retryId)
                     selectedAnimation("쉬기") {
                         removeOverlay()
-                        startRestMission(java.util.UUID.randomUUID().toString().take(8))
+                        missionController.refreshStartDeadline(SystemClock.elapsedRealtime(), missionFromJev)
                     }
                     com.example.itv.composition.CoachingAccess.state(this, "$title 선택 · 충분한 휴식 전까지 재제안 안 함")
                 }
@@ -149,7 +157,6 @@ class CoachingMonitorService : Service() {
             ResponseOutcome.EXPIRED -> { offerTimeout.run(); return }
             ResponseOutcome.REST -> {
                 handler.removeCallbacks(offerTimeout)
-                escalationTracker.reset()
                 missionFromJev=isJev
                 missionJevSettings=if(isJev)jev.store.settings.value else null
                 missionJevContext=if(isJev)jev.state.value.context else null
@@ -163,11 +170,17 @@ class CoachingMonitorService : Service() {
             ResponseOutcome.LATER -> {
                 handler.removeCallbacks(offerTimeout)
                 escalationTracker.recordResistance()
+                activeMissionIntensity = null
+                currentRecommendation = null
+                missionController.state.clear()
                 selectedAnimation("나중에") { removeOverlay(); nm.cancel(7102) }
                 com.example.itv.composition.CoachingAccess.state(this, "나중에 선택 · ${reminderText(reminderMs)} 뒤 조건 재확인")
             }
             ResponseOutcome.DISMISS -> {
                 handler.removeCallbacks(offerTimeout)
+                activeMissionIntensity = null
+                currentRecommendation = null
+                missionController.state.clear()
                 selectedAnimation("닫기") { removeOverlay(); nm.cancel(7102) }
                 com.example.itv.composition.CoachingAccess.state(this, "$title 선택 · 충분한 휴식 전까지 재제안 안 함")
             }
@@ -181,14 +194,27 @@ class CoachingMonitorService : Service() {
         if(!running || !com.example.itv.composition.CoachingAccess.ready(this))return
         val tracker = com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this)
         val posture = tracker.currentPosture()
-        val isStrong = getEffectiveIntensity() == CharacterIntensity.STRONG
+        val isStrong = activeMissionIntensity == CharacterIntensity.STRONG ||
+            lastOfferedIntensity == CharacterIntensity.STRONG ||
+            missionController.state.isStrong ||
+            currentRecommendation?.isFacedownRequired == true ||
+            (getEffectiveIntensity() == CharacterIntensity.STRONG)
+        val effectiveIntensity = if (isStrong) CharacterIntensity.STRONG else getEffectiveIntensity()
+        activeMissionIntensity = effectiveIntensity
+        lastOfferedIntensity = effectiveIntensity
         val rec = currentRecommendation ?: com.example.itv.domain.coaching.RestMissionCatalog.pick(posture, isStrong).also {
             currentRecommendation = it
         }
         if (rec.isFacedownRequired) {
             tracker.startFacedownMonitoring()
         }
-        missionController.begin(id, SystemClock.elapsedRealtime(), missionFromJev, requireFacedown = rec.isFacedownRequired)
+        missionController.begin(
+            id = id,
+            now = SystemClock.elapsedRealtime(),
+            isJev = missionFromJev,
+            requireFacedown = rec.isFacedownRequired,
+            isStrong = isStrong
+        )
     }
     private fun canContinueJevRetry(): Boolean {
         val original=missionJevContext ?: return false
@@ -199,7 +225,8 @@ class CoachingMonitorService : Service() {
         val currentContext=(jev.state.value.context ?: original.takeIf { sameForeground })?.let {
             if(sameForeground && it.packageName==original.packageName && it.sessionId==original.sessionId) it.copy(quality="VALID") else it
         }
-        return jevMode() && jev.store.tokenConfigured.value && WritingGuard.blockReason()==null &&
+        val isWriting = observer.snapshot().isActivelyWriting()
+        return jevMode() && jev.store.tokenConfigured.value && !isWriting &&
             sameForeground &&
             JevCandidatePolicy.canContinueDisplayed(settings.revision,jev.store.settings.value,original,currentContext)
     }
@@ -232,6 +259,9 @@ class CoachingMonitorService : Service() {
     }
     private fun failMissionStart() {
         val failed = missionController.state.id != null && !missionController.state.started && !missionController.state.pending
+        if (failed) {
+            com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this).stopFacedownMonitoring()
+        }
         missionController.failStart()
         if (failed) {
             retryPending = true
@@ -245,10 +275,24 @@ class CoachingMonitorService : Service() {
         val inActiveRest = missionController.state.id != null && (missionController.state.offAt != null || missionController.state.pending)
         if (overlay != null || feedbackView != null || completionView != null || inActiveRest || !unlocked()) return
         if (!com.example.itv.composition.CoachingAccess.ready(this) || !Settings.canDrawOverlays(this)) return
-        if (WritingGuard.blockReason() != null) return
-        if (!isRestMissionFailure && !transition && (ReelsProbe.screenState() == 1 || YoutubeProbe.screenState() == 1)) return
-        val effectiveIntensity = getEffectiveIntensity()
-        val isStrong = effectiveIntensity == CharacterIntensity.STRONG
+        val blockReason = WritingGuard.blockReason()
+        if (blockReason != null && (!isRestMissionFailure || blockReason.contains("키보드"))) return
+        val inVideo = ReelsProbe.screenState() == 1 ||
+            YoutubeProbe.screenState() == 1 ||
+            com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.isActivelyInShortsOrComments() ||
+            com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.isActivelyWatchingLongform() ||
+            com.example.itv.infrastructure.observation.instagram.InstagramTracker.isActivelyInReelsCommentsOrStory() ||
+            com.example.itv.infrastructure.observation.GeneralAppTracker.isInterventionDeferredOrBlocked(JevObservationHub.foregroundPackage)
+        if (!isRestMissionFailure && !transition && inVideo) return
+        val isStrong = activeMissionIntensity == CharacterIntensity.STRONG ||
+            missionController.state.isStrong ||
+            lastOfferedIntensity == CharacterIntensity.STRONG ||
+            currentRecommendation?.isFacedownRequired == true ||
+            missionController.state.requireFacedown ||
+            getEffectiveIntensity() == CharacterIntensity.STRONG
+        val effectiveIntensity = if (isStrong) CharacterIntensity.STRONG else getEffectiveIntensity()
+        activeMissionIntensity = effectiveIntensity
+        lastOfferedIntensity = effectiveIntensity
         val rec = currentRecommendation ?: com.example.itv.domain.coaching.RestMissionCatalog.pick(
             com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this).currentPosture(),
             isStrong
@@ -258,12 +302,28 @@ class CoachingMonitorService : Service() {
             wm.addView(root, params); overlay = root; retryVisible = true
             displayedPackage = if (isRestMissionFailure) null else JevObservationHub.foregroundPackage
             overlayFactory.attachControls(root); retryPending = false
-            handler.postDelayed({ if (overlay === root) { escalationTracker.recordResistance(); retryVisible = false; removeOverlay() } }, 45_000L)
+            handler.postDelayed({
+                if (overlay === root) {
+                    if (overlayFactory.isStrong(overlay) && unlocked()) {
+                        escalationTracker.recordResistance()
+                    } else {
+                        escalationTracker.recordResistance(); retryVisible = false; removeOverlay()
+                    }
+                }
+            }, 45_000L)
         } catch (_: Exception) { retryVisible = false; removeOverlay() }
     }
     private var completionView: View? = null
     private val offerTimeout: Runnable = Runnable {
         if (responseController.offerId != null && overlay != null) {
+            val isStrong = overlayFactory.isStrong(overlay)
+            if (isStrong && unlocked()) {
+                escalationTracker.recordResistance()
+                val isJev = offerFromJev && JevFeature.available() && jev.hasActiveOffer()
+                val reminderMs = TestCoachingPolicy.reminderMs(isJev)
+                handler.postDelayed(offerTimeout, reminderMs)
+                return@Runnable
+            }
             val isJev = offerFromJev && JevFeature.available() && jev.hasActiveOffer()
             val responseMs = TestCoachingPolicy.responseMs(isJev)
             val reminderMs = TestCoachingPolicy.reminderMs(isJev)
@@ -281,12 +341,19 @@ class CoachingMonitorService : Service() {
     }
     private fun missionScreenOff() {
         dismissCompletion()
-        escalationTracker.reset()
+        if (missionController.state.id != null && !missionController.state.pending && missionController.state.offAt == null) {
+            if (missionController.state.requireFacedown || currentRecommendation?.isFacedownRequired == true) {
+                com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this).onMissionScreenOff()
+            }
+        }
         missionController.screenOff(SystemClock.elapsedRealtime())
     }
     private fun missionScreenOn() {
+        // 화면이 실제로 꺼져서 휴식 측정이 시작된 상태(offAt != null)가 아니면 절대 facedown 감지를 중지하지 않음
+        if (missionController.state.id == null || missionController.state.offAt == null || missionController.state.pending) return
         val tracker = com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this)
-        val facedownObserved = if (currentRecommendation?.isFacedownRequired == true) {
+        val needFacedown = missionController.state.requireFacedown || currentRecommendation?.isFacedownRequired == true
+        val facedownObserved = if (needFacedown) {
             tracker.stopFacedownMonitoring()
         } else true
         val wake = missionController.screenOn(SystemClock.elapsedRealtime(), isFacedownObserved = facedownObserved)
@@ -303,6 +370,10 @@ class CoachingMonitorService : Service() {
         isRestMissionFailure = false
         usageClock.clear()
         resetOfferState()
+        activeMissionIntensity = null
+        lastOfferedIntensity = null
+        currentRecommendation = null
+        escalationTracker.reset()
         if (jevMode()) {
             jev.onMissionRestSuccess()
         }
@@ -327,7 +398,10 @@ class CoachingMonitorService : Service() {
     private fun dismissCompletion() {
         completionView?.let { overlayFactory.removeControls(it); try { wm.removeView(it) } catch (_: Exception) {} }
         completionView = null
-        currentRecommendation = null
+        if (!missionController.state.pending && missionController.state.id == null) {
+            currentRecommendation = null
+            activeMissionIntensity = null
+        }
     }
     private val handler = Handler(Looper.getMainLooper())
     private val usageClock: com.example.itv.domain.coaching.RestUsageClock get() = progress.usageClock
@@ -350,13 +424,24 @@ class CoachingMonitorService : Service() {
     private val nm by lazy { getSystemService(NotificationManager::class.java) }
     private fun unlocked() = observer.unlocked()
     private fun resetOfferState() { progress.reset() }
-    private fun observeUsage(): Boolean = progress.observe(SystemClock.elapsedRealtime(), unlocked(), overlay != null)
+    private fun observeUsage(): Boolean {
+        val isActiveVideo = YoutubeProbe.screenState() == 1 ||
+            ReelsProbe.screenState() == 1 ||
+            com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.isActivelyInShortsOrComments() ||
+            com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.isActivelyWatchingLongform() ||
+            com.example.itv.infrastructure.observation.instagram.InstagramTracker.isActivelyInReelsCommentsOrStory() ||
+            com.example.itv.infrastructure.observation.GeneralAppTracker.isInterventionDeferredOrBlocked(JevObservationHub.foregroundPackage)
+        return progress.observe(SystemClock.elapsedRealtime(), unlocked(), overlay != null, isActiveVideo)
+    }
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             // SCREEN_OFF is definitive even if PowerManager has not updated yet.
             if (intent.action == Intent.ACTION_SCREEN_OFF) {
                 missionScreenOff()
-                progress.observe(SystemClock.elapsedRealtime(), false, overlay != null)
+                if (overlayFactory.isStrong(overlay)) {
+                    removeOverlay()
+                }
+                progress.observe(SystemClock.elapsedRealtime(), using = false, offerVisible = overlay != null, isShortform = false)
             } else {
                 if (intent.action == Intent.ACTION_SCREEN_ON) {
                     missionScreenOn()
@@ -383,18 +468,49 @@ class CoachingMonitorService : Service() {
             }
             lastJevMode = currentJevMode
             checkMission()
-            val using = if (currentJevMode) unlocked() else observeUsage()
+            val isStrong = overlayFactory.isStrong(overlay)
+            val usageObserved = observeUsage()
+            val using = if (currentJevMode) unlocked() else (if (isStrong) unlocked() else usageObserved)
             val observation = observer.snapshot()
             val nowElapsed = SystemClock.elapsedRealtime()
             val fgPkg = JevObservationHub.foregroundPackage.takeIf { nowElapsed - JevObservationHub.checkedAt in 0..1500 }
             val leftDisplayedApp = !isRestMissionFailure && displayedPackage != null && fgPkg != null && fgPkg != displayedPackage && !JevObservationHub.isTransientSystemPackage(fgPkg)
-            if (overlay != null && (!using || observation.guardReason != null || leftDisplayedApp)) removeOverlay()
+            val isWriting = observation.isActivelyWriting()
+            if (overlay != null) {
+                if (isStrong) {
+                    if (!unlocked()) removeOverlay()
+                } else {
+                    if (!using || isWriting || leftDisplayedApp) {
+                        val isAppSwitch = leftDisplayedApp
+                        if (currentJevMode && isAppSwitch) {
+                            jev.transferOnAppSwitch()
+                        }
+                        removeOverlay(preserveForAppSwitch = currentJevMode && isAppSwitch)
+                    }
+                }
+            }
             if (jevMode()) {
                 jev.tick(using, missionController.state.id != null || completionView != null || reactionInProgress || retryPending || retryVisible, overlay != null)
                 val current = if (retryVisible) (if (isRestMissionFailure) true else canContinueJevRetry()) else jev.canKeepDisplayed()
-                if (overlay != null && (!using || observation.guardReason != null || !current)) removeOverlay()
-                if (overlay == null && jev.canShow(transition = false)) showPuppy(transition = false)
-            } else if (!reactionInProgress) progress.tick(nowElapsed, using, observation, overlay != null)
+                if (overlay != null) {
+                    if (isStrong) {
+                        if (!unlocked()) removeOverlay()
+                    } else {
+                        if (!using || isWriting || !current) {
+                            val isAppSwitch = !current && leftDisplayedApp
+                            if (isAppSwitch) {
+                                jev.transferOnAppSwitch()
+                            }
+                            removeOverlay(preserveForAppSwitch = isAppSwitch)
+                        }
+                    }
+                }
+                if (overlay == null && !responseController.suppressed && !bedtimeCareController.isDialogShowing() && jev.canShow(transition = false)) showPuppy(transition = false)
+            } else if (!reactionInProgress) {
+                if (!isStrong) {
+                    progress.tick(nowElapsed, using, observation, overlay != null)
+                }
+            }
             checkRetry()
             if (feedbackView != null && (!using || !canShowJevFeedback())) dismissJevFeedback()
             maybeShowJevFeedback()
@@ -407,19 +523,27 @@ class CoachingMonitorService : Service() {
         val now = SystemClock.elapsedRealtime()
         if (jevMode()) {
             val sample = jev.state.value
-            DeveloperStatus.value = DeveloperSnapshot(now, running, sample.context?.sessionMs ?: 0L, 0L,
-                jev.store.settings.value.continuousSeconds * 1000L, 0L, 0L, sample.context?.packageName ?: "관측 대기", sample.status)
+            val liveContinuous = usageClock.usedMs
+            val displayedPkg = sample.context?.packageName ?: if (YoutubeProbe.screenState() == 1) "YouTube 쇼츠" else if (YoutubeProbe.screenState() == 0) "YouTube" else if (ReelsProbe.screenState() == 1) "Instagram 릴스" else "스마트폰 일반 사용"
+            DeveloperStatus.value = DeveloperSnapshot(now, running, liveContinuous, usageClock.restMs,
+                jev.store.settings.value.continuousSeconds * 1000L, TestCoachingPolicy.naturalRestMs(jevMode()),
+                0L, displayedPkg, sample.status)
             return
         }
         val guard = WritingGuard.blockReason()
         val youtube = YoutubeProbe.screenState()
         val reels = ReelsProbe.screenState()
+        val ytLongform = com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.isActivelyWatchingLongform()
+        val ytShortsOrComments = youtube == 1 || com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.isActivelyInShortsOrComments()
+        val genDeferred = com.example.itv.infrastructure.observation.GeneralAppTracker.blockingOrWaitingReason(JevObservationHub.foregroundPackage)
         val screen = when {
             !WritingGuard.connected || now - WritingGuard.checkedAt > 3000L -> "판별 불가 · 접근성 관측 없음/지연"
-            youtube == 1 -> "확인된 YouTube 쇼츠"
+            ytShortsOrComments -> "확인된 YouTube 쇼츠/댓글"
+            ytLongform -> "확인된 YouTube 롱폼 시청 중"
             reels == 1 -> "확인된 Instagram 릴스"
+            genDeferred != null -> "개입 대기/보류 앱 ($genDeferred)"
             youtube == -1 || reels == -1 -> "숏폼 여부 판별 불가"
-            else -> "확인된 릴스·쇼츠 아님"
+            else -> "확인된 릴스·쇼츠·롱폼 아님"
         }
         val decision = when {
             !running -> "코칭 서비스 중지"
@@ -431,7 +555,9 @@ class CoachingMonitorService : Service() {
             safeSince == null || now - (safeSince ?: now) < 5000L -> "안전 상태 5초 확인 중"
             responseController.retryAt != null && now < (responseController.retryAt ?: now) -> "나중에 선택 · 재평가 대기"
             usageClock.usedMs < interventionMs -> "누적 사용시간 조건 미충족"
-            youtube == 1 -> "다음 쇼츠 전환 대기"
+            ytShortsOrComments -> "다음 쇼츠 전환 대기"
+            ytLongform -> "롱폼 영상 종료·전환 대기"
+            genDeferred != null -> "개입 가능 전환 대기 ($genDeferred)"
             youtube == -1 -> "YouTube/현재 화면 확인 불가 · 보류"
             reels == 1 -> "다음 릴스 전환 대기"
             reels == -1 -> "현재 화면 판별 불가 · 보류"
@@ -451,6 +577,15 @@ class CoachingMonitorService : Service() {
         YoutubeProbe.coachingObservation = true
         YoutubeProbe.clearBaseline()
         YoutubeProbe.onTransition = { onYoutubeTransition() }
+        com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.onLongformTransition = { event ->
+            onYoutubeLongformTransition(event)
+        }
+        com.example.itv.infrastructure.observation.instagram.InstagramTracker.onInstagramTransition = { event ->
+            onInstagramModeTransition(event)
+        }
+        com.example.itv.infrastructure.observation.GeneralAppTracker.onGeneralAppEligibleTransition = { event ->
+            onGeneralAppEligibleTransition(event)
+        }
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_USER_PRESENT)
         }
@@ -530,6 +665,7 @@ class CoachingMonitorService : Service() {
             shortformAppName = null
         )
         val effectiveIntensity = if (forceStrong) CharacterIntensity.STRONG else getEffectiveIntensity()
+        lastOfferedIntensity = effectiveIntensity
         val isStrong = effectiveIntensity == CharacterIntensity.STRONG
         val rec = com.example.itv.domain.coaching.RestMissionCatalog.pick(ambient.posture, isStrong)
         currentRecommendation = rec
@@ -551,45 +687,172 @@ class CoachingMonitorService : Service() {
 
     private fun onYoutubeTransition() {
         onUserActivity("YouTube 쇼츠 전환")
-        if(retryPending) {checkRetry(true);return}
+        if (retryPending) { checkRetry(true); return }
+        if (!running || responseController.offered || responseController.suppressed || bedtimeCareController.isDialogShowing()) return
+        val now = SystemClock.elapsedRealtime()
+        if (responseController.retryAt != null && now < (responseController.retryAt ?: 0L)) return
         if (jevMode()) {
             val targetPkg = jev.state.value.context?.packageName ?: jev.approvedPackage()
-            if (running && targetPkg == JevSettings.YOUTUBE) showPuppy(transition = true)
+            val hasApproval = jev.hasTransferrableApproval() || targetPkg == JevSettings.YOUTUBE || targetPkg == "ALL"
+            if (running && hasApproval) {
+                jev.promotePendingTransfer(JevSettings.YOUTUBE)
+                showPuppy(transition = true)
+            }
             return
         }
-        if (!running || !waitingYoutube || responseController.offered || responseController.suppressed) return
-        val now = SystemClock.elapsedRealtime()
+        if (!waitingYoutube) return
         if (!observeUsage() || !waitingYoutube) return
         if (WritingGuard.blockReason() != null) { safeSince = null; return }
         val safeAt = safeSince ?: return
-        if (now-safeAt < 5000L || usageClock.usedMs < interventionMs || now < (responseController.retryAt ?: 0L)) return
-        if (YoutubeProbe.screenState()!=1 || !CoachingAutoStart.enabled(this)) return
+        if (now - safeAt < 5000L || usageClock.usedMs < interventionMs) return
+        if (YoutubeProbe.screenState() != 1 || !CoachingAutoStart.enabled(this)) return
+        showPuppy(transition = true)
+    }
+    private fun onYoutubeLongformTransition(event: com.example.itv.infrastructure.observation.youtube.LongformTransitionEvent) {
+        onUserActivity("YouTube 롱폼 전환 (${event.eventType})")
+        if (retryPending) { checkRetry(true); return }
+        if (!running || responseController.offered || responseController.suppressed || bedtimeCareController.isDialogShowing()) return
+        val now = SystemClock.elapsedRealtime()
+        if (responseController.retryAt != null && now < (responseController.retryAt ?: 0L)) return
+        if (jevMode()) {
+            val targetPkg = jev.state.value.context?.packageName ?: jev.approvedPackage()
+            val hasApproval = jev.hasTransferrableApproval() || targetPkg == JevSettings.YOUTUBE || targetPkg == "ALL"
+            if (running && hasApproval) {
+                jev.promotePendingTransfer(JevSettings.YOUTUBE)
+                showPuppy(transition = true)
+            }
+            return
+        }
+        if (!waitingTransition && !waitingYoutube) return
+        if (!observeUsage() || (!waitingTransition && !waitingYoutube)) return
+        val safeAt = safeSince ?: return
+        if (WritingGuard.blockReason() != null) { safeSince = null; return }
+        if (now - safeAt < 5000L || usageClock.usedMs < interventionMs) return
+        if (!CoachingAutoStart.enabled(this)) return
         showPuppy(transition = true)
     }
     private fun onReelsTransition() {
         onUserActivity("Instagram 릴스 전환")
-        if(retryPending) {checkRetry(true);return}
+        if (retryPending) { checkRetry(true); return }
+        if (!running || responseController.offered || responseController.suppressed || bedtimeCareController.isDialogShowing()) return
+        val now = SystemClock.elapsedRealtime()
+        if (responseController.retryAt != null && now < (responseController.retryAt ?: 0L)) return
         if (jevMode()) {
             val targetPkg = jev.state.value.context?.packageName ?: jev.approvedPackage()
-            if (running && targetPkg == JevSettings.INSTAGRAM) showPuppy(transition = true)
+            val hasApproval = jev.hasTransferrableApproval() || targetPkg == JevSettings.INSTAGRAM || targetPkg == "ALL"
+            if (running && hasApproval) {
+                jev.promotePendingTransfer(JevSettings.INSTAGRAM)
+                showPuppy(transition = true)
+            }
             return
         }
         // Only a transition AFTER arming can trigger this path.
-        if (!running || !waitingTransition || responseController.offered || responseController.suppressed) return
-        val now = SystemClock.elapsedRealtime()
+        if (!waitingTransition) return
         if (!observeUsage() || !waitingTransition) return
         val safeAt = safeSince ?: return
         if (WritingGuard.blockReason() != null) { safeSince = null; return }
-        if (now - safeAt < 5000L || usageClock.usedMs < interventionMs || now < (responseController.retryAt ?: 0L)) return
+        if (now - safeAt < 5000L || usageClock.usedMs < interventionMs) return
         if (ReelsProbe.screenState() != 1 || !CoachingAutoStart.enabled(this)) return
         showPuppy(transition = true)
     }
+    private fun onInstagramModeTransition(event: com.example.itv.infrastructure.observation.instagram.InstagramTransitionEvent) {
+        onUserActivity("Instagram 화면 전환 (${event.eventType})")
+        if (retryPending) { checkRetry(true); return }
+        if (!running || responseController.offered || responseController.suppressed || bedtimeCareController.isDialogShowing()) return
+        val now = SystemClock.elapsedRealtime()
+        if (responseController.retryAt != null && now < (responseController.retryAt ?: 0L)) return
+        if (jevMode()) {
+            val targetPkg = jev.state.value.context?.packageName ?: jev.approvedPackage()
+            val hasApproval = jev.hasTransferrableApproval() || targetPkg == JevSettings.INSTAGRAM || targetPkg == "ALL"
+            if (running && hasApproval) {
+                jev.promotePendingTransfer(JevSettings.INSTAGRAM)
+                showPuppy(transition = true)
+            }
+            return
+        }
+        if (!waitingTransition) return
+        if (!observeUsage() || !waitingTransition) return
+        val safeAt = safeSince ?: return
+        if (WritingGuard.blockReason() != null) { safeSince = null; return }
+        if (now - safeAt < 5000L || usageClock.usedMs < interventionMs) return
+        if (!CoachingAutoStart.enabled(this)) return
+        showPuppy(transition = true)
+    }
+    private fun onGeneralAppEligibleTransition(event: com.example.itv.infrastructure.observation.GeneralAppTransitionEvent) {
+        onUserActivity("일반/게임 앱 개입 가능 전환 (${event.appName})")
+        if (retryPending) { checkRetry(true); return }
+        if (!running || responseController.offered || responseController.suppressed || bedtimeCareController.isDialogShowing()) return
+        val now = SystemClock.elapsedRealtime()
+        if (responseController.retryAt != null && now < (responseController.retryAt ?: 0L)) return
+        if (jevMode()) {
+            val targetPkg = jev.state.value.context?.packageName ?: jev.approvedPackage()
+            val hasApproval = jev.hasTransferrableApproval() || targetPkg == event.packageName || targetPkg == "ALL"
+            if (running && hasApproval) {
+                jev.promotePendingTransfer(event.packageName)
+                showPuppy(transition = true)
+            }
+            return
+        }
+        if (!waitingTransition) return
+        if (!observeUsage() || !waitingTransition) return
+        val safeAt = safeSince ?: return
+        if (WritingGuard.blockReason() != null) { safeSince = null; return }
+        if (now - safeAt < 5000L || usageClock.usedMs < interventionMs) return
+        if (!CoachingAutoStart.enabled(this)) return
+        showPuppy(transition = true)
+    }
     private fun showPuppy(transition: Boolean = true) {
+        // 0. 취침 케어 또는 이전 개입에서 닫기/완료(suppressed), '나중에' 유예시간(retryAt) 대기, 또는 취침 케어가 표시 중이면 무조건 차단 (Jev/일반 모드 공통)
+        if (responseController.suppressed) return
+        val now = SystemClock.elapsedRealtime()
+        if (responseController.retryAt != null && now < (responseController.retryAt ?: 0L)) return
+        if (bedtimeCareController.isDialogShowing()) return
+
         val isJev = jevMode()
-        if (WritingGuard.blockReason() != null) return
-        if (isJev) { if (!jev.canShow(transition)) return }
+        // 1. 메시지·문서·키보드 입력·인스타 DM 중 개입 절대 금지
+        if (WritingGuard.blockReason() != null || observer.snapshot().isActivelyWriting()) return
+        val currentFg = JevObservationHub.foregroundPackage
+        if (JevSettings.isDocumentOrMessagingPackage(currentFg)) return
+
+        // 2. 유튜브 숏폼 댓글 또는 인스타그램 댓글·스토리·DM 열람 중에는 절대 개입하지 않음
+        val ytMode = com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.snapshot.value.mode
+        if (currentFg == JevSettings.YOUTUBE && ytMode == com.example.itv.infrastructure.observation.youtube.YoutubeWatchMode.SHORTS_COMMENTS) {
+            return
+        }
+        val igMode = com.example.itv.infrastructure.observation.instagram.InstagramTracker.snapshot.value.mode
+        if (currentFg == JevSettings.INSTAGRAM && (
+                igMode == com.example.itv.infrastructure.observation.instagram.InstagramScreenMode.COMMENTS ||
+                    igMode == com.example.itv.infrastructure.observation.instagram.InstagramScreenMode.STORY ||
+                    igMode == com.example.itv.infrastructure.observation.instagram.InstagramScreenMode.DM
+                )
+        ) {
+            return
+        }
+
+        // 2-1. 유튜브·인스타그램 외 모든 앱(게임, 외부 OTT 영상, 음성통화 등)에서도 HUD 판정이 개입 가능(🟢 ELIGIBLE)이 아니면 절대 개입하지 않고 대기
+        if (currentFg != JevSettings.YOUTUBE &&
+            currentFg != JevSettings.INSTAGRAM &&
+            com.example.itv.infrastructure.observation.GeneralAppTracker.isInterventionDeferredOrBlocked(currentFg)
+        ) {
+            return
+        }
+
+        // 3. 숏폼(쇼츠·릴스) 및 롱폼 영상 시청 중에는 비전환(transition == false) 타이머 틱에서 절대 중간 개입 금지
+        if (!transition) {
+            val isWatchingShortform = YoutubeProbe.screenState() == 1 ||
+                ReelsProbe.screenState() == 1 ||
+                com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.isActivelyInShortsOrComments() ||
+                com.example.itv.infrastructure.observation.instagram.InstagramTracker.isActivelyInReelsCommentsOrStory()
+            val isWatchingLongform = com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.isActivelyWatchingLongform()
+            if (isWatchingShortform || isWatchingLongform) return
+        }
+
+        if (isJev) {
+            jev.promotePendingTransfer(currentFg)
+            if (!jev.canShow(transition)) return
+        }
         else {
-            if (responseController.suppressed || usageClock.usedMs < interventionMs || SystemClock.elapsedRealtime() < (responseController.retryAt ?: 0L)) return
+            if (usageClock.usedMs < interventionMs) return
             val safeAt = safeSince ?: return
             if (SystemClock.elapsedRealtime() - safeAt < 5000L) return
         }
@@ -599,15 +862,39 @@ class CoachingMonitorService : Service() {
         val shortformApp = when {
             YoutubeProbe.screenState() == 1 -> "YouTube 쇼츠"
             ReelsProbe.screenState() == 1 -> "Instagram 릴스"
+            currentFg == JevSettings.YOUTUBE -> "YouTube"
             else -> null
         }
         val ambient = com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this).snapshot.value
         if (ambient.isBedtimeCandidate) {
+            removeOverlay()
             responseController.offered = true
+            val offerId = jevOfferId ?: java.util.UUID.randomUUID().toString().take(8)
+            responseController.offerId = offerId
             if (isJev) jev.shown()
-            InterventionJournal.add(this, jevOfferId ?: java.util.UUID.randomUUID().toString().take(8), "취침 케어 개입 표시 (3분기)")
-            bedtimeCareController.showBedtimeCareDialog {
+            InterventionJournal.add(this, offerId, "취침 케어 개입 표시 (3분기)")
+            val ctx = if (isJev) jev.state.value.context else null
+            val continuousMin = (ctx?.continuousMs ?: usageClock.usedMs) / 60000.0
+            val bedtimePassedMin = ctx?.bedtimePassedMinutes ?: ambient.bedtimeDistanceMinutes?.takeIf { it > 0 }
+            val jevProb = if (isJev) jev.state.value.probability else null
+            val baseThreshold = jev.store.settings.value.probabilityThreshold
+            val effThreshold = if (ctx != null) com.example.itv.domain.jev.JevCandidatePolicy.effectiveThreshold(jev.store.settings.value, ctx) else baseThreshold
+            val probDiff = if (jevProb != null) (jevProb - effThreshold).coerceAtLeast(0.0) else null
+
+            bedtimeCareController.showBedtimeCareDialog(
+                containerHost = null,
+                bedtimePassedMinutes = bedtimePassedMin,
+                continuousMinutes = continuousMin,
+                jevProbabilityDiff = probDiff
+            ) {
                 responseController.offered = false
+                responseController.suppressed = true
+                responseController.retryAt = null
+                if (isJev) {
+                    jev.respond("DISMISS")
+                    jev.suppressCurrentSession("BEDTIME_CARE")
+                }
+                com.example.itv.composition.CoachingAccess.state(this, "취침 케어 닫기/완료 · 충분한 휴식 전까지 재제안 안 함")
             }
             return
         }
@@ -619,6 +906,7 @@ class CoachingMonitorService : Service() {
             shortformAppName = shortformApp
         )
         val effectiveIntensity = getEffectiveIntensity()
+        lastOfferedIntensity = effectiveIntensity
         val isStrong = effectiveIntensity == CharacterIntensity.STRONG
         val rec = com.example.itv.domain.coaching.RestMissionCatalog.pick(ambient.posture, isStrong)
         currentRecommendation = rec
@@ -640,6 +928,7 @@ class CoachingMonitorService : Service() {
             InterventionJournal.add(this, responseController.offerId!!, "개입 표시 성공 · " + when {
                 YoutubeProbe.screenState() == 1 -> "쇼츠"
                 ReelsProbe.screenState() == 1 -> "릴스"
+                currentFg == JevSettings.YOUTUBE -> "YouTube 롱폼/전환"
                 else -> "일반 화면"
             })
             handler.removeCallbacks(offerTimeout); handler.postDelayed(offerTimeout, 7400L + responseMs)
@@ -712,9 +1001,22 @@ class CoachingMonitorService : Service() {
             } finally { feedbackQueryPending = false }
         }
     }
-    private fun removeOverlay() {
-        if (overlay != null && JevFeature.available()) jev.cancelled(closingCause)
-        if (responseController.offerId != null) finishOffer(closingCause)
+    private fun removeOverlay(preserveForAppSwitch: Boolean = false) {
+        if (overlay != null && JevFeature.available()) {
+            if (!preserveForAppSwitch) {
+                jev.cancelled(closingCause)
+            }
+        }
+        if (responseController.offerId != null) {
+            if (!preserveForAppSwitch) {
+                finishOffer(closingCause)
+            } else {
+                handler.removeCallbacks(offerTimeout)
+                responseController.offerId = null
+                responseController.deadline = 0L
+                responseController.offered = false
+            }
+        }
         // Clear the reference before detach callbacks to avoid reentrant removal.
         val previousOverlay = overlay
         overlay = null;displayedPackage=null;retryVisible=false;reactionInProgress=false;isRestMissionFailure=false
@@ -756,6 +1058,9 @@ class CoachingMonitorService : Service() {
         dismissCompletion()
         ReelsProbe.onTransition = null
         YoutubeProbe.onTransition = null
+        com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.onLongformTransition = null
+        com.example.itv.infrastructure.observation.instagram.InstagramTracker.onInstagramTransition = null
+        com.example.itv.infrastructure.observation.GeneralAppTracker.onGeneralAppEligibleTransition = null
         YoutubeProbe.coachingObservation = false
         running = false; handler.removeCallbacksAndMessages(null); removeOverlay(); nm.cancel(7102)
         if (receiverRegistered) { unregisterReceiver(receiver); receiverRegistered = false }

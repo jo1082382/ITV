@@ -219,5 +219,75 @@ class CoachingIntegrationTest {
         )
         assertFalse(tableRec.isFacedownRequired)
         assertTrue(tableRec.targetPosture == com.example.itv.domain.coaching.UserPosture.TABLE_OR_DESK || tableRec.targetPosture == null)
+
+        com.example.itv.domain.coaching.RestMissionCatalog.ALL_RECOMMENDATIONS.forEach { rec ->
+            assertTrue("미션 '${rec.title}'에 굵게 표시할 행동 문구가 있어야 함", rec.boldPhrases.isNotEmpty())
+            rec.boldPhrases.forEach { phrase ->
+                assertTrue("미션 '${rec.title}'의 action에 굵은 글씨 문구('$phrase')가 포함되어야 함", rec.action.contains(phrase))
+            }
+        }
+    }
+
+    @Test fun generalUsageTriggersOfferAtThreeTimesDuration() {
+        val journal = Journal()
+        val controller = CoachingResponseController(journal)
+        var offerShown = false
+        val effects = object : CoachingProgressEffects {
+            override fun status(value: String) {}
+            override fun hideOffer() { offerShown = false }
+            override fun showOffer() { offerShown = true }
+        }
+        val coordinator = CoachingProgressCoordinator(controller, effects)
+        // 일반 사용 (isShortform = false)
+        // interventionMs는 30_000L. 일반 사용은 3초당 1초 환산이므로 90초 필요.
+        coordinator.observe(0L, using = true, offerVisible = false, isShortform = false)
+        coordinator.tick(0L, using = true, com.example.itv.domain.coaching.CoachingObservation(using = true, guardReason = null, youtubeState = 0, reelsState = 0), offerVisible = false)
+
+        for (i in 1..89) {
+            coordinator.observe(i * 1000L, using = true, offerVisible = false, isShortform = false)
+            coordinator.tick(i * 1000L, using = true, com.example.itv.domain.coaching.CoachingObservation(using = true, guardReason = null, youtubeState = 0, reelsState = 0), offerVisible = false)
+            assertFalse("89초(환산 29.6초)에는 아직 개입이 트리거되지 않아야 함", offerShown)
+        }
+
+        // 90초 도달 (환산 30초 >= 30,000L)
+        coordinator.observe(90_000L, using = true, offerVisible = false, isShortform = false)
+        coordinator.tick(90_000L, using = true, com.example.itv.domain.coaching.CoachingObservation(using = true, guardReason = null, youtubeState = 0, reelsState = 0), offerVisible = false)
+        assertTrue("90초 일반 사용(1:3 비율 환산 30초) 도달 시 개입 표시되어야 함", offerShown)
+    }
+
+    @Test fun youtubeLongformWatchingHoldsOfferUntilTransition() {
+        val journal = Journal()
+        val controller = CoachingResponseController(journal)
+        var offerShown = false
+        val statuses = mutableListOf<String>()
+        val effects = object : CoachingProgressEffects {
+            override fun status(value: String) { statuses.add(value) }
+            override fun hideOffer() { offerShown = false }
+            override fun showOffer() { offerShown = true }
+        }
+        val coordinator = CoachingProgressCoordinator(controller, effects)
+        coordinator.observe(0L, using = true, offerVisible = false, isShortform = true)
+        coordinator.tick(
+            0L,
+            using = true,
+            com.example.itv.domain.coaching.CoachingObservation(using = true, guardReason = null, youtubeState = 0, reelsState = 0, youtubeLongformWatching = true),
+            offerVisible = false
+        )
+
+        for (i in 1..35) {
+            coordinator.observe(i * 1000L, using = true, offerVisible = false, isShortform = true)
+            coordinator.tick(
+                i * 1000L,
+                using = true,
+                com.example.itv.domain.coaching.CoachingObservation(using = true, guardReason = null, youtubeState = 0, reelsState = 0, youtubeLongformWatching = true),
+                offerVisible = false
+            )
+        }
+
+        // 30초 기준을 넘었더라도 롱폼 영상 시청 중(youtubeLongformWatching == true)에는 즉시 개입하지 않고 전환 대기 상태여야 함
+        assertFalse("롱폼 영상 시청 중에는 중간에 개입이 표시되지 않아야 함", offerShown)
+        assertTrue("롱폼 종료/전환 대기 플래그(waitingTransition)가 활성화되어야 함", coordinator.waitingTransition)
+        assertTrue(statuses.last().contains("롱폼 영상 종료/전환을 기다리는 중"))
     }
 }
+

@@ -42,7 +42,9 @@ internal fun rememberDailyUsageDrilldownItems(period: Report): LazyListScope.() 
     }
     return {
         item(key = "daily_totals_chart", contentType = "daily_totals_chart") {
-        OutlinedCard(colors = CardDefaults.outlinedCardColors(containerColor = RecordContentGreen)) {
+        val isDark = com.example.itv.presentation.components.LocalDarkTheme.current
+        val cardContentColor = if (isDark) Color(0xFFE2EBE4) else Color(0xFF243025)
+        OutlinedCard(colors = CardDefaults.outlinedCardColors(containerColor = RecordContentGreen, contentColor = cardContentColor)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("날짜별 총 사용시간", style = MaterialTheme.typography.titleMedium)
                 Text("최근 ${period.days}일 · 오늘 포함 · 막대를 누르면 해당 날짜의 시간대별 기록 표시",
@@ -56,14 +58,20 @@ internal fun rememberDailyUsageDrilldownItems(period: Report): LazyListScope.() 
                         }
                         Text("시간", style = MaterialTheme.typography.labelSmall)
                     }
+                    val lineGrid = if (isDark) Color(0xFF35463A) else Color(0xFFE2E5EA)
                     LazyRow(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         items(rows, key = { it.key.toString() }) { entry ->
+                            val barBg = if (date == entry.key) {
+                                if (isDark) Color(0xFF2B3A4A) else Color(0xFFE7ECFF)
+                            } else {
+                                if (isDark) Color(0xFF161C18) else Color.White
+                            }
                             Column(Modifier.clickable { dateKey = entry.key.toString() }, horizontalAlignment = Alignment.CenterHorizontally) {
-                                Box(Modifier.width(60.dp).height(192.dp).background(if(date==entry.key) Color(0xFFE7ECFF) else Color.White), contentAlignment = Alignment.BottomCenter) {
+                                Box(Modifier.width(60.dp).height(192.dp).background(barBg), contentAlignment = Alignment.BottomCenter) {
                                     Canvas(Modifier.fillMaxSize()) {
                                         for(tick in 0..4) {
                                             val y = size.height*tick/4f
-                                            drawLine(Color(0xFFE2E5EA), Offset(0f,y), Offset(size.width,y))
+                                            drawLine(lineGrid, Offset(0f,y), Offset(size.width,y))
                                         }
                                     }
                                     Box(Modifier.width(24.dp).height((entry.value/60.0).coerceIn(0.0,24.0).toFloat().times(8).dp).background(Color(0xFF4263EB)))

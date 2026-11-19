@@ -208,3 +208,39 @@ test("optional personalized and swipe metrics are forwarded when present and omi
   assert.equal(sent[1].state.swipe_overheated,true);
  }finally{f.db.close();}
 });
+
+test("category, activity phase, and video/game metrics are forwarded in state with prompt v4",async()=>{
+ let sent;const f=fixture({upstream:async(_url,init)=>{sent=JSON.parse(init.body);return Response.json({
+  model:"jev-1.14.0",answers:{intervene:{noul:0.65}},usage:{input_tokens:280}
+ });}});
+ try {
+  const r = await f.request("/api/jev/evaluate",{
+   ...context("game-session"),
+   app_category:"GAME",
+   activity_phase:"LOBBY_OR_IDLE",
+   audio_pipeline_kind:"GAME_AUDIO",
+   general_app_idle_seconds:25,
+   continuous_equivalent_minutes:12.0,
+   raw_general_minutes:36.0,
+   longform_watch_minutes:15.5,
+   current_video_watch_minutes:8.0,
+   completed_longform_count:1,
+   youtube_watch_mode:"NORMAL"
+  });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.prompt_version, "itv-coaching-v4");
+  assert.equal(sent.state.app_activity_category, "GAME");
+  assert.equal(sent.state.activity_phase, "LOBBY_OR_IDLE");
+  assert.equal(sent.state.active_audio_pipeline, "GAME_AUDIO");
+  assert.equal(sent.state.idle_seconds_without_interaction, 25);
+  assert.equal(sent.state.continuous_equivalent_minutes, 12.0);
+  assert.equal(sent.state.raw_general_phone_usage_minutes, 36.0);
+  assert.equal(sent.state.raw_longform_video_minutes, 15.5);
+  assert.equal(sent.state.current_video_watch_minutes, 8.0);
+  assert.equal(sent.state.completed_longform_video_count, 1);
+  assert.equal(sent.state.youtube_watch_mode, "NORMAL");
+  assert.match(sent.questions.intervene.instructions, /IMMERSION CONVERSION/);
+  assert.match(sent.questions.intervene.instructions, /TIMING MANAGED BY CLIENT/);
+  assert.match(sent.questions.intervene.instructions, /ANTI-DOUBLE-COUNTING/);
+ }finally{f.db.close();}
+});

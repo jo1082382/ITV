@@ -36,16 +36,19 @@ open class WritingGuardService : AccessibilityService() {
     private fun scan() {
         // Determine only the foreground package. Never traverse ITV's Compose tree.
         val pkg = try {
-            val root = rootInActiveWindow
-            val rawPkg = root?.packageName?.toString()
-            if (rawPkg != null && !com.example.itv.infrastructure.jev.JevObservationHub.isTransientSystemPackage(rawPkg)) {
-                try { rawPkg } finally { @Suppress("DEPRECATION") root.recycle() }
+            val target = findActiveApplicationWindow(windows)
+            val r = target?.root
+            val appPkg = r?.packageName?.toString()
+            if (r != null) {
+                @Suppress("DEPRECATION") r.recycle()
+            }
+            if (appPkg != null && !com.example.itv.infrastructure.jev.JevObservationHub.isTransientSystemPackage(appPkg)) {
+                appPkg
             } else {
+                val root = rootInActiveWindow
+                val rawPkg = root?.packageName?.toString()
                 @Suppress("DEPRECATION") root?.recycle()
-                val target = findActiveApplicationWindow(windows)
-                val r = target?.root
-                if (r == null) rawPkg else try { r.packageName?.toString() }
-                finally { @Suppress("DEPRECATION") r.recycle() }
+                rawPkg
             }
         } catch (_: Exception) { null }
         com.example.itv.infrastructure.jev.JevObservationHub.foreground(pkg)
@@ -53,21 +56,35 @@ open class WritingGuardService : AccessibilityService() {
             if (!ownScreen) {
                 // Pause once on entry; do not repeatedly write stores on scroll events.
                 com.example.itv.infrastructure.storage.shortform.ShortformStores.pause()
+                observers.onOwnApp()
             }
             ownScreen = true
-            observers.onOwnApp()
             result(true, "ITV 내부 화면 · 구조 탐색 생략 / 개입 보류")
+            com.example.itv.infrastructure.observation.GeneralAppTracker.onObserve(this, pkg)
             return
         }
         ownScreen = false
+        lastFullScanAt = SystemClock.elapsedRealtime()
         observers.beforeWritingCheck(this)
         inspect()
         observers.afterWritingCheck(this)
+        com.example.itv.infrastructure.observation.GeneralAppTracker.onObserve(this, pkg)
     }
+    private var lastFullScanAt = 0L
+    private fun isPowerSaveEligible(now: Long = SystemClock.elapsedRealtime()): Boolean =
+        com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.isStableLongformPlayback(now) ||
+            com.example.itv.infrastructure.observation.instagram.InstagramTracker.isPowerSaveScanEligible(now) ||
+            com.example.itv.infrastructure.observation.GeneralAppTracker.isPowerSaveScanEligible(now)
+
     private val poll = object : Runnable {
         override fun run() {
             scan()
-            handler.postDelayed(this, if (ownScreen) 1000L else 500L)
+            val delayMs = when {
+                ownScreen -> 1000L
+                isPowerSaveEligible() -> 1500L
+                else -> 500L
+            }
+            handler.postDelayed(this, delayMs)
         }
     }
     override fun onServiceConnected() {
@@ -80,19 +97,50 @@ open class WritingGuardService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         // Reels event counters/callbacks are kept synchronous; payload text is not read.
         observers.onEvent(event)
+        val now = SystemClock.elapsedRealtime()
         val eventType = event?.eventType
-        if (eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED ||
+        val pkg = event?.packageName?.toString()
+        val isActiveInteraction = eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED ||
             eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
             eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED ||
-            eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
-            com.example.itv.presentation.coaching.CoachingMonitorService.notifyUserActivity("accessibility_$eventType")
+            eventType == AccessibilityEvent.TYPE_VIEW_CLICKED ||
+            eventType == AccessibilityEvent.TYPE_VIEW_LONG_CLICKED ||
+            eventType == AccessibilityEvent.TYPE_TOUCH_INTERACTION_START ||
+            eventType == AccessibilityEvent.TYPE_TOUCH_INTERACTION_END ||
+            eventType == AccessibilityEvent.TYPE_GESTURE_DETECTION_START ||
+            eventType == AccessibilityEvent.TYPE_GESTURE_DETECTION_END ||
+            eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED
+
+        if (isActiveInteraction) {
+            com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.onUserInteraction(now)
+            com.example.itv.infrastructure.observation.instagram.InstagramTracker.onUserInteraction(now)
+            // 플로팅 HUD(우리 앱 패키지)를 터치/확장할 때는 외부 앱(게임 등)의 조작 타이머를 리셋하지 않음
+            if (pkg != packageName) {
+                com.example.itv.infrastructure.observation.GeneralAppTracker.onUserInteraction(now)
+            }
+            if (eventType != AccessibilityEvent.TYPE_VIEW_FOCUSED) {
+                com.example.itv.presentation.coaching.CoachingMonitorService.notifyUserActivity("accessibility_$eventType")
+            }
         }
-        val now = SystemClock.elapsedRealtime()
-        val pkg = event?.packageName?.toString()
+
+        if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            com.example.itv.infrastructure.observation.GeneralAppTracker.onWindowStateChanged(
+                pkg = pkg,
+                className = event.className?.toString()
+            )
+        }
         if (ownScreen && pkg == packageName &&
             event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
             event.eventType != AccessibilityEvent.TYPE_WINDOWS_CHANGED &&
             now - lastOwnCheck < 1000L) return
+
+        // 유튜브/인스타그램/일반앱 절전 스캔 대상 상태일 때는 단순 TYPE_WINDOW_CONTENT_CHANGED 버스트를 1.4초간 무시하여 배터리 절약
+        if (!isActiveInteraction &&
+            isPowerSaveEligible(now) &&
+            now - lastFullScanAt < 1400L) {
+            return
+        }
+
         lastOwnCheck = now
         // Coalesce bursts without postponing an already scheduled scan (no starvation).
         if (!pendingScan) {
@@ -127,22 +175,44 @@ open class WritingGuardService : AccessibilityService() {
             }
             val pkg = root.packageName?.toString().orEmpty()
             if (pkg.isBlank()) {
+                @Suppress("DEPRECATION") root.recycle()
                 result(true, "앱 식별 불가 · 개입 보류"); return
+            }
+            // 메신저 이외의 모든 앱(유튜브·인스타·웹브라우저·게임·일반앱)은 1,500노드 전체 트리 순회를 생략하고,
+            // Android 프레임워크의 O(1) 단일 포커스 조회(findFocus)만 수행하여 앱 성능 저하 및 배터리 소모를 원천 차단
+            if (pkg !in messengerPackages) {
+                val inputFocus = try { root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) } catch (_: Exception) { null }
+                val isInputFocused = try { inputFocus?.isEditable == true } finally {
+                    if (inputFocus != null) {
+                        @Suppress("DEPRECATION") inputFocus.recycle()
+                    }
+                    @Suppress("DEPRECATION") root.recycle()
+                }
+                when {
+                    pkg == "com.instagram.android" && ReelsProbe.dmScreen() ->
+                        result(true, "Instagram DM 화면 감지 · 개입 보류")
+                    isInputFocused ->
+                        result(true, "입력란 포커스 감지 · 개입 보류")
+                    com.example.itv.domain.jev.JevSettings.isDocumentOrMessagingPackage(pkg) ->
+                        result(true, "문서/메신저 앱 감지 · 개입 보류")
+                    else ->
+                        result(false, "키보드·입력란 보호 조건 미감지 (경량 검사)")
+                }
+                return
             }
             var editable = false
             var focused = false
             var visited = 0
-            var truncated = false
             fun walk(node: AccessibilityNodeInfo, depth: Int) {
                 if (!node.isVisibleToUser) return
-                if (visited >= 1500 || depth > 45) { truncated = true; return }
+                if (visited >= 300 || depth > 35 || (editable && focused)) return
                 visited++
                 if (node.isEditable) {
                     editable = true
                     if (node.isFocused) focused = true
                 }
                 for (i in 0 until node.childCount) {
-                    if (visited >= 1500) { truncated = true; break }
+                    if (visited >= 300 || (editable && focused)) break
                     val child = node.getChild(i) ?: continue
                     try { walk(child, depth + 1) } finally {
                         @Suppress("DEPRECATION")
@@ -155,11 +225,9 @@ open class WritingGuardService : AccessibilityService() {
                 root.recycle()
             }
             when {
-                pkg == "com.instagram.android" && ReelsProbe.dmScreen() -> result(true, "Instagram DM 화면 감지 · 개입 보류")
                 focused -> result(true, "입력란 포커스 감지 · 개입 보류")
-                pkg in messengerPackages && editable -> result(true, "메신저 입력란 감지 · 개입 보류")
-                truncated && pkg !in shortformPackages -> result(true, "화면 구조 검사 제한 · 개입 보류")
-                else -> result(false, "키보드·입력란 보호 조건 미감지")
+                editable -> result(true, "메신저 입력란 감지 · 개입 보류")
+                else -> result(true, "메신저 화면 보호 · 개입 보류")
             }
         } catch (_: Exception) {
             result(true, "작성 상태 확인 오류 · 개입 보류")

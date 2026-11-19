@@ -154,7 +154,7 @@ class BedtimeCareController private constructor(private val context: Context) {
         }
     }
 
-    private fun overlayParams(focusable: Boolean = true): WindowManager.LayoutParams {
+    private fun overlayParams(focusable: Boolean = true, adjustResize: Boolean = false): WindowManager.LayoutParams {
         val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         } else {
@@ -176,6 +176,9 @@ class BedtimeCareController private constructor(private val context: Context) {
             gravity = Gravity.CENTER
             if (focusable) {
                 dimAmount = 0.72f
+            }
+            if (adjustResize) {
+                softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
             }
         }
     }
@@ -206,13 +209,21 @@ class BedtimeCareController private constructor(private val context: Context) {
         }
     }
 
+    fun isDialogShowing(): Boolean = currentDialogView != null || morningBriefingView != null
+
     /**
      * Shows the 3-choice Bedtime Care Dialog.
      * 야간 3분기: 강아지가 평소보다 천천히 조심스럽게 다가와 바닥에 눕고,
      * 주변 배경이 서서히 어두워지며 강아지가 강조됩니다.
      * 강아지를 터치하면 서서히 눈을 뜨며 큰 말풍선 안에 선택지 창이 나타납니다.
      */
-    fun showBedtimeCareDialog(containerHost: FrameLayout? = null, onChoiceDone: (() -> Unit)? = null) {
+    fun showBedtimeCareDialog(
+        containerHost: FrameLayout? = null,
+        bedtimePassedMinutes: Int? = null,
+        continuousMinutes: Double? = null,
+        jevProbabilityDiff: Double? = null,
+        onChoiceDone: (() -> Unit)? = null
+    ) {
         dismissCurrentDialog()
 
         val root = FrameLayout(context).apply {
@@ -292,44 +303,30 @@ class BedtimeCareController private constructor(private val context: Context) {
             setPadding(dp(18), dp(18), dp(18), dp(18) + dp(14)) // 포인터 높이만큼 바닥 여백 확보
         }
 
-        // 헤더: 타이틀과 우상단 ✕ 닫기 버튼
+        // 헤더: 타이틀 (우상단 ✕ 버튼 없이 중앙/상단 안내)
         val titleRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
         val titleText = TextView(context).apply {
-            text = "편안한 수면 준비 시간"
+            text = "오늘 밤, 잠들기 어려운 이유가 무엇인가요?"
             textSize = 15.5f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        }
-        val closeBtnTop = TextView(context).apply {
-            text = "✕"
-            textSize = 17f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.parseColor("#94A3B8"))
-            setPadding(dp(8), dp(4), dp(4), dp(4))
-            isClickable = true
-            isFocusable = true
-            setOnClickListener {
-                dismissCurrentDialog()
-                onChoiceDone?.invoke()
-            }
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
         }
         titleRow.addView(titleText)
-        titleRow.addView(closeBtnTop)
         bubbleContent.addView(titleRow)
 
         val desc = TextView(context).apply {
-            text = "지금 숏폼을 보시는 이유에 맞춰 편안한 밤을 도와드릴게요."
+            text = "지금 겪고 계신 상태에 맞춰 편안한 밤을 도와드릴게요."
             textSize = 12f
             setTextColor(Color.parseColor("#94A3B8"))
             setPadding(0, dp(8), 0, dp(14))
         }
         bubbleContent.addView(desc)
 
-        // 이모티콘 없이 정돈된 선택지 버튼 생성 헬퍼
+        // 정돈된 선택지 버튼 생성 헬퍼
         fun createChoiceButton(mainTitle: String, subTitle: String, onClick: () -> Unit): View {
             val btnLayout = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
@@ -356,8 +353,8 @@ class BedtimeCareController private constructor(private val context: Context) {
             return btnLayout
         }
 
-        // 선택지 1: 불안과 잡념 비우기 (이모티콘 제거)
-        val choice1 = createChoiceButton("불안과 잡념 비우기", "내일 할 일 2~3가지를 적고 머리를 비워요") {
+        // 선택지 1: 불안과 잡념 때문에
+        val choice1 = createChoiceButton("1. 불안과 잡념 때문에", "내일 할 일 2~3가지를 가볍게 적고 머릿속을 비워요") {
             dismissCurrentDialog()
             showCognitiveOffloadingNotepad(containerHost, onChoiceDone)
         }
@@ -365,39 +362,40 @@ class BedtimeCareController private constructor(private val context: Context) {
             bottomMargin = dp(10)
         })
 
-        // 선택지 2: 흑백 화면으로 자극 줄이기 (이모티콘 제거)
-        val choice2 = createChoiceButton("흑백 화면으로 자극 줄이기", "화면의 색을 빼 흑백으로 낮추고 자극을 줄여요") {
+        // 선택지 2: 너무 적적하고 조용해서
+        val choice2 = createChoiceButton("2. 너무 적적하고 조용해서", "시각 자극을 끄고 편안한 빗소리·모닥불 ASMR을 들어요") {
             dismissCurrentDialog()
-            startGrayscaleMode(containerHost, forceManual = false)
-            onChoiceDone?.invoke()
+            showAsmrSelectorDialog(containerHost, onChoiceDone)
         }
         bubbleContent.addView(choice2, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
             bottomMargin = dp(10)
         })
 
-        // 선택지 3: 편안한 수면 사운드 듣기 (이모티콘 제거)
-        val choice3 = createChoiceButton("편안한 수면 사운드 듣기", "시각 자극을 끄고 편안한 ASMR을 들어요") {
+        // 선택지 3: 아직 졸리지 않아서 (닫기 역할을 겸하며 화면 흑백 / 블루라이트 차단 적용)
+        // 사용자의 취침 목표 초과 여부, 연속 사용 시간, Jev 확률 초과폭을 종합하여 흑백 vs 블루라이트 차단 결정
+        val jevDiffPct = (jevProbabilityDiff ?: 0.0) * 100.0
+        val isDeepBedtime = (bedtimePassedMinutes ?: 0) >= 15
+        val isHighFatigue = (continuousMinutes ?: 0.0) >= 30.0 || jevDiffPct >= 10.0
+        val useGrayscale = isDeepBedtime || isHighFatigue
+
+        val choice3Sub = if (useGrayscale) {
+            "눈의 피로를 덜기 위해 흑백 모드로 전환해요 · 상단 알림창에서 원터치 복원"
+        } else {
+            "눈을 자극하는 블루라이트를 차단해요 · 상단 알림창에서 원터치 복원"
+        }
+
+        val choice3 = createChoiceButton("3. 아직 졸리지 않아서", choice3Sub) {
             dismissCurrentDialog()
-            showAsmrSelectorDialog(containerHost, onChoiceDone)
+            if (useGrayscale) {
+                startGrayscaleMode(containerHost, forceManual = false)
+            } else {
+                startWarmFilterMode()
+            }
+            onChoiceDone?.invoke()
         }
         bubbleContent.addView(choice3, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-            bottomMargin = dp(14)
+            bottomMargin = dp(6)
         })
-
-        // 하단 닫기 버튼
-        val cancelBtn = Button(context).apply {
-            text = "그냥 조금만 더 볼래요 (닫기)"
-            textSize = 13f
-            setTextColor(Color.parseColor("#CBD5E1"))
-            background = roundedDrawable(Color.parseColor("#0F172A"), 12, Color.parseColor("#334155"), 1)
-            isClickable = true
-            isFocusable = true
-            setOnClickListener {
-                dismissCurrentDialog()
-                onChoiceDone?.invoke()
-            }
-        }
-        bubbleContent.addView(cancelBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)))
 
         scrollView.addView(bubbleContent)
         bubbleCard.addView(scrollView)
@@ -603,14 +601,21 @@ class BedtimeCareController private constructor(private val context: Context) {
         btnRow.addView(submitBtn, LinearLayout.LayoutParams(dp(180), dp(44)))
         card.addView(btnRow)
 
-        root.addView(card)
+        val scrollView = ScrollView(context).apply {
+            isFillViewport = true
+            overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+            addView(card, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
+                gravity = Gravity.CENTER
+            })
+        }
+        root.addView(scrollView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
 
         if (containerHost != null) {
             containerHost.addView(root, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
             currentDialogView = root
         } else {
             try {
-                wm.addView(root, overlayParams(true))
+                wm.addView(root, overlayParams(focusable = true, adjustResize = true))
                 currentDialogView = root
             } catch (_: Exception) {}
         }
@@ -684,11 +689,19 @@ class BedtimeCareController private constructor(private val context: Context) {
         if (success) {
             if (forceManual) {
                 stopLightObserverForRecovery()
-                Toast.makeText(context, "흑백 모드가 켜졌습니다. (수동 테스트: 밝아도 유지됨)", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "흑백 모드가 켜졌습니다. (상단 알림창에서 바로 해제 가능)", Toast.LENGTH_SHORT).show()
             } else {
-                Toast.makeText(context, "화면 자극을 줄이기 위해 흑백 모드로 전환합니다.", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "화면 자극을 줄이기 위해 흑백 모드로 전환합니다. (알림창에서 해제 가능)", Toast.LENGTH_SHORT).show()
                 startLightObserverForRecovery()
             }
+        }
+    }
+
+    fun startWarmFilterMode() {
+        val success = grayscaleController.enableWarmFilter()
+        if (success) {
+            stopLightObserverForRecovery()
+            Toast.makeText(context, "야간 블루라이트 차단 모드가 켜졌습니다. (상단 알림창에서 바로 해제 가능)", Toast.LENGTH_SHORT).show()
         }
     }
 

@@ -1,7 +1,7 @@
 import { HttpError, reply, readJson, evaluation, identity, id, timestamp, hash } from "./protocol.js";
 import { existing, reserve, finish, resultFor, recordEvent } from "./repository.js";
 
-export const PROMPT_VERSION = "itv-break-v2";
+export const PROMPT_VERSION = "itv-coaching-v4";
 export function createWorker({ upstreamFetch = globalThis.fetch, now = Date.now, uuid = () => crypto.randomUUID() } = {}) {
  return {
   async fetch(request, env) {
@@ -39,16 +39,40 @@ export function createWorker({ upstreamFetch = globalThis.fetch, now = Date.now,
     const reservation = await reserve(env.DB,input,env,started,token,digest,PROMPT_VERSION);
     if (!reservation.owner) return reply(resultFor(reservation.row,true),reservation.row.request_state === "PENDING" ? 202 : 200);
     const c = input.context;
+    const isCombinedMode = input.packageName === "ALL" || (c.raw_general_minutes !== undefined && c.raw_general_minutes > 0);
+    const resolvedCategory = c.app_category || (
+      input.packageName === "com.zhiliaoapp.musically" || input.packageName === "com.instagram.android"
+        ? "SHORTFORM"
+        : input.packageName === "com.google.android.youtube"
+          ? (c.youtube_watch_mode === "SHORTS" ? "SHORTFORM" : "LONGFORM_VIDEO")
+          : "GENERAL"
+    );
     const state = {
-      current_session_minutes:c.session_minutes,continuous_shortform_minutes:c.continuous_minutes,
-      returns_in_last_10_minutes:c.returns_10m,returns_observation_coverage_seconds:c.returns_observed_seconds,bedtime_goal_enabled:c.bedtime_goal_enabled,
-      minutes_after_bedtime_goal:c.bedtime_passed_minutes
+      app_package: input.packageName || "UNKNOWN",
+      app_activity_category: resolvedCategory,
+      activity_phase: c.activity_phase || "UNKNOWN",
+      usage_mode: isCombinedMode ? "COMBINED_TOTAL_USAGE" : "APP_SPECIFIC",
+      current_session_minutes: c.session_minutes,
+      continuous_equivalent_minutes: c.continuous_equivalent_minutes ?? c.continuous_minutes,
+      returns_in_last_10_minutes: c.returns_10m,
+      returns_observation_coverage_seconds: c.returns_observed_seconds,
+      bedtime_goal_enabled: c.bedtime_goal_enabled,
+      minutes_after_bedtime_goal: c.bedtime_passed_minutes
     };
+    if (c.raw_shortform_minutes !== undefined) state.raw_shortform_minutes = c.raw_shortform_minutes;
+    if (c.raw_general_minutes !== undefined) state.raw_general_phone_usage_minutes = c.raw_general_minutes;
+    if (c.longform_watch_minutes !== undefined) state.raw_longform_video_minutes = c.longform_watch_minutes;
+    if (c.current_video_watch_minutes !== undefined) state.current_video_watch_minutes = c.current_video_watch_minutes;
+    if (c.completed_longform_count !== undefined) state.completed_longform_video_count = c.completed_longform_count;
+    if (c.youtube_watch_mode !== undefined) state.youtube_watch_mode = c.youtube_watch_mode;
+    if (c.audio_pipeline_kind !== undefined) state.active_audio_pipeline = c.audio_pipeline_kind;
+    if (c.general_app_idle_seconds !== undefined) state.idle_seconds_without_interaction = c.general_app_idle_seconds;
     if (c.personal_avg_session_minutes !== undefined) state.personal_avg_session_minutes = c.personal_avg_session_minutes;
     if (c.session_vs_personal_avg_ratio !== undefined) state.session_vs_personal_avg_ratio = c.session_vs_personal_avg_ratio;
     if (c.today_shortform_minutes !== undefined) state.today_shortform_minutes = c.today_shortform_minutes;
     if (c.avg_7d_daily_shortform_minutes !== undefined) state.avg_7d_daily_shortform_minutes = c.avg_7d_daily_shortform_minutes;
     if (c.today_vs_7d_avg_ratio !== undefined) state.today_vs_7d_avg_ratio = c.today_vs_7d_avg_ratio;
+    if (c.shortform_share_of_phone_ratio !== undefined) state.shortform_share_of_phone_ratio = c.shortform_share_of_phone_ratio;
     if (c.effective_spm_1m !== undefined) state.effective_swipes_per_minute_1m = c.effective_spm_1m;
     if (c.effective_session_spm !== undefined) state.effective_session_swipes_per_minute = c.effective_session_spm;
     if (c.personal_avg_spm !== undefined) state.personal_avg_swipes_per_minute = c.personal_avg_spm;
@@ -56,12 +80,16 @@ export function createWorker({ upstreamFetch = globalThis.fetch, now = Date.now,
     if (c.swipe_accel_1m !== undefined) state.swipe_acceleration_1m = c.swipe_accel_1m;
     if (c.fast_swipe_streak !== undefined) state.consecutive_fast_swipe_streak = c.fast_swipe_streak;
     if (c.swipe_overheated !== undefined) state.swipe_overheated = c.swipe_overheated;
+    if (c.ambient_lux !== undefined) state.ambient_lux = c.ambient_lux;
+    if (c.screen_brightness !== undefined) state.screen_brightness = c.screen_brightness;
+    if (c.bedtime_distance_minutes !== undefined) state.bedtime_distance_minutes = c.bedtime_distance_minutes;
+    if (c.user_environment_state !== undefined) state.user_environment_state = c.user_environment_state;
     const payload = {
      model:env.JEV_MODEL || "jev-1.14.0",
      state,
      questions:{intervene:{type:"noul",
-      instructions:"Based only on these reported short-form viewing measures, would offering an optional short break now be appropriate? Consider sustained viewing, repeated app returns, and an enabled bedtime goal, as well as optional personal usage baselines/ratios (current session vs personal average session, today's cumulative short-form usage vs 7-day daily average) and swipe-speed dynamics (ad-filtered effective swipes per minute, session and personal average SPM, swipe acceleration, consecutive fast-swipe streak, and swipe overheat state) when present. A disabled bedtime goal provides no evidence. This is appropriateness of timing, not a diagnosis or a prediction that the user will comply. Prefer no when the evidence is insufficient.",
-      criteria:{true:"The observed pattern supports a timely, voluntary break suggestion.",false:"The pattern is brief or insufficient to justify a break suggestion now."}}}
+      instructions:"Evaluate whether suggesting an optional short rest/break is appropriate based on the user's sustained smartphone usage and equivalent immersion.\n\n1. IMMERSION CONVERSION (1:3 MODEL):\n- Usage is normalized in 'continuous_equivalent_minutes'. Short-form video uses 1:1 conversion. Long-form video, gaming, and general phone screen time are weighted at 1:3 ratio (3 minutes of actual usage = 1 minute of equivalent short-form fatigue).\n- Evaluate whether the accumulated sustained equivalent usage represents significant mental or visual fatigue justifying a break suggestion.\n\n2. PURE REST NEED (TIMING MANAGED BY CLIENT):\n- Do NOT worry about whether the user is in the middle of a game match, video, or typing. The on-device client handles non-intrusive presentation timing (holding the break suggestion until a match ends, video pauses, or idle state).\n- Your role is solely to judge whether the user's cumulative immersion and usage duration warrant offering a break.\n\n3. CRITICAL ANTI-DOUBLE-COUNTING REQUIREMENT:\n- The on-device mobile client already dynamically shifts its acceptance threshold (-40%p to +25%p) for personal baseline ratios, real-time swipe dynamics, ambient darkness near bedtime, and resistance history.\n- DO NOT adjust your intervention probability for those client-side factors. Focus strictly on whether the sustained equivalent minutes, app category, and cumulative session duration justify recommending rest.\n\nA disabled bedtime goal provides no evidence. Prefer false when usage is brief or evidence is insufficient.",
+      criteria:{true:"The cumulative immersion and sustained equivalent duration indicate that a rest/break suggestion is warranted.",false:"Usage duration is brief or evidence is insufficient to justify a break suggestion."}}}
     };
     let outcome;
     try {

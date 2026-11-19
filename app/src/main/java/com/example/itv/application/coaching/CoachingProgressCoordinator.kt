@@ -26,8 +26,8 @@ internal class CoachingProgressCoordinator(
         responseController.suppressed = false
         effects.hideOffer()
     }
-    fun observe(now: Long, using: Boolean, offerVisible: Boolean): Boolean {
-        if (usageClock.observe(now, using)) reset()
+    fun observe(now: Long, using: Boolean, offerVisible: Boolean, isShortform: Boolean = false): Boolean {
+        if (usageClock.observe(now, using, isShortform)) reset()
         if (!using) {
             safeSince = null
             if (offerVisible) { effects.hideOffer(); responseController.offered = false }
@@ -38,7 +38,11 @@ internal class CoachingProgressCoordinator(
             val guardReason = observation.guardReason
             if (guardReason != null) {
                 safeSince = null
-                if (offerVisible) { effects.hideOffer(); responseController.offered = false }
+                // 스크린샷 미리보기, 알림, 볼륨바 등 방해 요소가 뜨더라도 실제 메시지 작성 중이 아니면 오버레이를 닫지 않음
+                if (offerVisible && observation.isActivelyWriting()) {
+                    effects.hideOffer()
+                    responseController.offered = false
+                }
             } else if (using && safeSince == null) safeSince = now
             if (!using) {
                 effects.status( "일시정지 · 누적 ${usageClock.usedMs / 1000}초 · 확인된 휴식 ${usageClock.restMs / 1000}초")
@@ -60,12 +64,23 @@ internal class CoachingProgressCoordinator(
                                 waitingYoutube = false; waitingTransition = false
                                 effects.status( "YouTube/현재 화면 확인 중 · 개입 보류")
                             }
-                            else -> when (observation.reelsState) {
-                                1 -> {
+                            else -> when {
+                                observation.youtubeLongformWatching -> {
+                                    waitingYoutube = false; waitingTransition = true
+                                    effects.status( "개입 대기 · 롱폼 영상 종료/전환을 기다리는 중")
+                                }
+                                observation.reelsState == 1 -> {
                                     waitingYoutube = false; waitingTransition = true
                                     effects.status( "개입 대기 · 다음 릴스 전환을 기다리는 중")
                                 }
-                                0 -> { waitingYoutube = false; waitingTransition = false; effects.showOffer() }
+                                observation.generalAppDeferredReason != null -> {
+                                    waitingYoutube = false; waitingTransition = true
+                                    effects.status( "개입 대기 · ${observation.generalAppDeferredReason}")
+                                }
+                                observation.reelsState == 0 -> {
+                                    waitingYoutube = false; waitingTransition = false
+                                    effects.showOffer()
+                                }
                                 else -> effects.status( "현재 화면 판별 불가 · 개입 보류")
                             }
                         }

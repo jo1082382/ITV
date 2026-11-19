@@ -70,7 +70,9 @@ class AiHistoryActivity:ComponentActivity(){
  }}}
 }
 @Composable internal fun InfoCard(title:String,content:@Composable ColumnScope.()->Unit){
- OutlinedCard(Modifier.fillMaxWidth(),colors=CardDefaults.outlinedCardColors(containerColor=RecordContentGreen,contentColor=Color(0xFF243025))){
+ val isDark = com.example.itv.presentation.components.LocalDarkTheme.current
+ val cardContentColor = if (isDark) Color(0xFFE2EBE4) else Color(0xFF243025)
+ OutlinedCard(Modifier.fillMaxWidth(),colors=CardDefaults.outlinedCardColors(containerColor=RecordContentGreen,contentColor=cardContentColor)){
   Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){
    Text(title,fontSize=20.sp,fontWeight=FontWeight.Bold);content()
   }

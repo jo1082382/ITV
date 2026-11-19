@@ -57,8 +57,10 @@ internal fun NightSummary(report: NightReport?, error: String?, days: Int) {
         } catch (e: kotlinx.coroutines.CancellationException) { throw e }
         catch (e: Exception) { summaryError = "수면 확인 기록 조회 실패 · 아래 값은 갱신되지 않았을 수 있습니다" }
     }
+    val isDark = com.example.itv.presentation.components.LocalDarkTheme.current
+    val cardContentColor = if (isDark) Color(0xFFE2EBE4) else Color(0xFF243025)
     OutlinedCard(Modifier.fillMaxWidth(), colors = CardDefaults.outlinedCardColors(
-        containerColor = RecordContentGreen, contentColor = Color(0xFF243025))) {
+        containerColor = RecordContentGreen, contentColor = cardContentColor)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("수면 길이 · 사용자 확인 우선", style = MaterialTheme.typography.titleLarge)
             val bedtimeEstimate = remember(confirmations, report?.zone) {
@@ -67,15 +69,15 @@ internal fun NightSummary(report: NightReport?, error: String?, days: Int) {
             if (bedtimeEstimate != null) {
                 Surface(
                     shape = RoundedCornerShape(12.dp),
-                    color = Color.White.copy(alpha = 0.85f),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFC8DEC0)),
+                    color = if (isDark) Color(0xFF253027) else Color.White.copy(alpha = 0.85f),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, if (isDark) Color(0xFF3E5445) else Color(0xFFC8DEC0)),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("평소 추정 취침 시각", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color(0xFF1B4332))
+                            Text("평소 추정 취침 시각", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = if (isDark) Color(0xFF85E3B3) else Color(0xFF1B4332))
                             Spacer(Modifier.weight(1f))
-                            Text("확인된 기록 ${bedtimeEstimate.validCount}일", style = MaterialTheme.typography.labelSmall, color = Color(0xFF52796F))
+                            Text("확인된 기록 ${bedtimeEstimate.validCount}일", style = MaterialTheme.typography.labelSmall, color = if (isDark) Color(0xFFA5C4B5) else Color(0xFF52796F))
                         }
                         Text(
                             text = "평균 취침 %02d:%02d ~ 기상 %02d:%02d (평균 %d시간 %d분)".format(
@@ -85,12 +87,12 @@ internal fun NightSummary(report: NightReport?, error: String?, days: Int) {
                             ),
                             style = MaterialTheme.typography.bodyMedium,
                             fontWeight = FontWeight.Bold,
-                            color = Color(0xFF2D6A4F)
+                            color = if (isDark) Color(0xFF5ED38C) else Color(0xFF2D6A4F)
                         )
                         Text(
                             text = "사용자가 직접 선택하거나 수정한 유효 수면 기록의 평균입니다. 평소 잠드는 시간 파악 및 누워서 시청하는 구간 추정에 활용됩니다.",
                             style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFF52796F)
+                            color = if (isDark) Color(0xFFA5C4B5) else Color(0xFF52796F)
                         )
                     }
                 }
@@ -205,6 +207,7 @@ internal fun SleepClock(row: NightSegment, zone: ZoneId, others: List<NightSegme
     var bubbleColor by remember { mutableStateOf(Color(0xFF35443B)) }
     val start = Instant.ofEpochMilli(row.start).atZone(zone)
     val end = Instant.ofEpochMilli(row.end!!).atZone(zone)
+    val isDark = com.example.itv.presentation.components.LocalDarkTheme.current
     val startMinute = start.hour * 60 + start.minute + start.second / 60f
     val sweep = (row.minutes / 1440.0 * 360).coerceIn(0.0, 360.0).toFloat()
     val startAngle = startMinute / 1440f * 360 - 90
@@ -282,7 +285,8 @@ internal fun SleepClock(row: NightSegment, zone: ZoneId, others: List<NightSegme
                 val diameter = size.minDimension * 0.78f
                 val left = (size.width-diameter)/2
                 val top = (size.height-diameter)/2
-                drawCircle(Color(0xFF35443B), radius = diameter/2 + 8.dp.toPx())
+                val clockBorderColor = if (isDark) Color(0xFF161C18) else Color(0xFF35443B)
+                drawCircle(clockBorderColor, radius = diameter/2 + 8.dp.toPx())
                 drawCircle(Color(0xFF66B978), radius = diameter/2)
                 // All candidates share the end date; draw alternatives first, main last.
                 others.forEach { candidate ->
@@ -309,9 +313,9 @@ internal fun SleepClock(row: NightSegment, zone: ZoneId, others: List<NightSegme
             Text("18", Modifier.align(Alignment.CenterStart), style = MaterialTheme.typography.labelMedium)
             if (showMain) Column(Modifier.offset(x = (cos(midpoint)*60).toFloat().dp,
                 y = (sin(midpoint)*60).toFloat().dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("Zzz", color = Color(0xFF341519), style = MaterialTheme.typography.titleLarge,
+                Text("Zzz", color = Color.White, style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold)
-                Text("${row.briefWakeCount}회", color = Color(0xFF341519),
+                Text("${row.briefWakeCount}회", color = Color.White.copy(alpha = 0.9f),
                     style = MaterialTheme.typography.labelSmall)
             }
         }

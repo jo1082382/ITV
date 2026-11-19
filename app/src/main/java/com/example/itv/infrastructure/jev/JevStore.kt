@@ -88,7 +88,7 @@ private class TestToken(context: Context) {
 }
 internal fun JevSettings.json(): JSONObject = JSONObject().apply {
     put("enabled",enabled);put("collectionConsent",collectionConsent);put("actualIntervention",actualIntervention)
-    put("testerId",testerId);put("instagram",instagram);put("youtube",youtube)
+    put("testerId",testerId);put("instagram",instagram);put("youtube",youtube);put("allApps",allApps)
     put("continuousEnabled",continuousEnabled);put("continuousSeconds",continuousSeconds)
     put("returnsEnabled",returnsEnabled);put("returnsThreshold",returnsThreshold)
     put("bedtimeEnabled",bedtimeEnabled);put("bedtimeDelayMinutes",bedtimeDelayMinutes);put("bedtimeWindowMinutes",bedtimeWindowMinutes)
@@ -99,6 +99,7 @@ internal fun JevSettings.json(): JSONObject = JSONObject().apply {
 private fun decode(j: JSONObject) = JevSettings(
     enabled=j.optBoolean("enabled"),collectionConsent=j.optBoolean("collectionConsent"),actualIntervention=j.optBoolean("actualIntervention"),
     testerId=j.optString("testerId","T01"),instagram=j.optBoolean("instagram",true),youtube=j.optBoolean("youtube",true),
+    allApps=j.optBoolean("allApps",true),
     continuousEnabled=j.optBoolean("continuousEnabled",true),continuousSeconds=j.optInt("continuousSeconds",900),
     returnsEnabled=j.optBoolean("returnsEnabled",true),returnsThreshold=j.optInt("returnsThreshold",3),
     bedtimeEnabled=j.optBoolean("bedtimeEnabled",true),bedtimeDelayMinutes=j.optInt("bedtimeDelayMinutes",0),

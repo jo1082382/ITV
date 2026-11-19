@@ -10,6 +10,7 @@ import com.example.itv.presentation.auth.AccountSettingsScreen
 import com.example.itv.presentation.coaching.CoachingSettingsScreen
 import com.example.itv.composition.AuthComposition
 import com.example.itv.presentation.permissions.PermissionSettingsActivity
+import com.example.itv.infrastructure.theme.UserThemeStore
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
@@ -89,7 +90,41 @@ fun ItvMainScreen(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             if (activeTab == "home") {
-                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.End) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val isDark = LocalDarkTheme.current
+                    val context = LocalContext.current
+                    Surface(
+                        onClick = { UserThemeStore.toggleDarkMode(context) },
+                        modifier = Modifier.size(64.dp),
+                        shape = RoundedCornerShape(18.dp),
+                        color = ItvMint,
+                        contentColor = if (isDark) Color(0xFFFFD54F) else ItvGreen,
+                        border = BorderStroke(1.dp, ItvLine)
+                    ) {
+                        Column(
+                            Modifier.fillMaxSize(),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Text(
+                                if (isDark) "☀️" else "🌙",
+                                style = MaterialTheme.typography.headlineSmall
+                            )
+                            Text(
+                                if (isDark) "라이트" else "다크",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isDark) Color(0xFFFFD54F) else ItvGreen
+                            )
+                        }
+                    }
+
                     Surface(
                         onClick = { settingsOpen = true },
                         modifier = Modifier.size(64.dp),
@@ -722,6 +757,13 @@ private fun HomeSettingsDrawer(
                     DrawerSettingItem("코칭 설정", "개입 방식, 강도, 캐릭터 말투 설정") {
                         onClose()
                         onOpenCoachingSettings()
+                    }
+                    val isDarkThemeActive = LocalDarkTheme.current
+                    DrawerSettingItem(
+                        if (isDarkThemeActive) "화면 테마: 다크 모드 (☀️)" else "화면 테마: 라이트 모드 (🌙)",
+                        if (isDarkThemeActive) "현재 어두운 화면 사용 중 · 탭하여 라이트 모드로 전환" else "현재 밝은 화면 사용 중 · 탭하여 다크 모드로 전환"
+                    ) {
+                        UserThemeStore.toggleDarkMode(context)
                     }
                     if (com.example.itv.infrastructure.jev.JevFeature.available()) DrawerSettingItem("Jev 공동 테스트", "임계값·수동 요청·판단 기록·평가") {
                         onClose()

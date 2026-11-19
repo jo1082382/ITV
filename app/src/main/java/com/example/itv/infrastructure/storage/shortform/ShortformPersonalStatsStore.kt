@@ -27,7 +27,8 @@ internal object ShortformPersonalStatsStore {
     private const val MAX_STORED_SESSIONS = 300
 
     enum class TargetFilter(val label: String) {
-        COMBINED("통합"),
+        PHONE_TOTAL("휴대폰 전체"),
+        COMBINED("통합 숏폼"),
         INSTAGRAM("인스타 릴스"),
         YOUTUBE("유튜브 쇼츠")
     }
@@ -78,6 +79,25 @@ internal object ShortformPersonalStatsStore {
         val currentVsAvgSessionRatio: Double?,
         /** 7-day average session duration divided by 30-day (personal) average session duration. */
         val session7dVs30dRatio: Double?,
+
+        // 2-B. Phone total session & shortform ratio metrics (휴대폰 전체 세션 및 숏폼 배율 환산)
+        val phoneCurrentSessionMs: Long = 0L,
+        val phoneCurrentWeightedSessionMs: Long = 0L,
+        val phoneCurrentShortformRatio: Double? = null,
+        val phoneAvgSessionMs: Long = 0L,
+        val phoneAvgWeightedSessionMs: Long = 0L,
+        val phoneMaxSessionMs: Long = 0L,
+        val phoneTotalSessions: Int = 0,
+        val phoneAvg7dSessionMs: Long = 0L,
+        val phoneAvg7dWeightedSessionMs: Long = 0L,
+        val phoneMax7dSessionMs: Long = 0L,
+        val phoneSessionCount7d: Int = 0,
+        val phoneAvg7dShortformRatio: Double? = null,
+        val phoneAvg30dSessionMs: Long = 0L,
+        val phoneAvg30dWeightedSessionMs: Long = 0L,
+        val phoneMax30dSessionMs: Long = 0L,
+        val phoneSessionCount30d: Int = 0,
+        val phoneAvg30dShortformRatio: Double? = null,
 
         // 3. Transitions (Swipes) & SPM personalization
         val todaySwipes: Long,
@@ -132,9 +152,11 @@ internal object ShortformPersonalStatsStore {
     data class PersonalizedSummary(
         val combined: PersonalizedTargetMetrics,
         val instagram: PersonalizedTargetMetrics,
-        val youtube: PersonalizedTargetMetrics
+        val youtube: PersonalizedTargetMetrics,
+        val phoneTotal: PersonalizedTargetMetrics? = null
     ) {
         fun forFilter(filter: TargetFilter): PersonalizedTargetMetrics = when (filter) {
+            TargetFilter.PHONE_TOTAL -> phoneTotal ?: combined
             TargetFilter.COMBINED -> combined
             TargetFilter.INSTAGRAM -> instagram
             TargetFilter.YOUTUBE -> youtube
@@ -178,6 +200,21 @@ internal object ShortformPersonalStatsStore {
     private var cachedBimodalClusters: com.example.itv.domain.records.DayTypeClusterResult? = null
     @Volatile
     private var cachedPhoneBimodalClusters: com.example.itv.domain.records.DayTypeClusterResult? = null
+    @Volatile
+    var cachedPhone30dWeightedAvgSessionMs: Long = 0L
+        private set
+    @Volatile
+    var cachedPhone30dRawAvgSessionMs: Long = 0L
+        private set
+    @Volatile
+    var cachedPhone7dWeightedAvgSessionMs: Long = 0L
+        private set
+    @Volatile
+    var cachedPhone7dRawAvgSessionMs: Long = 0L
+        private set
+    @Volatile
+    var cachedPhoneAvgShortformRatio: Double? = null
+        private set
 
     data class QuickPersonalMetrics(
         val avgSessionMs: Long,
@@ -313,6 +350,24 @@ internal object ShortformPersonalStatsStore {
             )
         }
         cachedPhoneBimodalClusters = com.example.itv.domain.records.DayTypeUsageClusterer.cluster(phoneClusterProfiles)
+
+        val phoneEvents = runCatching {
+            com.example.itv.infrastructure.records.AndroidRecordSource(appCtx).events(start30dWall, nowWall)
+        }.getOrDefault(emptyList())
+        val parsedPhoneSessions = parsePhoneSessions(phoneEvents)
+        if (parsedPhoneSessions.isNotEmpty()) {
+            val phone30d = parsedPhoneSessions.filter { !it.date.isBefore(start30d) && !it.date.isAfter(todayDate) }
+            val phone7d = parsedPhoneSessions.filter { !it.date.isBefore(start7d) && !it.date.isAfter(todayDate) }
+            if (phone30d.isNotEmpty()) {
+                cachedPhone30dWeightedAvgSessionMs = calculateRepresentativeSessionLengths(phone30d.map { it.weightedDurationMs }, fallbackMs = 180_000L)
+                cachedPhone30dRawAvgSessionMs = calculateRepresentativeSessionLengths(phone30d.map { it.durationMs }, fallbackMs = 300_000L)
+                cachedPhoneAvgShortformRatio = phone30d.map { it.shortformRatio }.average()
+            }
+            if (phone7d.isNotEmpty()) {
+                cachedPhone7dWeightedAvgSessionMs = calculateRepresentativeSessionLengths(phone7d.map { it.weightedDurationMs }, fallbackMs = cachedPhone30dWeightedAvgSessionMs)
+                cachedPhone7dRawAvgSessionMs = calculateRepresentativeSessionLengths(phone7d.map { it.durationMs }, fallbackMs = cachedPhone30dRawAvgSessionMs)
+            }
+        }
     }
 
     private fun expireStaleRunIfNeeded(pkg: String, run: ActiveRun, nowElapsed: Long, nowWall: Long) {
@@ -333,6 +388,107 @@ internal object ShortformPersonalStatsStore {
         }
     }
 
+    data class PhoneSessionRecord(
+        val date: LocalDate,
+        val startWallMs: Long,
+        val endWallMs: Long,
+        val durationMs: Long,
+        val shortformMs: Long,
+        val generalMs: Long,
+        val weightedDurationMs: Long = shortformMs + (generalMs / 3L)
+    ) {
+        val shortformRatio: Double
+            get() = if (durationMs > 0L) (shortformMs.toDouble() / durationMs.toDouble()).coerceIn(0.0, 1.0) else 0.0
+    }
+
+    fun parsePhoneSessions(events: List<com.example.itv.domain.records.UsageObservation>): List<PhoneSessionRecord> {
+        if (events.isEmpty()) return emptyList()
+        val sorted = events.sortedBy { it.timeStamp }
+        val result = mutableListOf<PhoneSessionRecord>()
+        var sessionStart: Long? = null
+        var lastActive: Long? = null
+        var activePkg: String? = null
+        var sfMs = 0L
+        var genMs = 0L
+
+        fun closeSession(endAt: Long) {
+            val start = sessionStart ?: return
+            val rawDur = (endAt - start).coerceAtLeast(0L)
+            if (rawDur >= MIN_VALID_SESSION_MS) {
+                val totalAppMs = sfMs + genMs
+                val actualSf = if (totalAppMs > 0L) ((rawDur * (sfMs.toDouble() / totalAppMs)).toLong()).coerceIn(0L, rawDur) else sfMs.coerceAtMost(rawDur)
+                val actualGen = (rawDur - actualSf).coerceAtLeast(0L)
+                val weighted = actualSf + (actualGen / 3L)
+                val date = Instant.ofEpochMilli(start).atZone(ZoneId.systemDefault()).toLocalDate()
+                result.add(PhoneSessionRecord(date, start, endAt, rawDur, actualSf, actualGen, weighted))
+            }
+            sessionStart = null
+            lastActive = null
+            activePkg = null
+            sfMs = 0L
+            genMs = 0L
+        }
+
+        for (e in sorted) {
+            val t = e.timeStamp
+            when (e.eventType) {
+                com.example.itv.domain.records.ObservationKind.SCREEN_INTERACTIVE,
+                com.example.itv.domain.records.ObservationKind.KEYGUARD_HIDDEN -> {
+                    if (sessionStart == null) {
+                        sessionStart = t
+                        lastActive = t
+                    }
+                }
+                com.example.itv.domain.records.ObservationKind.SCREEN_NON_INTERACTIVE,
+                com.example.itv.domain.records.ObservationKind.KEYGUARD_SHOWN,
+                com.example.itv.domain.records.ObservationKind.DEVICE_SHUTDOWN -> {
+                    if (sessionStart != null) {
+                        val prev = lastActive ?: sessionStart!!
+                        val dt = (t - prev).coerceAtLeast(0L)
+                        if (dt in 1L..60_000L && activePkg != null) {
+                            if (activePkg == PKG_INSTAGRAM || activePkg == PKG_YOUTUBE) sfMs += dt else genMs += dt
+                        }
+                        closeSession(t)
+                    }
+                }
+                com.example.itv.domain.records.ObservationKind.ACTIVITY_RESUMED -> {
+                    if (sessionStart == null) {
+                        sessionStart = t
+                        lastActive = t
+                    } else {
+                        val prev = lastActive ?: sessionStart!!
+                        val dt = (t - prev).coerceAtLeast(0L)
+                        if (dt in 1L..60_000L && activePkg != null) {
+                            if (activePkg == PKG_INSTAGRAM || activePkg == PKG_YOUTUBE) sfMs += dt else genMs += dt
+                        }
+                        lastActive = t
+                    }
+                    activePkg = e.packageName
+                }
+                com.example.itv.domain.records.ObservationKind.ACTIVITY_PAUSED -> {
+                    if (sessionStart != null) {
+                        val prev = lastActive ?: sessionStart!!
+                        val dt = (t - prev).coerceAtLeast(0L)
+                        if (dt in 1L..60_000L && activePkg != null) {
+                            if (activePkg == PKG_INSTAGRAM || activePkg == PKG_YOUTUBE) sfMs += dt else genMs += dt
+                        }
+                        lastActive = t
+                    }
+                }
+                else -> {}
+            }
+            val activeTime = lastActive
+            if (sessionStart != null && activeTime != null && (t - activeTime) >= 30_000L) {
+                closeSession(activeTime)
+            }
+        }
+        val activeTime = lastActive
+        if (sessionStart != null && activeTime != null) {
+            closeSession(activeTime)
+        }
+        return result
+    }
+
     /**
      * Calculates the representative personal session length using the midpoint between
      * the median and the maximum ((median + max) / 2), filtering out micro-sessions under 1 minute (60s).
@@ -342,14 +498,20 @@ internal object ShortformPersonalStatsStore {
         sessions: List<SessionRecord>,
         fallbackMs: Long = 0L,
         minDurationMs: Long = MIN_REPRESENTATIVE_SESSION_MS
+    ): Long = calculateRepresentativeSessionLengths(sessions.map { it.durationMs }, fallbackMs, minDurationMs)
+
+    fun calculateRepresentativeSessionLengths(
+        durations: List<Long>,
+        fallbackMs: Long = 0L,
+        minDurationMs: Long = MIN_REPRESENTATIVE_SESSION_MS
     ): Long {
-        val eligible = sessions.filter { it.durationMs >= minDurationMs }
+        val eligible = durations.filter { it >= minDurationMs }
         val target = when {
             eligible.isNotEmpty() -> eligible
-            sessions.isNotEmpty() -> sessions
+            durations.isNotEmpty() -> durations
             else -> return fallbackMs
         }
-        val sorted = target.map { it.durationMs }.sorted()
+        val sorted = target.sorted()
         val median = if (sorted.size % 2 == 1) {
             sorted[sorted.size / 2]
         } else {
@@ -375,7 +537,30 @@ internal object ShortformPersonalStatsStore {
         }
         val appSessions = sessions.filter { it.packageName == pkg }
         val basisSessions = if (appSessions.size >= 2) appSessions else sessions
-        val avgSessionMs = calculateRepresentativeSessionMs(basisSessions)
+        val shortformAvgSessionMs = calculateRepresentativeSessionMs(basisSessions)
+
+        if (cachedPhone30dRawAvgSessionMs == 0L) {
+            val appCtx = context.applicationContext
+            val zone = ZoneId.systemDefault()
+            val nowWallMs = System.currentTimeMillis()
+            val start30dWallMs = LocalDate.now().minusDays(29).atStartOfDay(zone).toInstant().toEpochMilli()
+            val events = runCatching {
+                com.example.itv.infrastructure.records.AndroidRecordSource(appCtx).events(start30dWallMs, nowWallMs)
+            }.getOrDefault(emptyList())
+            val parsed = parsePhoneSessions(events)
+            if (parsed.isNotEmpty()) {
+                val p30 = parsed.filter { !it.date.isBefore(LocalDate.now().minusDays(29)) && !it.date.isAfter(LocalDate.now()) }
+                if (p30.isNotEmpty()) {
+                    cachedPhone30dRawAvgSessionMs = calculateRepresentativeSessionLengths(p30.map { it.durationMs }, fallbackMs = 0L)
+                    cachedPhone30dWeightedAvgSessionMs = calculateRepresentativeSessionLengths(p30.map { it.weightedDurationMs }, fallbackMs = 0L)
+                }
+            }
+        }
+
+        val phoneRawAvgMs = cachedPhone30dRawAvgSessionMs
+        val phoneWeightedAvgMs = cachedPhone30dWeightedAvgSessionMs
+        val phoneBaselineAvgMs = if (phoneRawAvgMs >= 30_000L) phoneRawAvgMs else (if (phoneWeightedAvgMs >= 30_000L) phoneWeightedAvgMs else shortformAvgSessionMs)
+        val avgSessionMs = phoneBaselineAvgMs
 
         val activeRunMs = run?.takeIf {
             it.id.isNotEmpty() && nowElapsed - it.lastConfirmedElapsed in 0L until SESSION_GRACE_MS
@@ -438,7 +623,11 @@ internal object ShortformPersonalStatsStore {
             globalAvgSessionMs = avgSessionMs,
             globalAvgDailyMs = avg7dMs
         )
-        val dynamicSessionBaselineMs = hybridDecision.effectiveAvgSessionMs.takeIf { it >= 30_000L } ?: avgSessionMs
+        val dynamicSessionBaselineMs = if (phoneBaselineAvgMs >= 30_000L) {
+            phoneBaselineAvgMs
+        } else {
+            hybridDecision.effectiveAvgSessionMs.takeIf { it >= 30_000L } ?: avgSessionMs
+        }
         val dynamicAvgSessionMinutes = if (dynamicSessionBaselineMs >= 30_000L) round2(dynamicSessionBaselineMs / 60_000.0) else null
         val dynamicSessionVsAvgRatio = if (dynamicSessionBaselineMs >= 30_000L && effectiveCurrentSessionMs > 0L) {
             round2(effectiveCurrentSessionMs.toDouble() / dynamicSessionBaselineMs.toDouble())
@@ -810,6 +999,38 @@ internal object ShortformPersonalStatsStore {
         }
         cachedPhoneBimodalClusters = phoneClusterResult
 
+        val phoneEvents = runCatching {
+            com.example.itv.infrastructure.records.AndroidRecordSource(appCtx).events(start30dWall, nowWall)
+        }.getOrDefault(emptyList())
+        val parsedPhoneSessions = parsePhoneSessions(phoneEvents)
+        val phone30d = parsedPhoneSessions.filter { !it.date.isBefore(start30d) && !it.date.isAfter(todayDate) }
+        val phone7d = parsedPhoneSessions.filter { !it.date.isBefore(start7d) && !it.date.isAfter(todayDate) }
+
+        val phoneAvg7dSessionMs = calculateRepresentativeSessionLengths(phone7d.map { it.durationMs }, fallbackMs = 0L)
+        val phoneAvg7dWeightedSessionMs = calculateRepresentativeSessionLengths(phone7d.map { it.weightedDurationMs }, fallbackMs = 0L)
+        val phoneMax7dSessionMs = phone7d.maxOfOrNull { it.durationMs } ?: 0L
+        val phoneSessionCount7d = phone7d.size
+        val phoneAvg7dShortformRatio = if (phone7d.isNotEmpty()) phone7d.map { it.shortformRatio }.average() else null
+
+        val phoneAvg30dSessionMs = calculateRepresentativeSessionLengths(phone30d.map { it.durationMs }, fallbackMs = 0L)
+        val phoneAvg30dWeightedSessionMs = calculateRepresentativeSessionLengths(phone30d.map { it.weightedDurationMs }, fallbackMs = 0L)
+        val phoneMax30dSessionMs = phone30d.maxOfOrNull { it.durationMs } ?: 0L
+        val phoneSessionCount30d = phone30d.size
+        val phoneAvg30dShortformRatio = if (phone30d.isNotEmpty()) phone30d.map { it.shortformRatio }.average() else null
+
+        if (phoneAvg30dSessionMs > 0L) {
+            cachedPhone30dRawAvgSessionMs = phoneAvg30dSessionMs
+        }
+        if (phoneAvg30dWeightedSessionMs > 0L) {
+            cachedPhone30dWeightedAvgSessionMs = phoneAvg30dWeightedSessionMs
+        }
+
+        val todayPhoneSessions = parsedPhoneSessions.filter { it.date == todayDate }
+        val latestTodayPhone = todayPhoneSessions.maxByOrNull { it.endWallMs }
+        val phoneCurrentSessionMs = latestTodayPhone?.durationMs ?: 0L
+        val phoneCurrentWeightedSessionMs = latestTodayPhone?.weightedDurationMs ?: 0L
+        val phoneCurrentShortformRatio = latestTodayPhone?.shortformRatio
+
         fun buildMetrics(
             filter: TargetFilter,
             dailyMap: Map<LocalDate, DailyAgg>,
@@ -1050,6 +1271,23 @@ internal object ShortformPersonalStatsStore {
                 avg30dSessionCount = avg30dSessionCount,
                 currentVsAvgSessionRatio = currentVsAvgSessionRatio,
                 session7dVs30dRatio = session7dVs30dRatio,
+                phoneCurrentSessionMs = phoneCurrentSessionMs,
+                phoneCurrentWeightedSessionMs = phoneCurrentWeightedSessionMs,
+                phoneCurrentShortformRatio = phoneCurrentShortformRatio,
+                phoneAvgSessionMs = phoneAvg30dSessionMs,
+                phoneAvgWeightedSessionMs = phoneAvg30dWeightedSessionMs,
+                phoneMaxSessionMs = phoneMax30dSessionMs,
+                phoneTotalSessions = phoneSessionCount30d,
+                phoneAvg7dSessionMs = phoneAvg7dSessionMs,
+                phoneAvg7dWeightedSessionMs = phoneAvg7dWeightedSessionMs,
+                phoneMax7dSessionMs = phoneMax7dSessionMs,
+                phoneSessionCount7d = phoneSessionCount7d,
+                phoneAvg7dShortformRatio = phoneAvg7dShortformRatio,
+                phoneAvg30dSessionMs = phoneAvg30dSessionMs,
+                phoneAvg30dWeightedSessionMs = phoneAvg30dWeightedSessionMs,
+                phoneMax30dSessionMs = phoneMax30dSessionMs,
+                phoneSessionCount30d = phoneSessionCount30d,
+                phoneAvg30dShortformRatio = phoneAvg30dShortformRatio,
                 todaySwipes = todaySwipes,
                 total7dSwipes = total7dSwipes,
                 avg7dDailySwipes = avg7dDailySwipes,
@@ -1121,6 +1359,101 @@ internal object ShortformPersonalStatsStore {
             PKG_YOUTUBE to ytMetrics.avg7dDailyMs
         )
 
+        val phoneDailyAggMap = phoneDailyMap.mapValues { (d, ms) ->
+            DailyAgg(d, ms, swipes = 0L, observed = ms > 0L)
+        }
+        val phoneTodayMs = maxOf(phoneDailyMap[todayDate] ?: 0L, totalPhoneTodayMs)
+        val rawPhoneDays7 = phoneDailyAggMap.values.filter { !it.date.isBefore(start7d) && !it.date.isAfter(todayDate) }
+        val phoneDays7 = rawPhoneDays7.filter { it.durationMs >= MIN_VALID_SESSION_MS }.ifEmpty { rawPhoneDays7.filter { it.durationMs > 0L } }
+        val phoneObservedDays7d = phoneDays7.size.coerceAtLeast(1)
+        val phoneTotal7dMs = phoneDays7.sumOf { it.durationMs }
+        val phoneAvg7dDailyMs = if (phoneObservedDays7d > 0) phoneTotal7dMs / phoneObservedDays7d else 0L
+        val phoneTodayVs7dRatio = if (phoneAvg7dDailyMs > 0L && phoneTodayMs > 0L) phoneTodayMs.toDouble() / phoneAvg7dDailyMs.toDouble() else null
+
+        val rawPhoneDays30 = phoneDailyAggMap.values.filter { !it.date.isBefore(start30d) && !it.date.isAfter(todayDate) }
+        val phoneDays30 = rawPhoneDays30.filter { it.durationMs >= MIN_VALID_SESSION_MS }.ifEmpty { rawPhoneDays30.filter { it.durationMs > 0L } }
+        val phoneObservedDays30d = phoneDays30.size.coerceAtLeast(1)
+        val phoneTotal30dMs = phoneDays30.sumOf { it.durationMs }
+        val phoneAvg30dDailyMs = if (phoneObservedDays30d > 0) phoneTotal30dMs / phoneObservedDays30d else 0L
+        val phoneTodayVs30dRatio = if (phoneAvg30dDailyMs > 0L && phoneTodayMs > 0L) phoneTodayMs.toDouble() / phoneAvg30dDailyMs.toDouble() else null
+        val phoneAvg7dVs30dRatio = if (phoneAvg30dDailyMs > 0L && phoneAvg7dDailyMs > 0L) phoneAvg7dDailyMs.toDouble() / phoneAvg30dDailyMs.toDouble() else null
+
+        val phoneEffectiveCurrentSessionMs = if (phoneCurrentSessionMs > 0L) phoneCurrentSessionMs else phoneTodayMs
+        val phoneEffectiveAvgSessionMs = if (phoneAvg30dSessionMs > 0L) phoneAvg30dSessionMs else phoneAvg30dDailyMs
+        val phoneEffectiveMaxSessionMs = maxOf(phoneMax30dSessionMs, phoneEffectiveCurrentSessionMs)
+        val phoneCurrentVsAvgSessionRatio = if (phoneEffectiveAvgSessionMs > 0L && phoneEffectiveCurrentSessionMs > 0L) {
+            phoneEffectiveCurrentSessionMs.toDouble() / phoneEffectiveAvgSessionMs.toDouble()
+        } else null
+        val phoneSession7dVs30dRatio = if (phoneAvg30dSessionMs > 0L && phoneAvg7dSessionMs > 0L) {
+            phoneAvg7dSessionMs.toDouble() / phoneAvg30dSessionMs.toDouble()
+        } else null
+
+        val phoneTotalMetrics = PersonalizedTargetMetrics(
+            filter = TargetFilter.PHONE_TOTAL,
+            todayDurationMs = phoneTodayMs,
+            avg7dDailyMs = phoneAvg7dDailyMs,
+            observedDays7d = phoneObservedDays7d,
+            total7dDurationMs = phoneTotal7dMs,
+            todayVs7dRatio = phoneTodayVs7dRatio,
+            avg30dDailyMs = phoneAvg30dDailyMs,
+            observedDays30d = phoneObservedDays30d,
+            total30dDurationMs = phoneTotal30dMs,
+            todayVs30dRatio = phoneTodayVs30dRatio,
+            avg7dVs30dRatio = phoneAvg7dVs30dRatio,
+            currentSessionMs = phoneEffectiveCurrentSessionMs,
+            currentSessionLive = true,
+            currentSessionSwipes = 0,
+            avgSessionMs = phoneEffectiveAvgSessionMs,
+            maxSessionMs = phoneEffectiveMaxSessionMs,
+            totalRecordedSessions = phoneSessionCount30d,
+            todaySessionCount = todayPhoneSessions.size.coerceAtLeast(if (phoneTodayMs > 0L) 1 else 0),
+            avg7dSessionMs = if (phoneAvg7dSessionMs > 0L) phoneAvg7dSessionMs else phoneAvg7dDailyMs,
+            max7dSessionMs = phoneMax7dSessionMs,
+            sessionCount7d = phoneSessionCount7d,
+            avg7dSessionCount = if (phoneObservedDays7d > 0) phoneSessionCount7d.toDouble() / phoneObservedDays7d else 0.0,
+            avg30dSessionMs = phoneEffectiveAvgSessionMs,
+            max30dSessionMs = phoneEffectiveMaxSessionMs,
+            sessionCount30d = phoneSessionCount30d,
+            avg30dSessionCount = if (phoneObservedDays30d > 0) phoneSessionCount30d.toDouble() / phoneObservedDays30d else 0.0,
+            currentVsAvgSessionRatio = phoneCurrentVsAvgSessionRatio,
+            session7dVs30dRatio = phoneSession7dVs30dRatio,
+            phoneCurrentSessionMs = phoneCurrentSessionMs,
+            phoneCurrentWeightedSessionMs = phoneCurrentWeightedSessionMs,
+            phoneCurrentShortformRatio = phoneCurrentShortformRatio,
+            phoneAvgSessionMs = phoneAvg30dSessionMs,
+            phoneAvgWeightedSessionMs = phoneAvg30dWeightedSessionMs,
+            phoneMaxSessionMs = phoneMax30dSessionMs,
+            phoneTotalSessions = phoneSessionCount30d,
+            phoneAvg7dSessionMs = phoneAvg7dSessionMs,
+            phoneAvg7dWeightedSessionMs = phoneAvg7dWeightedSessionMs,
+            phoneMax7dSessionMs = phoneMax7dSessionMs,
+            phoneSessionCount7d = phoneSessionCount7d,
+            phoneAvg7dShortformRatio = phoneAvg7dShortformRatio,
+            phoneAvg30dSessionMs = phoneAvg30dSessionMs,
+            phoneAvg30dWeightedSessionMs = phoneAvg30dWeightedSessionMs,
+            phoneMax30dSessionMs = phoneMax30dSessionMs,
+            phoneSessionCount30d = phoneSessionCount30d,
+            phoneAvg30dShortformRatio = phoneAvg30dShortformRatio,
+            todaySwipes = 0L,
+            total7dSwipes = 0L,
+            avg7dDailySwipes = 0.0,
+            todayVs7dSwipesRatio = null,
+            avg7dSwipesPerSession = 0.0,
+            avg7dSpm = 0.0,
+            total30dSwipes = 0L,
+            avg30dDailySwipes = 0.0,
+            avg30dSwipesPerSession = 0.0,
+            avgSwipesPerSession = 0.0,
+            todayAvgSpm = 0.0,
+            personalAvgSpm = 0.0,
+            parentAppTodayMs = phoneTodayMs,
+            shortformShareOfAppRatio = null,
+            totalPhoneTodayMs = phoneTodayMs,
+            shortformShareOfPhoneRatio = phoneCurrentShortformRatio,
+            periodShareOfAppRatio = null,
+            periodShareOfPhoneRatio = phoneAvg30dShortformRatio
+        )
+
         return PersonalizedSummary(
             combined = buildMetrics(
                 filter = TargetFilter.COMBINED,
@@ -1131,7 +1464,8 @@ internal object ShortformPersonalStatsStore {
                 parentAppPeriodTotalMs = igParentPeriodTotalMs + ytParentPeriodTotalMs
             ),
             instagram = igMetrics,
-            youtube = ytMetrics
+            youtube = ytMetrics,
+            phoneTotal = phoneTotalMetrics
         )
     }
 }

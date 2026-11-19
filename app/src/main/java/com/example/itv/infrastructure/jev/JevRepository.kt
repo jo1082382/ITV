@@ -21,6 +21,9 @@ class RelayFailure(val code: String, val httpStatus: Int=0): Exception(code)
 data class JevAnswer(val trial: JevTrial, val probability: Double)
 internal fun JevContext.json() = JSONObject().put("session_id",sessionId).put("package_name",packageName)
     .put("session_minutes",sessionMs/60000.0).put("continuous_minutes",continuousMs/60000.0)
+    .put("continuous_equivalent_minutes",continuousMs/60000.0)
+    .put("raw_shortform_minutes",rawShortformMs/60000.0)
+    .put("raw_general_minutes",rawGeneralMs/60000.0)
     .put("returns_10m",returns10m).put("returns_observed_seconds",returnsObservedSeconds)
     .put("bedtime_goal_enabled",bedtimePassedMinutes!=null)
     .put("bedtime_passed_minutes",bedtimePassedMinutes ?: JSONObject.NULL)
@@ -44,6 +47,14 @@ internal fun JevContext.json() = JSONObject().put("session_id",sessionId).put("p
         if (isNearOrOccluded) put("is_near_or_occluded", true)
         bedtimeDistanceMinutes?.let { put("bedtime_distance_minutes", it) }
         userEnvironmentState?.let { put("user_environment_state", it) }
+        if (longformWatchMs > 0L) put("longform_watch_minutes", longformWatchMs / 60000.0)
+        if (currentVideoWatchMs > 0L) put("current_video_watch_minutes", currentVideoWatchMs / 60000.0)
+        if (completedLongformCount > 0) put("completed_longform_count", completedLongformCount)
+        youtubeWatchMode?.let { put("youtube_watch_mode", it) }
+        appCategory?.let { put("app_category", it) }
+        activityPhase?.let { put("activity_phase", it) }
+        audioPipelineKind?.let { put("audio_pipeline_kind", it) }
+        generalAppIdleSeconds?.takeIf { it >= 0 }?.let { put("general_app_idle_seconds", it) }
     }
 
 class JevRepository private constructor(context: Context) {

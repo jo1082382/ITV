@@ -2,6 +2,7 @@ package com.example.itv.presentation.usage
 
 import androidx.compose.runtime.*
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -41,23 +42,26 @@ internal fun SleepConfirmationPanel(date:LocalDate, zone:ZoneId, candidates:List
         LaunchedEffect(date) { service.load(date.toString()) }
         Column(verticalArrangement=Arrangement.spacedBy(8.dp)) {
             val v=state.value
+            val isDark = com.example.itv.presentation.components.LocalDarkTheme.current
+            val btnBorder = androidx.compose.foundation.BorderStroke(1.dp, if (isDark) Color(0xFF5ED38C).copy(alpha = 0.5f) else com.example.itv.presentation.components.ItvLine)
+            val btnColors = ButtonDefaults.outlinedButtonColors(contentColor = if (isDark) Color(0xFF5ED38C) else com.example.itv.presentation.components.ItvGreen)
             if(state.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
             state.error?.let { Text(it,color=MaterialTheme.colorScheme.error) }
-            OutlinedButton(enabled=!state.loading,onClick={selecting=true}) { Text("수면 시간 선택하기") }
+            OutlinedButton(enabled=!state.loading,onClick={selecting=true}, border = btnBorder, colors = btnColors) { Text("수면 시간 선택하기") }
             Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(enabled=!state.loading,onClick={scope.launch {
                     service.save(SleepConfirmation(date.toString(),zone.id,"NOT_SLEEP",null,null,"USER",System.currentTimeMillis()))
                     if(service.state.value.error==null) onSaved()
-                }}) { Text("수면 없음") }
+                }}, border = btnBorder, colors = btnColors) { Text("수면 없음") }
                 OutlinedButton(enabled=!state.loading,onClick={
                     val main=candidates.firstOrNull()
                     start=(v?.startMs ?: main?.start)?.let { Instant.ofEpochMilli(it).atZone(zone).toLocalDateTime() } ?: date.minusDays(1).atTime(23,0)
                     end=(v?.endMs ?: main?.end)?.let { Instant.ofEpochMilli(it).atZone(zone).toLocalDateTime() } ?: date.atTime(7,0)
                     inputError=null; editing=true
-                }) { Text("직접 입력") }
+                }, border = btnBorder, colors = btnColors) { Text("직접 입력") }
             }
             if(selecting) Dialog(onDismissRequest={if(!state.loading) selecting=false}) {
-                Surface(shape=MaterialTheme.shapes.large,color=RecordContentGreen) {
+                Surface(shape=MaterialTheme.shapes.large,color=RecordContentGreen, contentColor = if (isDark) Color(0xFFE2EBE4) else Color(0xFF243025)) {
                     Column(Modifier.padding(12.dp).verticalScroll(rememberScrollState()),
                         horizontalAlignment=Alignment.CenterHorizontally,
                         verticalArrangement=Arrangement.spacedBy(8.dp)) {
@@ -71,6 +75,8 @@ internal fun SleepConfirmationPanel(date:LocalDate, zone:ZoneId, candidates:List
             }
             if(editing) AlertDialog(onDismissRequest={if(!state.loading) editing=false},
                 containerColor=RecordContentGreen,
+                titleContentColor=if (isDark) Color(0xFF85E3B3) else Color(0xFF1B4332),
+                textContentColor=if (isDark) Color(0xFFE2EBE4) else Color(0xFF243025),
                 title={Text("주 수면 직접 입력")},
                 text={Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
                     SleepDateTimePicker("시작",start) {start=it}

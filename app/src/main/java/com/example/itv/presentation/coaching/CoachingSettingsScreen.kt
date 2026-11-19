@@ -797,8 +797,24 @@ private fun RestMissionListSection() {
                                         )
                                     }
                                 }
+                                val annotatedAction = androidx.compose.ui.text.buildAnnotatedString {
+                                    append(mission.action)
+                                    mission.boldPhrases.forEach { phrase ->
+                                        val startIdx = mission.action.indexOf(phrase)
+                                        if (startIdx >= 0) {
+                                            addStyle(
+                                                style = androidx.compose.ui.text.SpanStyle(
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = MaterialTheme.colorScheme.onSurface
+                                                ),
+                                                start = startIdx,
+                                                end = startIdx + phrase.length
+                                            )
+                                        }
+                                    }
+                                }
                                 Text(
-                                    text = mission.action,
+                                    text = annotatedAction,
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     lineHeight = 16.sp

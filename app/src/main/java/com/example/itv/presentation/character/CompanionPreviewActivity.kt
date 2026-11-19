@@ -54,6 +54,9 @@ class CompanionPreviewActivity : Activity() {
                 Intent.ACTION_SCREEN_OFF -> {
                     if (missionActive) {
                         missionOffAt = SystemClock.elapsedRealtime()
+                        if (activeRecommendation?.isFacedownRequired == true) {
+                            tracker.onMissionScreenOff()
+                        }
                     }
                 }
                 Intent.ACTION_SCREEN_ON -> {
@@ -215,9 +218,14 @@ class CompanionPreviewActivity : Activity() {
         if (!missionActive) return
         val now = SystemClock.elapsedRealtime()
         val duration = now - missionOffAt
+        val needFacedown = activeRecommendation?.isFacedownRequired == true
+        val facedownOk = if (needFacedown) tracker.stopFacedownMonitoring() else true
         if (duration < missionRestDurationMs) {
             val remainSec = ((missionRestDurationMs - duration) / 1000L).coerceAtLeast(1L)
             statusText.text = "아직 시간 안 됨! (${remainSec}초 남음)"
+            show("retry")
+        } else if (!facedownOk) {
+            statusText.text = "스마트폰을 바닥에 엎어두지 않았어요! 화면을 끄고 바닥에 엎어두어야 인정됩니다."
             show("retry")
         } else {
             missionActive = false
@@ -230,7 +238,9 @@ class CompanionPreviewActivity : Activity() {
         super.onPause()
         handler.removeCallbacks(sensorUpdater)
         tracker.stopContinuousPostureListening()
-        tracker.stop()
+        if (!missionActive || activeRecommendation?.isFacedownRequired != true) {
+            tracker.stop()
+        }
     }
 
     private fun updateStatusDisplay(overrideMsg: String? = null) {
@@ -332,13 +342,21 @@ class CompanionPreviewActivity : Activity() {
 
         if (title == "쉬기") {
             val rec = activeRecommendation ?: RestMissionCatalog.pick(tracker.snapshot.value.posture, lastIntensity == CharacterIntensity.STRONG)
+            activeRecommendation = rec
+            if (rec.isFacedownRequired) {
+                tracker.startFacedownMonitoring()
+            }
             val restSec = missionRestDurationMs / 1000L
             factory.playReaction(root, "쉬기", 10L, 10L, restSec, rec) {
                 // 사용자가 "미션 확인" 버튼을 눌렀을 때
                 missionActive = true
                 missionOffAt = SystemClock.elapsedRealtime()
                 clear()
-                statusText.text = "휴식 미션 진행 중 (${restSec}초). 화면을 껐다가 다시 켜보세요!"
+                statusText.text = if (rec.isFacedownRequired) {
+                    "엎어두기 미션 진행 중 (${restSec}초). 화면을 끄고 스마트폰을 바닥에 엎어두세요!"
+                } else {
+                    "휴식 미션 진행 중 (${restSec}초). 화면을 껐다가 다시 켜보세요!"
+                }
             }
             return
         }

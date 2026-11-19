@@ -6,11 +6,11 @@ import com.example.itv.domain.coaching.*
 internal class TestMissionController(private val journal: CoachingJournal,
     private val history: MissionHistory, private val scheduler: MissionScheduler) {
     val state = TestRestMission()
-    fun begin(id: String, now: Long, isJev: Boolean = false, requireFacedown: Boolean = false) {
+    fun begin(id: String, now: Long, isJev: Boolean = false, requireFacedown: Boolean = false, isStrong: Boolean = false) {
         val startMs = TestCoachingPolicy.missionStartMs(isJev)
         val restMs = TestCoachingPolicy.restMs(isJev)
         journal.structured(id,"MISSION_REQUESTED")
-        state.begin(id, now, startMs, restMs, requireFacedown); history.begin(id)
+        state.begin(id, now, startMs, restMs, requireFacedown, isStrong); history.begin(id)
         scheduler.cancelStartTimeout(); scheduler.scheduleStartTimeout(startMs)
         val typeDesc = if (requireFacedown) "스마트폰 바닥에 엎어두기" else "화면을 연속 ${restMs / 1000L}초 끄기"
         journal.add(id, "휴식 미션 시작 · $typeDesc (${restMs / 1000L}초)")

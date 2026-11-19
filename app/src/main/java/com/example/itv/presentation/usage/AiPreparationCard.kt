@@ -14,7 +14,9 @@ import kotlinx.coroutines.delay
 @Composable internal fun AiPreparationCard(){
  var session by remember {mutableStateOf(ShortformDailyStore.sessionSnapshot())}
  LaunchedEffect(Unit){while(true){session=ShortformDailyStore.sessionSnapshot();delay(1000)}}
- OutlinedCard(Modifier.fillMaxWidth(),colors=CardDefaults.outlinedCardColors(containerColor=RecordContentGreen,contentColor=Color(0xFF243025))){
+ val isDark = com.example.itv.presentation.components.LocalDarkTheme.current
+ val cardContentColor = if (isDark) Color(0xFFE2EBE4) else Color(0xFF243025)
+ OutlinedCard(Modifier.fillMaxWidth(),colors=CardDefaults.outlinedCardColors(containerColor=RecordContentGreen,contentColor=cardContentColor)){
   Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){
    Text("AI 판단 준비",fontSize=20.sp,fontWeight=FontWeight.Bold)
    val name=when(session.app){"instagram"->"릴스";"youtube"->"쇼츠";else->"관측 대기"}

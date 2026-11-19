@@ -349,7 +349,7 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
             setBackgroundColor(Color.argb(215, 10, 18, 12))
             alpha = 0f
         }
-        add(dimView, params(width, height, 0, 0, false))
+        add(dimView, params(width, height, 0, 0, true))
 
         // 화면 세로 길이의 절반 이상(약 54%)을 묵직하게 차지하는 초대형 크기
         val targetDogSize = maxOf((width * 0.95f).toInt(), (height * 0.54f).toInt())
@@ -375,7 +375,7 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
             s.speech.visibility = View.INVISIBLE
             s.speechParams = params(
                 speechWidth, WindowManager.LayoutParams.WRAP_CONTENT,
-                (width - speechWidth) / 2, speechY, false
+                (width - speechWidth) / 2, speechY, true
             )
             add(s.speech, s.speechParams!!)
 
@@ -436,7 +436,7 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
             val speechY = (s.homeY - dp(120)).coerceAtLeast(dp(36))
             s.speechParams = params(
                 speechWidth, WindowManager.LayoutParams.WRAP_CONTENT,
-                (width - speechWidth) / 2, speechY, false
+                (width - speechWidth) / 2, speechY, true
             )
             add(s.speech, s.speechParams!!)
 
@@ -1055,10 +1055,29 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
                 }
                 missionCard.addView(titleView)
 
+                val actionSpannable = android.text.SpannableString(rec.action).apply {
+                    for (phrase in rec.boldPhrases) {
+                        val startIdx = rec.action.indexOf(phrase)
+                        if (startIdx >= 0) {
+                            setSpan(
+                                android.text.style.StyleSpan(android.graphics.Typeface.BOLD),
+                                startIdx,
+                                startIdx + phrase.length,
+                                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                            )
+                            setSpan(
+                                android.text.style.ForegroundColorSpan(Color.rgb(15, 23, 42)),
+                                startIdx,
+                                startIdx + phrase.length,
+                                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                            )
+                        }
+                    }
+                }
                 val actionView = TextView(context).apply {
-                    text = rec.action
-                    textSize = 14f
-                    setTextColor(Color.rgb(38, 50, 56))
+                    text = actionSpannable
+                    textSize = 14.5f
+                    setTextColor(Color.rgb(51, 65, 85))
                     setLineSpacing(dp(3).toFloat(), 1.25f)
                     gravity = Gravity.CENTER_HORIZONTAL
                     setPadding(0, dp(12), 0, dp(12))
@@ -1066,14 +1085,30 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
                 missionCard.addView(actionView)
 
                 val conditionText = if (s.retry) {
-                    "※ 이번엔 진짜예요! 미션 수락 후 꼭 화면을 꺼주세요."
+                    if (rec.isFacedownRequired) {
+                        "※ 이번엔 진짜예요! 화면을 끄고 스마트폰을 바닥에 엎어두어야 ${restSeconds}초 휴식이 인정돼요."
+                    } else {
+                        "※ 이번엔 진짜예요! 미션 수락 후 꼭 화면을 꺼주세요."
+                    }
                 } else if (rec.isFacedownRequired) {
-                    "※ 수락 후 화면을 끄고 스마트폰을 엎어두면 ${restSeconds}초 휴식이 인정돼요."
+                    "※ 수락 후 화면을 끄고 스마트폰을 바닥에 엎어두면 ${restSeconds}초 휴식이 인정돼요."
                 } else {
                     "※ 수락 후 ${prepareSeconds}초 안에 화면을 끄고 ${restSeconds}초간 같이 쉬어주세요."
                 }
+                val conditionSpannable = android.text.SpannableString(conditionText).apply {
+                    val boldTarget = if (rec.isFacedownRequired) "화면을 끄고 스마트폰을 바닥에 엎어두" else "화면을 끄고"
+                    val idx = conditionText.indexOf(boldTarget)
+                    if (idx >= 0) {
+                        setSpan(
+                            android.text.style.StyleSpan(android.graphics.Typeface.BOLD),
+                            idx,
+                            (idx + boldTarget.length).coerceAtMost(conditionText.length),
+                            android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                        )
+                    }
+                }
                 val conditionView = TextView(context).apply {
-                    text = conditionText
+                    text = conditionSpannable
                     textSize = 12f
                     setTextColor(Color.rgb(100, 116, 139))
                     gravity = Gravity.CENTER_HORIZONTAL
@@ -1172,4 +1207,5 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
 
     fun disableControls(root: View) { sessions[root]?.committed = true }
     fun removeControls(root: View) { sessions.remove(root)?.cleanup() }
+    fun isStrong(root: View?): Boolean = root != null && sessions[root]?.characterIntensity == CharacterIntensity.STRONG
 }

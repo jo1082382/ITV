@@ -8,6 +8,7 @@ data class JevSettings(
     val testerId: String = "T01",
     val instagram: Boolean = true,
     val youtube: Boolean = true,
+    val allApps: Boolean = true,
     val continuousEnabled: Boolean = true,
     val continuousSeconds: Int = 900,
     val returnsEnabled: Boolean = true,
@@ -34,10 +35,75 @@ data class JevSettings(
         require(resultTtlSeconds in 1..300 && laterSeconds in 1..86400) { "응답 유효시간은 1~300초, 보류는 1~86400초입니다." }
         require(dailyLimit in 1..999999) { "기기 일일 한도는 1~999999회입니다." }
     }
-    fun targets(pkg: String) = (instagram && pkg == INSTAGRAM) || (youtube && pkg == YOUTUBE)
+    fun targets(pkg: String): Boolean {
+        if (pkg == "ALL") return true
+        if (pkg == "LOCKED" || pkg == "GUARD_BLOCKED") return false
+        if (pkg == "com.team.itv" || pkg == "com.example.itv") return false
+        if (isLauncherPackage(pkg)) return false
+        if (isExcludedSystemPackage(pkg)) return false
+        if (pkg == INSTAGRAM) return instagram
+        if (pkg == YOUTUBE) return youtube
+        return allApps
+    }
     companion object {
         const val INSTAGRAM = "com.instagram.android"
         const val YOUTUBE = "com.google.android.youtube"
+
+        fun isLauncherPackage(pkg: String?): Boolean {
+            if (pkg == null) return false
+            val p = pkg.lowercase()
+            return p == "com.sec.android.app.launcher" ||
+                   p == "com.google.android.apps.nexuslauncher" ||
+                   p == "com.miui.home" ||
+                   p == "com.teslacoilsw.launcher" ||
+                   p == "com.microsoft.launcher" ||
+                   p == "ginlemon.flowerfree" ||
+                   p.endsWith(".launcher") ||
+                   p.endsWith(".launcher3") ||
+                   p.contains(".launcher.") ||
+                   p.endsWith(".home") ||
+                   p.contains("homescreen")
+        }
+
+        fun isExcludedSystemPackage(pkg: String?): Boolean {
+            if (pkg == null) return true
+            val p = pkg.lowercase()
+            return p == "android" ||
+                   p == "com.android.systemui" ||
+                   p == "com.android.settings" ||
+                   p == "com.samsung.android.settings" ||
+                   p.contains("incallui") ||
+                   p.contains("systemui") ||
+                   p.contains("smartcapture") ||
+                   p.contains("screenrecorder") ||
+                   p.contains("honeyboard") ||
+                   p.contains("cocktailbarservice") ||
+                   p.contains("gametools")
+        }
+
+        fun isDocumentOrMessagingPackage(pkg: String?): Boolean {
+            if (pkg == null) return false
+            val p = pkg.lowercase()
+            return p == "com.kakao.talk" ||
+                   p == "com.samsung.android.messaging" ||
+                   p == "com.google.android.apps.messaging" ||
+                   p == "org.telegram.messenger" ||
+                   p == "com.discord" ||
+                   p == "com.slack" ||
+                   p == "com.whatsapp" ||
+                   p.contains(".messaging") ||
+                   p.contains(".messenger") ||
+                   p.contains("kakaotalk") ||
+                   p == "com.google.android.apps.docs" ||
+                   p == "com.google.android.apps.docs.editors.docs" ||
+                   p == "com.google.android.apps.docs.editors.sheets" ||
+                   p == "com.google.android.apps.docs.editors.slides" ||
+                   p == "com.microsoft.office.word" ||
+                   p == "com.microsoft.office.onenote" ||
+                   p == "com.microsoft.office.powerpoint" ||
+                   p == "com.microsoft.office.excel" ||
+                   p.contains("notion")
+        }
     }
 }
 
@@ -50,6 +116,8 @@ data class JevContext(
     val returnsObservedSeconds: Int,
     val bedtimePassedMinutes: Int?,
     val observedAt: Long,
+    val rawShortformMs: Long = 0L,
+    val rawGeneralMs: Long = 0L,
     val quality: String = "VALID",
     val personalAvgSessionMinutes: Double? = null,
     val sessionVsAvgRatio: Double? = null,
@@ -73,7 +141,19 @@ data class JevContext(
     val postInterventionActivity: Boolean = false,
     val resistanceStreak: Int = 0,
     val estimatedDayType: String? = null,
-    val dayTypeReason: String? = null
+    val dayTypeReason: String? = null,
+    // YouTube 롱폼 시청 맥락 (Jev 서버 전송용)
+    val longformWatchMs: Long = 0L,
+    val currentVideoWatchMs: Long = 0L,
+    val completedLongformCount: Int = 0,
+    val youtubeWatchMode: String? = null,
+    // 일반 앱 / 게임 / 미디어 세부 맥락 (Jev 서버 전송용)
+    val appCategory: String? = null,
+    val activityPhase: String? = null,
+    val audioPipelineKind: String? = null,
+    val generalAppIdleSeconds: Long? = null,
+    // 추천 영상을 타고 연속으로 본 횟수 (Jev 서버에는 전송하지 않고 우리 앱 내부 기준점 보정에만 사용)
+    val consecutiveLongformChainCount: Int = 0
 ) {
     val isRestDay: Boolean get() = estimatedDayType == "REST_DAY"
 }
@@ -189,7 +269,9 @@ object JevCandidatePolicy {
     }
 
     fun reasons(c: JevContext, s: JevSettings): List<String> = buildList {
-        if (!s.targets(c.packageName) || c.quality != "VALID") return@buildList
+        val isAll = c.packageName == "ALL"
+        val isShortform = c.packageName == JevSettings.INSTAGRAM || c.packageName == JevSettings.YOUTUBE
+        if (!isAll && (!s.targets(c.packageName) || c.quality != "VALID")) return@buildList
         if (s.continuousEnabled && c.continuousMs >= s.continuousSeconds * 1000L) add("CONTINUOUS")
         if (s.returnsEnabled && c.returns10m >= s.returnsThreshold) add("REPEATED_RETURNS")
         if (s.bedtimeEnabled && c.bedtimePassedMinutes != null &&
@@ -199,16 +281,18 @@ object JevCandidatePolicy {
             if (c.continuousMs >= minPersonalMs && (c.sessionVsAvgRatio ?: 0.0) >= 1.25 && "CONTINUOUS" !in this) {
                 add("PERSONAL_SESSION_EXCEEDED")
             }
-            val minSwipeMs = minOf(120_000L, s.continuousSeconds * 1000L)
-            if (c.continuousMs >= minSwipeMs && isSwipeOverheated(c)) {
-                add("RAPID_SWIPE_OVERHEAT")
+            if (isShortform) {
+                val minSwipeMs = minOf(120_000L, s.continuousSeconds * 1000L)
+                if (c.continuousMs >= minSwipeMs && isSwipeOverheated(c)) {
+                    add("RAPID_SWIPE_OVERHEAT")
+                }
             }
             val minBedtimeDarkMs = minOf(120_000L, s.continuousSeconds * 1000L)
             if (c.continuousMs >= minBedtimeDarkMs && computeBedtimeEnvironmentDelta(c) <= -0.08 &&
                 "CONTINUOUS" !in this && "BEDTIME" !in this) {
                 add("PRE_BEDTIME_DARK_USAGE")
             }
-            // 뇌과학적 연속 시청 피로 누적 (30분 이상 무중단 시청)
+            // 뇌과학적 연속 사용 피로 누적 (등가 시간 30분 이상 무중단 사용)
             if (c.continuousMs >= 1800_000L) {
                 add("CONTINUOUS_FATIGUE")
             }
@@ -295,8 +379,9 @@ object JevCandidatePolicy {
             kotlin.math.round(((1.0 - clamped) * 0.20) * 1000.0) / 1000.0
         } else 0.0
 
-        // 2. 스와이프 과열 선형 보간: SPM 5.0 (0%p) ~ SPM 15.0 (-8%p) + 스트릭/가속도 (-2%p) => 최대 -10%p
-        val swipeDelta = run {
+        // 2. 스와이프 과열 선형 보간: SPM 5.0 (0%p) ~ SPM 15.0 (-8%p) + 스트릭/가속도 (-2%p) => 최대 -10%p (숏폼 외 일반 앱 및 전체 시 0%p)
+        val isShortform = c.packageName == JevSettings.INSTAGRAM || c.packageName == JevSettings.YOUTUBE
+        val swipeDelta = if (!isShortform) 0.0 else run {
             val spm = c.effectiveSpm1m ?: 0.0
             val streak = c.fastSwipeStreak
             val accel = (c.swipeAccel1m ?: 0.0).coerceAtLeast(0.0)
@@ -341,29 +426,53 @@ object JevCandidatePolicy {
      * Calculates the dynamic re-evaluation interval (and required additional viewing)
      * based on the probability gap (threshold - probability).
      *
-     * Dynamic interval ranges from 30s to 360s across wide tiers:
-     * - Small gap (<= 15%p): 30s ~ 90s (fast re-evaluation for near-threshold states)
-     * - Medium gap (15%p ~ 30%p): 90s ~ 210s (moderate watching before re-evaluation)
-     * - Large gap (30%p ~ 50%p+): 210s ~ 360s (relaxed re-evaluation when far below threshold)
+     * Short-form mode (isGeneralOrLongform = false):
+     * - Small gap (<= 15%p): 30s ~ 90s
+     * - Medium gap (15%p ~ 30%p): 90s ~ 210s
+     * - Large gap (30%p ~ 50%p+): 210s ~ 360s
+     *
+     * Long-form / General mode (isGeneralOrLongform = true):
+     * - Small gap (<= 15%p): 60s ~ 120s (실사용 3분 ~ 6분)
+     * - Medium gap (15%p ~ 30%p): 120s ~ 240s (실사용 6분 ~ 12분)
+     * - Large gap (30%p ~ 50%p+): 240s ~ 360s (실사용 12분 ~ 18분)
      */
-    fun calculateDynamicInterval(threshold: Double, probability: Double?): Int {
-        if (probability == null || !probability.isFinite()) return 300
+    fun calculateDynamicInterval(threshold: Double, probability: Double?, isGeneralOrLongform: Boolean = false): Int {
+        if (probability == null || !probability.isFinite()) return if (isGeneralOrLongform) 360 else 300
         val gap = (threshold - probability).coerceAtLeast(0.0)
-        val sec = when {
-            gap <= 0.0 -> 30.0
-            gap <= 0.15 -> {
-                val r = gap / 0.15
-                30.0 + (90.0 - 30.0) * r
+        val sec = if (isGeneralOrLongform) {
+            when {
+                gap <= 0.0 -> 60.0
+                gap <= 0.15 -> {
+                    val r = gap / 0.15
+                    60.0 + (120.0 - 60.0) * r
+                }
+                gap <= 0.30 -> {
+                    val r = (gap - 0.15) / 0.15
+                    120.0 + (240.0 - 120.0) * r
+                }
+                gap <= 0.50 -> {
+                    val r = (gap - 0.30) / 0.20
+                    240.0 + (360.0 - 240.0) * r
+                }
+                else -> 360.0
             }
-            gap <= 0.30 -> {
-                val r = (gap - 0.15) / 0.15
-                90.0 + (210.0 - 90.0) * r
+        } else {
+            when {
+                gap <= 0.0 -> 30.0
+                gap <= 0.15 -> {
+                    val r = gap / 0.15
+                    30.0 + (90.0 - 30.0) * r
+                }
+                gap <= 0.30 -> {
+                    val r = (gap - 0.15) / 0.15
+                    90.0 + (210.0 - 90.0) * r
+                }
+                gap <= 0.50 -> {
+                    val r = (gap - 0.30) / 0.20
+                    210.0 + (360.0 - 210.0) * r
+                }
+                else -> 360.0
             }
-            gap <= 0.50 -> {
-                val r = (gap - 0.30) / 0.20
-                210.0 + (360.0 - 210.0) * r
-            }
-            else -> 360.0
         }
         return kotlin.math.round(sec).toInt()
     }
@@ -441,6 +550,10 @@ class JevSessionTracker(private val newId: () -> String) {
         var awayMs: Long = 0, var entered: Boolean = false,
         var nonConfirmedMs: Long = 0,
         var screenOffMs: Long = 0,
+        var rawShortformMs: Long = 0,
+        var rawGeneralMs: Long = 0,
+        var totalShortformMs: Long = 0,
+        var totalGeneralMs: Long = 0,
         /** Continuous viewing of the most recent run; kept after reset for test inspection only. */
         var lastRunContinuousMs: Long = 0,
         val returns: MutableList<Long> = mutableListOf()
@@ -457,62 +570,147 @@ class JevSessionTracker(private val newId: () -> String) {
         val contiguous = before != null && delta in 1..1500
         if (coverageStart == null || !contiguous || pkg == null) coverageStart = now
         val inspectingItv = pkg == "com.team.itv" || pkg == "com.example.itv"
-        for (app in listOf(JevSettings.INSTAGRAM, JevSettings.YOUTUBE)) {
+        val isTargetPkg = pkg != null && pkg != "LOCKED" && pkg != "GUARD_BLOCKED" && !inspectingItv &&
+            !JevSettings.isLauncherPackage(pkg) && !JevSettings.isExcludedSystemPackage(pkg)
+
+        val targetApps = (listOf(JevSettings.INSTAGRAM, JevSettings.YOUTUBE, "ALL") +
+            listOfNotNull(pkg).filter { it != "LOCKED" && it != "GUARD_BLOCKED" && !it.startsWith("com.team.itv") && !it.startsWith("com.example.itv") }).distinct()
+
+        for (app in targetApps) {
             val state = states.getOrPut(app) { AppState(newId()) }
-            if (pkg == app && previousPkg != app) {
-                val verifiedAway = state.awayMs + if (contiguous && previousPkg != null) delta else 0L
-                val verifiedScreenOff = state.screenOffMs + if (contiguous && previousPkg == "LOCKED") delta else 0L
-                if (verifiedAway >= SESSION_TIMEOUT_MS || verifiedScreenOff >= RECOGNIZED_REST_MS) {
-                    state.id = newId(); state.totalMs = 0
+            if (app == "ALL") {
+                val enteredAll = isTargetPkg && (previousPkg == null || previousPkg == "LOCKED" ||
+                    JevSettings.isLauncherPackage(previousPkg) || JevSettings.isExcludedSystemPackage(previousPkg))
+                if (enteredAll) {
+                    val verifiedAway = state.awayMs + if (contiguous && previousPkg != null) delta else 0L
+                    val verifiedScreenOff = state.screenOffMs + if (contiguous && previousPkg == "LOCKED") delta else 0L
+                    if (verifiedAway >= SESSION_TIMEOUT_MS || verifiedScreenOff >= RECOGNIZED_REST_MS) {
+                        state.id = newId(); state.totalMs = 0
+                        state.rawShortformMs = 0L; state.rawGeneralMs = 0L
+                        state.totalShortformMs = 0L; state.totalGeneralMs = 0L
+                    }
+                    if (state.entered && previousPkg != null) state.returns.add(now)
+                    state.entered = true
                 }
-                if (state.entered && previousPkg != null) state.returns.add(now)
-                state.entered = true
-            }
-            if (pkg != null && pkg != app && previousPkg != null && previousPkg != app && contiguous) {
-                state.awayMs += delta
-                if (pkg == "LOCKED") state.screenOffMs += delta else state.screenOffMs = 0L
-            } else if (pkg == app || pkg == null || !contiguous) {
-                state.awayMs = 0L
-                state.screenOffMs = 0L
-            }
-            if (confirmedPkg == app && contiguous) {
-                if (previousConfirmed == app || state.continuousMs > 0L) {
-                    state.continuousMs += delta; state.totalMs += delta
+                if (!isTargetPkg && contiguous) {
+                    state.awayMs += delta
+                    if (pkg == "LOCKED") state.screenOffMs += delta else state.screenOffMs = 0L
+                } else {
+                    state.awayMs = 0L
+                    state.screenOffMs = 0L
                 }
-                state.nonConfirmedMs = 0L
-            } else if (confirmedPkg == app) {
-                state.nonConfirmedMs = 0L
-            } else if (inspectingItv) {
-                // Preserve continuousMs while checking ITV app
-            } else if (pkg == app && contiguous) {
-                // Continuous usage within the same target app (e.g. YouTube Home or Instagram Feed/Stories):
-                // do not reset continuousMs or advance nonConfirmedMs.
-                state.nonConfirmedMs = 0L
-            } else if (!contiguous && previousPkg != "LOCKED" && pkg != "LOCKED") {
-                // Unobserved/unknown gap while active: reset continuous viewing
-                state.continuousMs = 0L; state.nonConfirmedMs = 0L
+                if (confirmedPkg != null && contiguous) {
+                    state.rawShortformMs += delta
+                    state.totalShortformMs += delta
+                    state.continuousMs = state.rawShortformMs + (state.rawGeneralMs / 3L)
+                    state.totalMs = state.totalShortformMs + (state.totalGeneralMs / 3L)
+                    state.nonConfirmedMs = 0L
+                } else if (inspectingItv) {
+                    // Preserve continuousMs while checking ITV app
+                } else if (isTargetPkg && contiguous) {
+                    state.rawGeneralMs += delta
+                    state.totalGeneralMs += delta
+                    state.continuousMs = state.rawShortformMs + (state.rawGeneralMs / 3L)
+                    state.totalMs = state.totalShortformMs + (state.totalGeneralMs / 3L)
+                    state.nonConfirmedMs = 0L
+                } else if (!contiguous && previousPkg != "LOCKED" && pkg != "LOCKED") {
+                    state.continuousMs = 0L; state.rawShortformMs = 0L; state.rawGeneralMs = 0L; state.nonConfirmedMs = 0L
+                } else {
+                    state.nonConfirmedMs += delta
+                    if (state.nonConfirmedMs >= INTERRUPTION_TOLERANCE_MS) {
+                        state.continuousMs = 0L
+                        state.rawShortformMs = 0L
+                        state.rawGeneralMs = 0L
+                    }
+                }
+                if (state.continuousMs > 0L) state.lastRunContinuousMs = state.continuousMs
+                state.returns.removeAll { now - it >= SESSION_TIMEOUT_MS || it > now }
             } else {
-                // In another app, or screen turned off/locked:
-                // Only reset continuous viewing if nonConfirmedMs exceeds INTERRUPTION_TOLERANCE_MS (90초)
-                state.nonConfirmedMs += delta
-                if (state.nonConfirmedMs >= INTERRUPTION_TOLERANCE_MS) {
-                    state.continuousMs = 0L
+                if (pkg == app && previousPkg != app) {
+                    val verifiedAway = state.awayMs + if (contiguous && previousPkg != null) delta else 0L
+                    val verifiedScreenOff = state.screenOffMs + if (contiguous && previousPkg == "LOCKED") delta else 0L
+                    if (verifiedAway >= SESSION_TIMEOUT_MS || verifiedScreenOff >= RECOGNIZED_REST_MS) {
+                        state.id = newId(); state.totalMs = 0
+                        state.rawShortformMs = 0L; state.rawGeneralMs = 0L
+                        state.totalShortformMs = 0L; state.totalGeneralMs = 0L
+                    }
+                    if (state.entered && previousPkg != null) state.returns.add(now)
+                    state.entered = true
                 }
+                if (pkg != null && pkg != app && previousPkg != null && previousPkg != app && contiguous) {
+                    state.awayMs += delta
+                    if (pkg == "LOCKED") state.screenOffMs += delta else state.screenOffMs = 0L
+                } else if (pkg == app || pkg == null || !contiguous) {
+                    state.awayMs = 0L
+                    state.screenOffMs = 0L
+                }
+                if (confirmedPkg == app && contiguous) {
+                    if (previousConfirmed == app || state.continuousMs > 0L) {
+                        state.rawShortformMs += delta
+                        state.totalShortformMs += delta
+                        state.continuousMs = state.rawShortformMs + (state.rawGeneralMs / 3L)
+                        state.totalMs = state.totalShortformMs + (state.totalGeneralMs / 3L)
+                    }
+                    state.nonConfirmedMs = 0L
+                } else if (confirmedPkg == app) {
+                    state.nonConfirmedMs = 0L
+                } else if (inspectingItv) {
+                    // Preserve continuousMs while checking ITV app
+                } else if (pkg == app && contiguous) {
+                    // Continuous usage within the target app (e.g. YouTube longform/home, Instagram feed, or user app):
+                    // 1:3 ratio (1 second equivalent per 3 seconds of general app viewing)
+                    state.rawGeneralMs += delta
+                    state.totalGeneralMs += delta
+                    state.continuousMs = state.rawShortformMs + (state.rawGeneralMs / 3L)
+                    state.totalMs = state.totalShortformMs + (state.totalGeneralMs / 3L)
+                    state.nonConfirmedMs = 0L
+                } else if (!contiguous && previousPkg != "LOCKED" && pkg != "LOCKED") {
+                    // Unobserved/unknown gap while active: reset continuous viewing
+                    state.continuousMs = 0L; state.rawShortformMs = 0L; state.rawGeneralMs = 0L; state.nonConfirmedMs = 0L
+                } else {
+                    // In another app, or screen turned off/locked:
+                    // Only reset continuous viewing if nonConfirmedMs exceeds INTERRUPTION_TOLERANCE_MS (90초)
+                    state.nonConfirmedMs += delta
+                    if (state.nonConfirmedMs >= INTERRUPTION_TOLERANCE_MS) {
+                        state.continuousMs = 0L
+                        state.rawShortformMs = 0L
+                        state.rawGeneralMs = 0L
+                    }
+                }
+                if (state.continuousMs > 0L) state.lastRunContinuousMs = state.continuousMs
+                state.returns.removeAll { now - it >= SESSION_TIMEOUT_MS || it > now }
             }
-            if (state.continuousMs > 0L) state.lastRunContinuousMs = state.continuousMs
-            state.returns.removeAll { now - it >= SESSION_TIMEOUT_MS || it > now }
         }
         previousAt = now; previousPkg = pkg
         if (!inspectingItv) previousConfirmed = confirmedPkg
     }
     fun context(pkg: String, now: Long, wall: Long, bedtime: Int?): JevContext? {
-        val state = states[pkg] ?: return null
-        return JevContext(state.id,pkg,state.totalMs,state.continuousMs,state.returns.size,
-            ((now - (coverageStart ?: now)) / 1000).coerceIn(0,600).toInt(),bedtime,wall)
+        val appState = states[pkg]
+        val allState = states["ALL"]
+        val state = appState ?: allState ?: return null
+        val continuous = if (pkg == "ALL") (allState?.continuousMs ?: 0L) else maxOf(appState?.continuousMs ?: 0L, allState?.continuousMs ?: 0L)
+        val total = if (pkg == "ALL") (allState?.totalMs ?: 0L) else maxOf(appState?.totalMs ?: 0L, allState?.totalMs ?: 0L)
+        val rawShort = if (pkg == "ALL") (allState?.rawShortformMs ?: 0L) else maxOf(appState?.rawShortformMs ?: 0L, allState?.rawShortformMs ?: 0L)
+        val rawGen = if (pkg == "ALL") (allState?.rawGeneralMs ?: 0L) else maxOf(appState?.rawGeneralMs ?: 0L, allState?.rawGeneralMs ?: 0L)
+        val returnsCount = if (pkg == "ALL") (allState?.returns?.size ?: 0) else maxOf(appState?.returns?.size ?: 0, allState?.returns?.size ?: 0)
+
+        return JevContext(
+            sessionId = state.id,
+            packageName = pkg,
+            sessionMs = total,
+            continuousMs = continuous,
+            returns10m = returnsCount,
+            returnsObservedSeconds = ((now - (coverageStart ?: now)) / 1000).coerceIn(0, 600).toInt(),
+            bedtimePassedMinutes = bedtime,
+            observedAt = wall,
+            rawShortformMs = rawShort,
+            rawGeneralMs = rawGen
+        )
     }
     /** Restore totals only. Never restore continuity or absence from a wall-clock difference. */
     fun restore(pkg: String, id: String, totalMs: Long, entered: Boolean) {
-        states[pkg] = AppState(id,totalMs.coerceAtLeast(0),entered=entered)
+        val coerced = totalMs.coerceAtLeast(0)
+        states[pkg] = AppState(id, coerced, totalShortformMs = coerced, entered = entered)
     }
     /** Reset session state for a package when a new calendar day starts or session timeout elapsed. */
     fun resetSession(pkg: String) {
@@ -524,7 +722,17 @@ class JevSessionTracker(private val newId: () -> String) {
     fun resetContinuous(pkg: String) {
         states[pkg]?.let {
             it.continuousMs = 0L
+            it.rawShortformMs = 0L
+            it.rawGeneralMs = 0L
             it.nonConfirmedMs = 0L
+        }
+        if (pkg != "ALL") {
+            states["ALL"]?.let {
+                it.continuousMs = 0L
+                it.rawShortformMs = 0L
+                it.rawGeneralMs = 0L
+                it.nonConfirmedMs = 0L
+            }
         }
     }
 }

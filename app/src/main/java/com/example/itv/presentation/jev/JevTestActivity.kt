@@ -77,7 +77,7 @@ private fun JevTestScreen(vm: JevTestViewModel,onBack: ()->Unit,modifier: Modifi
         Text("Jev 공동 테스트",Modifier.padding(horizontal=20.dp),style=MaterialTheme.typography.headlineSmall,
             fontWeight=FontWeight.Bold,color=ItvGreen)
         PrimaryScrollableTabRow(selectedTabIndex=page,edgePadding=12.dp) {
-            listOf("연결","판단 설정","개입 기록","실시간 측정 테스트","파지 각도·목 부담 감지").forEachIndexed { i,title ->
+            listOf("연결","판단 설정","개입 기록","실시간 측정 테스트","파지 각도·목 부담 감지","유튜브 롱폼 감지").forEachIndexed { i,title ->
                 Tab(selected=page==i,onClick={page=i},text={Text(title)})
             }
         }
@@ -93,7 +93,8 @@ private fun JevTestScreen(vm: JevTestViewModel,onBack: ()->Unit,modifier: Modifi
                     1 -> SettingsPage(vm,s,busy)
                     2 -> InterventionHistoryPage()
                     3 -> ObservationTestPage(vm,busy)
-                    else -> PostureTestPage(busy)
+                    4 -> PostureTestPage(busy)
+                    else -> LongformObservationPage()
                 }
             }
         }
@@ -318,20 +319,74 @@ private data class ProbabilitySnapshot(
 }
 
 private fun takeProbabilitySnapshot(vm: JevTestViewModel, app: String, trials: List<JevTrial>): ProbabilitySnapshot {
-    val session = vm.runtime.sessionState(app)
-    val youtube = app == JevSettings.YOUTUBE
-    val swipesNow = if (youtube) YoutubeProbe.candidates else ReelsProbe.candidates
-    val swipesLast = if (youtube) YoutubeProbe.lastRunCandidates else ReelsProbe.lastRunCandidates
-    val continuousNow = session?.continuousMs ?: 0L
+    val isAll = app == "ALL"
+    val allSession = vm.runtime.sessionState("ALL")
+    val session = if (isAll) allSession else vm.runtime.sessionState(app)
+    val ytSession = vm.runtime.sessionState(JevSettings.YOUTUBE)
+    val igSession = vm.runtime.sessionState(JevSettings.INSTAGRAM)
+    val devStatus = com.example.itv.domain.coaching.DeveloperStatus.value
+
+    val swipesNow = when (app) {
+        JevSettings.YOUTUBE -> YoutubeProbe.candidates
+        JevSettings.INSTAGRAM -> ReelsProbe.candidates
+        else -> YoutubeProbe.candidates + ReelsProbe.candidates
+    }
+    val swipesLast = when (app) {
+        JevSettings.YOUTUBE -> YoutubeProbe.lastRunCandidates
+        JevSettings.INSTAGRAM -> ReelsProbe.lastRunCandidates
+        else -> YoutubeProbe.lastRunCandidates + ReelsProbe.lastRunCandidates
+    }
+    val continuousUnified = devStatus.usedMs
+    val allC = allSession?.continuousMs ?: 0L
+    val sumC = (ytSession?.continuousMs ?: 0L) + (igSession?.continuousMs ?: 0L)
+    val continuousNow = when (app) {
+        JevSettings.YOUTUBE -> ytSession?.continuousMs ?: 0L
+        JevSettings.INSTAGRAM -> igSession?.continuousMs ?: 0L
+        "ALL" -> maxOf(allC, maxOf(continuousUnified, sumC))
+        else -> session?.continuousMs ?: allC
+    }
+    val allLast = allSession?.lastRunContinuousMs ?: 0L
+    val sumLast = (ytSession?.lastRunContinuousMs ?: 0L) + (igSession?.lastRunContinuousMs ?: 0L)
+    val continuousLast = when (app) {
+        JevSettings.YOUTUBE -> ytSession?.lastRunContinuousMs ?: 0L
+        JevSettings.INSTAGRAM -> igSession?.lastRunContinuousMs ?: 0L
+        "ALL" -> maxOf(allLast, maxOf(continuousUnified, sumLast))
+        else -> session?.lastRunContinuousMs ?: allLast
+    }
     val latestTrial = trials.firstOrNull { it.probability != null }
     val latestLiveTrial = trials.firstOrNull { it.source == "LIVE" && it.probability != null }
-    val sessionId = session?.id ?: UUID.randomUUID().toString()
-    val totalMs = session?.totalMs ?: 0L
-    val continuousMs = if (continuousNow > 0L) continuousNow else session?.lastRunContinuousMs ?: 0L
-    val returns = session?.returns?.size ?: 0
-    val bedtime = vm.runtime.lastObservedContext?.takeIf { it.packageName == app }?.bedtimePassedMinutes
+    val sessionId = if (isAll) (allSession?.id ?: ytSession?.id ?: igSession?.id ?: UUID.randomUUID().toString()) else (session?.id ?: UUID.randomUUID().toString())
+    val allTotal = allSession?.totalMs ?: 0L
+    val sumTotal = (ytSession?.totalMs ?: 0L) + (igSession?.totalMs ?: 0L)
+    val totalMs = if (isAll) {
+        maxOf(allTotal, maxOf(devStatus.usedMs, sumTotal))
+    } else {
+        session?.totalMs ?: 0L
+    }
+    val continuousMs = if (continuousNow > 0L) continuousNow else continuousLast
+    val returns = if (isAll) {
+        allSession?.returns?.size ?: ((ytSession?.returns?.size ?: 0) + (igSession?.returns?.size ?: 0))
+    } else {
+        session?.returns?.size ?: 0
+    }
+    val rawShortformMs = if (isAll) {
+        val allSf = allSession?.rawShortformMs ?: 0L
+        val sumSf = (ytSession?.rawShortformMs ?: 0L) + (igSession?.rawShortformMs ?: 0L)
+        maxOf(allSf, sumSf)
+    } else {
+        session?.rawShortformMs ?: 0L
+    }
+    val rawGeneralMs = if (isAll) {
+        val allGen = allSession?.rawGeneralMs ?: 0L
+        val sumGen = (ytSession?.rawGeneralMs ?: 0L) + (igSession?.rawGeneralMs ?: 0L)
+        maxOf(allGen, maxOf(devStatus.usedMs, sumGen))
+    } else {
+        session?.rawGeneralMs ?: 0L
+    }
+    val bedtime = vm.runtime.lastObservedContext?.let { if (isAll || it.packageName == app) it.bedtimePassedMinutes else null }
     val takenAt = System.currentTimeMillis()
-    val baseContext = JevContext(sessionId, app, totalMs, continuousMs, returns, 600, bedtime, takenAt)
+    val baseContext = JevContext(sessionId, app, totalMs, continuousMs, returns, 600, bedtime, takenAt,
+        rawShortformMs = rawShortformMs, rawGeneralMs = rawGeneralMs)
     val enriched = vm.runtime.enrichContext(baseContext)
     val blockingReason = vm.runtime.displayBlockingReason()
     return ProbabilitySnapshot(
@@ -390,7 +445,7 @@ private fun resolveNotShownReason(
             else -> "보류됨 ($code)"
         }
     }
-    return "다음 숏폼 전환 대기 중 (시청 방해를 줄이기 위해 다음 영상으로 넘기거나 최대 15초 경과 시 표시)"
+    return "숏폼/롱폼 전환 대기 중 (시청 중 개입 금지 원칙에 따라 다음 숏폼 스와이프 또는 롱폼 종료·전환 시 표시)"
 }
 
 @Composable
@@ -400,7 +455,7 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
     val trials by vm.store.dao.trials().collectAsState(initial = emptyList())
     val context = androidx.compose.ui.platform.LocalContext.current
     var refreshTick by remember { mutableLongStateOf(0L) }
-    var targetApp by rememberSaveable { mutableStateOf(JevSettings.YOUTUBE) }
+    var targetApp by rememberSaveable { mutableStateOf("ALL") }
     var snapshot by remember { mutableStateOf<ProbabilitySnapshot?>(null) }
 
     LaunchedEffect(Unit) {
@@ -416,22 +471,18 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
         }
     }
 
-    val ytToday = remember(refreshTick) { ShortformDailyStore.today(context, "youtube") }
-    val igToday = remember(refreshTick) { ShortformDailyStore.today(context, "instagram") }
-    val reelsUsage = remember(refreshTick) { ReelsUsageStore.today(context) }
-    val activeSession = remember(refreshTick) { ShortformDailyStore.sessionSnapshot() }
-    val recentSession = remember(refreshTick) { ShortformDailyStore.recentSessionSnapshot() }
-
-    val ytSession = vm.runtime.sessionState(JevSettings.YOUTUBE)
-    val igSession = vm.runtime.sessionState(JevSettings.INSTAGRAM)
-    val lastObserved = vm.runtime.lastObservedContext
-
     TestSection("판단 설정 기준 및 개입 확률 확인") {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            FilterChip(
+                selected = targetApp == "ALL",
+                onClick = { targetApp = "ALL" },
+                label = { Text("전체") },
+                enabled = !busy
+            )
             FilterChip(
                 selected = targetApp == JevSettings.YOUTUBE,
                 onClick = { targetApp = JevSettings.YOUTUBE },
@@ -477,6 +528,7 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
                     "RAPID_SWIPE_OVERHEAT" -> "스와이프과열"
                     "PRE_BEDTIME_DARK_USAGE" -> "취침전암실사용"
                     "CONTINUOUS_FATIGUE" -> "연속시청피로누적"
+                    "LONGFORM_BINGE_CHAIN" -> "추천영상연속시청(앱로컬)"
                     "INTERVENTION_RESISTANCE" -> "직전개입미룸·시청지속"
                     else -> r
                 }
@@ -484,31 +536,104 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
             val ambientSnapshot = remember(refreshTick) {
                 com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(context).snapshot.value
             }
+            val ytSession = vm.runtime.sessionState(JevSettings.YOUTUBE)
+            val igSession = vm.runtime.sessionState(JevSettings.INSTAGRAM)
+            val allSession = vm.runtime.sessionState("ALL")
+            val devStatus = com.example.itv.domain.coaching.DeveloperStatus.value
+
+            val liveContinuousMs = remember(refreshTick, targetApp, snap) {
+                when (targetApp) {
+                    JevSettings.YOUTUBE -> {
+                        val c = ytSession?.continuousMs ?: 0L
+                        if (c > 0L) c else snap.continuousMs
+                    }
+                    JevSettings.INSTAGRAM -> {
+                        val c = igSession?.continuousMs ?: 0L
+                        if (c > 0L) c else snap.continuousMs
+                    }
+                    "ALL" -> {
+                        val allC = allSession?.continuousMs ?: 0L
+                        val unified = devStatus.usedMs
+                        val sum = (ytSession?.continuousMs ?: 0L) + (igSession?.continuousMs ?: 0L)
+                        val c = maxOf(allC, maxOf(unified, sum))
+                        if (c > 0L) c else snap.continuousMs
+                    }
+                    else -> {
+                        val appC = vm.runtime.sessionState(targetApp)?.continuousMs ?: 0L
+                        if (appC > 0L) appC else snap.continuousMs
+                    }
+                }
+            }
+            val liveTotalMs = remember(refreshTick, targetApp, snap) {
+                when (targetApp) {
+                    JevSettings.YOUTUBE -> ytSession?.totalMs ?: snap.totalMs
+                    JevSettings.INSTAGRAM -> igSession?.totalMs ?: snap.totalMs
+                    "ALL" -> allSession?.totalMs ?: (((ytSession?.totalMs ?: 0L) + (igSession?.totalMs ?: 0L)).takeIf { it > 0L } ?: snap.totalMs)
+                    else -> vm.runtime.sessionState(targetApp)?.totalMs ?: snap.totalMs
+                }
+            }
 
             // 1. 시청 & 재진입 요약 박스
             CompactCheckGroup("1. 시청 시간 · 재진입") {
+                val contLabel = if (snap.app == "ALL") "통합 연속 사용" else "연속 시청"
+                val contDetail = if (snap.app == "ALL") " (숏폼 1.0x + 일반 1/3x)" else ""
                 CompactCheckRow(
-                    label = "연속 시청",
-                    value = "${"%.1f".format(snap.continuousMs / 1000.0)}초 / 기준 ${if (s.continuousEnabled) "${s.continuousSeconds}초" else "꺼짐"}"
+                    label = contLabel,
+                    value = "${"%.1f".format(liveContinuousMs / 1000.0)}초$contDetail / 기준 ${if (s.continuousEnabled) "${s.continuousSeconds}초" else "꺼짐"}"
                 )
                 CompactCheckRow(
                     label = "구간 누적 · 재진입",
-                    value = "누적 ${"%.1f".format(snap.totalMs / 1000.0)}초 · 재진입 ${snap.returns}회 (기준 ${if (s.returnsEnabled) "${s.returnsThreshold}회" else "꺼짐"})"
+                    value = "누적 ${"%.1f".format(liveTotalMs / 1000.0)}초 · 재진입 ${snap.returns}회 (기준 ${if (s.returnsEnabled) "${s.returnsThreshold}회" else "꺼짐"})"
                 )
+                val rawSf = snap.enrichedContext?.rawShortformMs ?: 0L
+                val rawGen = snap.enrichedContext?.rawGeneralMs ?: 0L
+                val rawPhysicalMs = rawSf + rawGen
+                if (snap.app == "ALL" || rawPhysicalMs > 0L) {
+                    val sfRatio = if (rawPhysicalMs > 0L) (rawSf.toDouble() / rawPhysicalMs.toDouble()) * 100.0 else 0.0
+                    val weightedMs = rawSf + (rawGen / 3L)
+                    CompactCheckRow(
+                        label = "물리 세션 (휴대폰 전체)",
+                        value = "${"%.1f".format(rawPhysicalMs / 1000.0)}초 (숏폼 ${"%.1f".format(rawSf / 1000.0)}초 + 일반 ${"%.1f".format(rawGen / 1000.0)}초)"
+                    )
+                    CompactCheckRow(
+                        label = "숏폼 비율 / 환산 세션",
+                        value = "숏폼 비중 ${"%.1f".format(sfRatio)}% · 환산 ${"%.1f".format(weightedMs / 1000.0)}초 (1.0x+1/3x)"
+                    )
+                }
+                if (snap.app == JevSettings.YOUTUBE || snap.app == "ALL") {
+                    val lfTotalSec = ctx.longformWatchMs / 1000.0
+                    val lfCurSec = ctx.currentVideoWatchMs / 1000.0
+                    val lfModeStr = ctx.youtubeWatchMode ?: "대기"
+                    CompactCheckRow(
+                        label = "롱폼 시청 분석",
+                        value = "세션 롱폼 ${"%.0f".format(lfTotalSec)}초 · 현재영상 ${"%.0f".format(lfCurSec)}초 · 완료 ${ctx.completedLongformCount}편 ($lfModeStr)",
+                        highlight = ctx.longformWatchMs > 0L
+                    )
+                    CompactCheckRow(
+                        label = "추천 영상 연속 전환",
+                        value = "연속 ${ctx.consecutiveLongformChainCount}회 전환 (상황 분석 전용)",
+                        highlight = ctx.consecutiveLongformChainCount >= 2
+                    )
+                }
             }
 
             // 2. 개인화 비율 & 스와이프 요약 박스
             CompactCheckGroup("2. 개인화 비율 · 스와이프 · 피로도 · 취침환경") {
                 val adj = JevCandidatePolicy.computeThresholdAdjustment(s, ctx)
                 val sessionRatioStr = ctx.sessionVsAvgRatio?.let { "${(it * 100).roundToInt()}%" } ?: "집계 중"
-                val avgSessionStr = ctx.personalAvgSessionMinutes?.let { "기준 ${it}분" } ?: "기준 수집 중"
+                val avgSessionStr = ctx.personalAvgSessionMinutes?.let {
+                    val totalSec = (it * 60).roundToInt()
+                    val min = totalSec / 60
+                    val sec = totalSec % 60
+                    if (sec > 0) "기준 ${min}분 ${sec}초" else "기준 ${min}분"
+                } ?: "기준 수집 중"
                 val sessionDeltaStr = if (adj.sessionDelta != 0.0) " (${if (adj.sessionDelta > 0) "+" else ""}${"%.0f".format(adj.sessionDelta * 100)}%p)" else ""
                 CompactCheckRow(
                     label = "세션 과몰입 비율",
                     value = "$sessionRatioStr ($avgSessionStr)$sessionDeltaStr",
                     highlight = adj.sessionDelta < 0
                 )
-                val fatigueMin = (ctx.continuousMs / 60000.0)
+                val fatigueMin = (liveContinuousMs / 60000.0)
                 val fatigueDeltaStr = if (adj.fatigueDelta < 0) " (${"%.0f".format(adj.fatigueDelta * 100)}%p)" else ""
                 val fatigueDesc = when {
                     fatigueMin >= 30.0 -> "고위험 (${"%.1f".format(fatigueMin)}분 연속)"
@@ -532,10 +657,11 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
                     value = "$resistanceDesc$resistanceDeltaStr",
                     highlight = adj.resistanceDelta < 0
                 )
-                val spmStr = "분당 ${ctx.effectiveSpm1m ?: 0.0}회 (평소 ${ctx.personalAvgSpm ?: 0.0})"
-                val swipeDeltaStr = if (adj.swipeDelta < 0) " · 과열(${"%.0f".format(adj.swipeDelta * 100)}%p)" else " · 정상"
+                val isAllApp = snap.app == "ALL"
+                val spmStr = if (isAllApp) "전체 사용 모드 (스와이프 제외)" else "분당 ${ctx.effectiveSpm1m ?: 0.0}회 (평소 ${ctx.personalAvgSpm ?: 0.0})"
+                val swipeDeltaStr = if (isAllApp) " · 제외 (0%p)" else if (adj.swipeDelta < 0) " · 과열(${"%.0f".format(adj.swipeDelta * 100)}%p)" else " · 정상"
                 CompactCheckRow(
-                    label = "스와이프 (${snap.swipes}회)",
+                    label = if (isAllApp) "스와이프 (적용 제외)" else "스와이프 (${snap.swipes}회)",
                     value = "$spmStr$swipeDeltaStr",
                     highlight = adj.swipeDelta < 0
                 )
@@ -615,6 +741,26 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
                     highlight = reasonKor.isNotEmpty()
                 )
 
+                val evalProb = answer?.probability
+                    ?: snap.latestLiveProbability
+                    ?: snap.latestTrialProbability
+
+                if (evalProb != null) {
+                    val passed = JevCandidatePolicy.passes(evalProb, s, ctx)
+                    val diff = (evalProb * 100.0) - effThresholdPct
+                    val diffStr = if (diff >= 0) "+${"%.1f".format(diff)}%p 초과" else "${"%.1f".format(diff)}%p 미달"
+                    CompactCheckRow(
+                        label = "적용 개입 기준 판정",
+                        value = "${"%.1f".format(evalProb * 100)}% vs 기준 ${"%.0f".format(effThresholdPct)}% → ${if (passed) "기준 통과 ✅ (개입 대상)" else "기준 미달 ❌ (미개입)"} ($diffStr)",
+                        highlight = passed
+                    )
+                } else {
+                    CompactCheckRow(
+                        label = "적용 개입 기준 판정",
+                        value = "확률 산출 대기 (적용 기준 ${"%.0f".format(effThresholdPct)}%)"
+                    )
+                }
+
                 val liveProb = snap.latestLiveProbability
                 val latestLiveTrial = snap.latestLiveTrial
                 if (liveProb != null) {
@@ -676,24 +822,35 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
             }
 
             val liveState by vm.runtime.state.collectAsState()
-            val appSuppression = remember(refreshTick, targetApp) { vm.runtime.getAppSuppressionInfo(targetApp) }
+            val appSuppression = remember(refreshTick, targetApp) {
+                if (targetApp == "ALL") {
+                    val ytSup = vm.runtime.getAppSuppressionInfo(JevSettings.YOUTUBE)
+                    val igSup = vm.runtime.getAppSuppressionInfo(JevSettings.INSTAGRAM)
+                    if (ytSup.isAsked) ytSup else igSup
+                } else {
+                    vm.runtime.getAppSuppressionInfo(targetApp)
+                }
+            }
             val dynInterval = appSuppression.dynamicIntervalSeconds
             val lastGap = appSuppression.lastProbabilityGap
             val nextInSec = appSuppression.nextEvaluationInSeconds ?: 0L
-            val addSec = if (liveState.context?.packageName == targetApp) liveState.additionalViewingNeededSeconds ?: 0L else 0L
+            val addSec = if (liveState.context?.packageName == targetApp || (targetApp == "ALL" && liveState.context?.packageName in listOf(JevSettings.YOUTUBE, JevSettings.INSTAGRAM))) {
+                liveState.additionalViewingNeededSeconds ?: 0L
+            } else 0L
             val snapProb = snap.latestLiveProbability
-            val expInterval = snapProb?.let { JevCandidatePolicy.calculateDynamicInterval(effThresholdPct / 100.0, it) }
+            val isLongformOrAll = targetApp == "ALL" || (snap.enrichedContext?.rawGeneralMs ?: 0L) > (snap.enrichedContext?.rawShortformMs ?: 0L)
+            val expInterval = snapProb?.let { JevCandidatePolicy.calculateDynamicInterval(effThresholdPct / 100.0, it, isLongformOrAll) }
             val expGap = snapProb?.let { ((effThresholdPct / 100.0) - it).coerceAtLeast(0.0) }
             val intervalDesc = when {
                 appSuppression.isAsked && lastGap != null ->
-                    "${dynInterval}초 (실시간 평가 반영 · 격차 -${"%.1f".format(lastGap * 100)}%p)"
+                    "${dynInterval}초 (실시간 반영 · 격차 -${"%.1f".format(lastGap * 100)}%p${if (isLongformOrAll) " · 실사용 약 ${dynInterval * 3 / 60}분" else ""})"
                 expInterval != null && expGap != null ->
-                    "${dynInterval}초 (기본값 · 최근 확률 예상: ${expInterval}초, 격차 -${"%.1f".format(expGap * 100)}%p)"
+                    "${dynInterval}초 (최근 확률 예상: ${expInterval}초, 격차 -${"%.1f".format(expGap * 100)}%p${if (isLongformOrAll) " · 실사용 약 ${expInterval * 3 / 60}분" else ""})"
                 else -> "${dynInterval}초 (기본값 · 첫 실시간 평가 대기)"
             }
             CompactCheckGroup("4. 동적 재평가 · 추가 시청") {
                 CompactCheckRow(
-                    label = "동적 간격 (30~360초)",
+                    label = if (isLongformOrAll) "동적 간격 (60~360초 · 실사용 3~18분)" else "동적 간격 (30~360초 · 실사용 0.5~6분)",
                     value = intervalDesc
                 )
                 CompactCheckRow(
@@ -735,104 +892,7 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
             onClick = { snap?.let { vm.manual(it.context()) } },
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("현재 측정값으로 Jev 확률 요청 (토큰 1회)")
-        }
-    }
-
-    TestSection("YouTube 쇼츠 측정 현황") {
-        val ytTotalSec = (ytSession?.totalMs ?: 0L) / 1000.0
-        val ytContSec = (ytSession?.continuousMs ?: 0L) / 1000.0
-        val ytDailySec = ytToday.ms / 1000.0
-        Text("• Jev 세션 누적 시간: ${"%.1f".format(ytTotalSec)}초 (${"%.1f".format(ytTotalSec / 60.0)}분)", fontWeight = FontWeight.SemiBold)
-        Text("• Jev 연속 시청 시간: ${"%.1f".format(ytContSec)}초 (${"%.1f".format(ytContSec / 60.0)}분)", fontWeight = FontWeight.SemiBold, color = ItvGreen)
-        Text("• 실시간 스와이프(전환) 감지 횟수: ${YoutubeProbe.candidates}회", fontWeight = FontWeight.SemiBold, color = ItvGreen)
-        Text("• 최근 10분 재진입: ${ytSession?.returns?.size ?: 0}회")
-        Text("• 오늘 총 누적 시청 시간: ${"%.1f".format(ytDailySec)}초 (${"%.1f".format(ytDailySec / 60.0)}분)")
-        Text("• 오늘 총 전환(스와이프) 기록: ${ytToday.transitions}회")
-        Text("• 탐색기 상태: ${YoutubeProbe.status}")
-        Text("• 상세: ${YoutubeProbe.detail}")
-    }
-
-    TestSection("Instagram 릴스 측정 현황") {
-        val igTotalSec = (igSession?.totalMs ?: 0L) / 1000.0
-        val igContSec = (igSession?.continuousMs ?: 0L) / 1000.0
-        val igDailySec = igToday.ms / 1000.0
-        Text("• Jev 세션 누적 시간: ${"%.1f".format(igTotalSec)}초 (${"%.1f".format(igTotalSec / 60.0)}분)", fontWeight = FontWeight.SemiBold)
-        Text("• Jev 연속 시청 시간: ${"%.1f".format(igContSec)}초 (${"%.1f".format(igContSec / 60.0)}분)", fontWeight = FontWeight.SemiBold, color = ItvGreen)
-        Text("• 실시간 스와이프(전환) 감지 횟수: ${ReelsProbe.candidates}회", fontWeight = FontWeight.SemiBold, color = ItvGreen)
-        Text("• 최근 10분 재진입: ${igSession?.returns?.size ?: 0}회")
-        Text("• 오늘 총 누적 시청 시간: ${"%.1f".format(igDailySec)}초 (${"%.1f".format(igDailySec / 60.0)}분)")
-        Text("• 오늘 총 전환(스와이프) 기록: ${igToday.transitions}회 (릴스 저장소: ${reelsUsage.count}회)")
-        Text("• 탐색기 상태: ${ReelsProbe.status}")
-        Text("• 스크롤 이벤트 수신: ${ReelsProbe.events}회")
-    }
-
-    TestSection("공통 세션 & 최근 관측값 (Jev 판단 입력)") {
-        Text("• 활성 세션: ${if (activeSession.app.isNotEmpty()) "${activeSession.app} (${activeSession.durationMs / 1000}초)" else "없음"}")
-        Text("• 직전 세션: ${if (recentSession.app.isNotEmpty()) "${recentSession.app} (${recentSession.durationMs / 1000}초)" else "없음"}")
-        if (lastObserved != null) {
-            Text("• 마지막 유효 JevContext:")
-            Text("  - 앱: ${lastObserved.packageName}")
-            Text("  - 누적 시청: ${lastObserved.sessionMs / 1000}초 (${"%.1f".format(lastObserved.sessionMs / 60000.0)}분)")
-            Text("  - 연속 시청: ${lastObserved.continuousMs / 1000}초 (${"%.1f".format(lastObserved.continuousMs / 60000.0)}분)")
-            Text("  - 10분 내 재진입: ${lastObserved.returns10m}회")
-        } else {
-            Text("• 아직 기록된 유효 JevContext가 없습니다.")
-        }
-    }
-
-    TestSection("테스트 도구") {
-        val context = LocalContext.current
-        Text("YouTube와 Instagram의 실시간 스와이프 카운터와 세션을 초기화하여 새 테스트를 진행할 수 있습니다.", style = MaterialTheme.typography.bodySmall)
-        OutlinedButton(
-            onClick = {
-                YoutubeProbe.reset()
-                ReelsProbe.reset()
-                SwipeDynamicsTracker.reset()
-                vm.runtime.resetTestObservation()
-                refreshTick = android.os.SystemClock.elapsedRealtime()
-            },
-            enabled = !busy,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("스와이프 수 & Jev 관측 상태 초기화")
-        }
-        Spacer(modifier = Modifier.height(6.dp))
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.45f)),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("🚀 초기 화면(온보딩) 테스트 이동", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                Text(
-                    "현재의 사용 기록·목표·로그인 계정은 그대로 보존한 채, 앱을 처음 켰을 때 나오는 '권한 설정'과 '로그인 창' 화면으로 이동하여 변경 사항을 확인합니다.",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Button(
-                    onClick = {
-                        val intent = Intent(context, com.example.itv.MainActivity::class.java).apply {
-                            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                            putExtra(com.example.itv.MainActivity.EXTRA_FORCE_ONBOARDING, true)
-                        }
-                        context.startActivity(intent)
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary)
-                ) {
-                    Text("초기 화면으로 이동 (권한/로그인 테스트)", fontWeight = FontWeight.Bold)
-                }
-            }
-        }
-        OutlinedButton(
-            onClick = {
-                context.startActivity(Intent(context, CompanionPreviewActivity::class.java))
-            },
-            enabled = !busy,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("🐶 캐릭터 상호작용 미리보기 열기")
+            Text(if (targetApp == "ALL") "현재 통합 측정값으로 Jev 확률 요청 (토큰 1회)" else "현재 측정값으로 Jev 확률 요청 (토큰 1회)")
         }
     }
 }
@@ -1005,7 +1065,20 @@ private fun PostureTestPage(busy: Boolean) {
                     }
                 }
                 Text(normalMission.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Text(normalMission.action, style = MaterialTheme.typography.bodyMedium)
+                val annotatedNormalAction = androidx.compose.ui.text.buildAnnotatedString {
+                    append(normalMission.action)
+                    normalMission.boldPhrases.forEach { phrase ->
+                        val startIdx = normalMission.action.indexOf(phrase)
+                        if (startIdx >= 0) {
+                            addStyle(
+                                style = androidx.compose.ui.text.SpanStyle(fontWeight = FontWeight.Bold),
+                                start = startIdx,
+                                end = startIdx + phrase.length
+                            )
+                        }
+                    }
+                }
+                Text(annotatedNormalAction, style = MaterialTheme.typography.bodyMedium)
             }
         }
 
@@ -1033,7 +1106,20 @@ private fun PostureTestPage(busy: Boolean) {
                     }
                 }
                 Text(strongMission.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Text(strongMission.action, style = MaterialTheme.typography.bodyMedium)
+                val annotatedStrongAction = androidx.compose.ui.text.buildAnnotatedString {
+                    append(strongMission.action)
+                    strongMission.boldPhrases.forEach { phrase ->
+                        val startIdx = strongMission.action.indexOf(phrase)
+                        if (startIdx >= 0) {
+                            addStyle(
+                                style = androidx.compose.ui.text.SpanStyle(fontWeight = FontWeight.Bold),
+                                start = startIdx,
+                                end = startIdx + phrase.length
+                            )
+                        }
+                    }
+                }
+                Text(annotatedStrongAction, style = MaterialTheme.typography.bodyMedium)
                 Text("※ 화면을 끄고 뒤집어(엎어)두어야만 미션 시간이 흘러갑니다.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
             }
         }
@@ -1238,5 +1324,519 @@ private fun InterventionHistoryPage() {
         }
     }
 }
+
+@Composable
+private fun LongformObservationPage() {
+    val context = LocalContext.current
+    val snapshot by com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.snapshot.collectAsState()
+    val history by com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.history.collectAsState()
+    val igSnapshot by com.example.itv.infrastructure.observation.instagram.InstagramTracker.snapshot.collectAsState()
+    val igHistory by com.example.itv.infrastructure.observation.instagram.InstagramTracker.history.collectAsState()
+    val genHistory by com.example.itv.infrastructure.observation.GeneralAppTracker.history.collectAsState()
+    var refreshTick by remember { mutableLongStateOf(0L) }
+    val lastSession = com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.lastWatchedSession
+    val lastIgSession = com.example.itv.infrastructure.observation.instagram.InstagramTracker.lastSessionEvent
+    val lastGenSession = com.example.itv.infrastructure.observation.GeneralAppTracker.lastExternalAppSession
+    var hudShowing by remember { mutableStateOf(com.example.itv.presentation.coaching.LongformDiagnosticHud.isShowing) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(1000L)
+            refreshTick = android.os.SystemClock.elapsedRealtime()
+            hudShowing = com.example.itv.presentation.coaching.LongformDiagnosticHud.isShowing
+        }
+    }
+
+    TestSection("통합 실시간 플로팅 HUD (유튜브 · 인스타 · 모든 앱 활동 & 개입 판정)") {
+        Text(
+            "기본적으로 화면을 가리지 않도록 우리 앱(ITV) 아이콘 모양의 작은 플로팅 버튼(개입 가능/대기/불가 상태 색상 테두리 표시)으로 떠 있으며, 터치하면 상세 분석 HUD(유튜브·인스타·모든 앱의 4계층 카테고리 확정 근거, 게임/영상/음성 오디오 파이프라인, 앱 내 화면, 개입 판정)로 자유롭게 크게/작게 전환할 수 있습니다.",
+            style = MaterialTheme.typography.bodySmall
+        )
+
+        Button(
+            onClick = {
+                if (hudShowing) {
+                    com.example.itv.presentation.coaching.LongformDiagnosticHud.hide()
+                    hudShowing = false
+                } else {
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M && !android.provider.Settings.canDrawOverlays(context)) {
+                        android.widget.Toast.makeText(context, "다른 앱 위에 표시 권한을 허용해주세요.", android.widget.Toast.LENGTH_LONG).show()
+                        val intent = android.content.Intent(
+                            android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                            android.net.Uri.parse("package:${context.packageName}")
+                        )
+                        context.startActivity(intent)
+                    } else {
+                        val success = com.example.itv.presentation.coaching.LongformDiagnosticHud.show(context)
+                        if (success) {
+                            hudShowing = true
+                            android.widget.Toast.makeText(context, "실시간 플로팅 HUD가 활성화되었습니다. 다른 앱을 실행해보세요!", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = if (hudShowing) MaterialTheme.colorScheme.error else ItvGreen
+            )
+        ) {
+            Text(if (hudShowing) "실시간 플로팅 HUD 끄기" else "통합 실시간 플로팅 HUD 켜기", fontWeight = FontWeight.Bold)
+        }
+
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(8.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+        ) {
+            Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("💡 유튜브·인스타그램·타 앱과 함께 감지 결과를 보는 3가지 방법", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium)
+                Text("1. [플로팅 HUD]: 위 버튼을 켜면 화면 위에 미니 창이 떠서 모든 앱 사용 중 실시간 갱신됩니다.", style = MaterialTheme.typography.bodySmall)
+                Text("2. [삼성 팝업 화면]: 최근 실행 앱 목록에서 ITV 앱 아이콘을 길게 누른 뒤 '팝업 화면으로 열기'를 선택하면 창 크기를 조절하여 띄워둘 수 있습니다.", style = MaterialTheme.typography.bodySmall)
+                Text("3. [화면 분할]: 최근 실행 앱 목록에서 '분할 화면으로 열기'를 선택하여 위에는 대상 앱, 아래는 ITV를 띄웁니다.", style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+
+    TestSection("최근 앱 복귀 시청/활동 기록 (유튜브 · 인스타그램 · 일반 앱)") {
+        Text(
+            "유튜브, 인스타그램 또는 다른 앱을 사용하다가 최근 실행 앱(작업전환) 키를 눌러 ITV 앱으로 복귀했을 때, 직전까지 보던 화면과 개입 가능 여부가 자동으로 기록됩니다.",
+            style = MaterialTheme.typography.bodySmall
+        )
+        if (lastSession != null) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                border = BorderStroke(1.5.dp, ItvGreen),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Surface(shape = RoundedCornerShape(6.dp), color = ItvMint) {
+                            Text(
+                                "YouTube 직전 시청 기록",
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = ItvGreen
+                            )
+                        }
+                        Text(
+                            "복귀: ${lastSession.formattedTime}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(
+                        lastSession.previousTitle ?: "제목 감지되지 않음",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    val watchedSec = lastSession.watchedDurationMs / 1000L
+                    val watchedStr = if (watchedSec >= 60) "${watchedSec / 60}분 ${watchedSec % 60}초" else "${watchedSec}초"
+                    CompactCheckRow(label = "시청 모드", value = lastSession.fromMode.label)
+                    CompactCheckRow(label = "시청 지속 시간", value = watchedStr)
+                    CompactCheckRow(label = "전환 감지 내용", value = lastSession.description)
+                }
+            }
+        }
+        if (lastIgSession != null) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                border = BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Surface(shape = RoundedCornerShape(6.dp), color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)) {
+                            Text(
+                                "Instagram 직전 화면 기록",
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        Text(
+                            "복귀: ${lastIgSession.formattedTime}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(
+                        lastIgSession.fromMode.label,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    val reelsSec = lastIgSession.reelsWatchDurationMs / 1000L
+                    val reelsStr = if (reelsSec >= 60) "${reelsSec / 60}분 ${reelsSec % 60}초" else "${reelsSec}초"
+                    CompactCheckRow(label = "누적 릴스 시청", value = "$reelsStr (스와이프 ${lastIgSession.reelsSwipeCount}회)")
+                    CompactCheckRow(label = "전환 감지 내용", value = lastIgSession.description)
+                }
+            }
+        }
+        if (lastGenSession != null) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                border = BorderStroke(1.5.dp, MaterialTheme.colorScheme.secondary),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Surface(shape = RoundedCornerShape(6.dp), color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f)) {
+                            Text(
+                                "기타 앱 직전 활동 기록",
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.secondary
+                            )
+                        }
+                        Text(
+                            "기록: ${lastGenSession.formattedTime}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(
+                        "${lastGenSession.category.badge} · ${lastGenSession.appName}",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    CompactCheckRow(label = "확정/추론된 활동", value = lastGenSession.inferredActivity)
+                    CompactCheckRow(label = "감지된 앱 내 화면", value = lastGenSession.inferredScreen)
+                    if (lastGenSession.classificationBasis.isNotBlank()) {
+                        CompactCheckRow(label = "판별 근거", value = lastGenSession.classificationBasis)
+                    }
+                    CompactCheckRow(
+                        label = "개입 환경 판정",
+                        value = "${lastGenSession.eligibility.badge} (${lastGenSession.eligibilityReason})",
+                        highlight = lastGenSession.eligibility == com.example.itv.infrastructure.observation.InterventionEligibility.ELIGIBLE
+                    )
+                }
+            }
+        }
+        if (lastSession == null && lastIgSession == null && lastGenSession == null) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+            ) {
+                Text(
+                    "아직 앱 사용 복귀 기록이 없습니다.\n유튜브·인스타·다른 앱을 사용하다가 최근 실행 앱 키를 눌러 ITV로 돌아오면 여기에 즉시 기록됩니다.",
+                    modifier = Modifier.padding(16.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+
+    if (genHistory.isNotEmpty()) {
+        TestSection("기타 앱 활동 추론 & 개입 가능 환경 로그 (최근 20건)") {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(
+                    onClick = {
+                        com.example.itv.infrastructure.observation.GeneralAppTracker.clearHistory()
+                        refreshTick = android.os.SystemClock.elapsedRealtime()
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("기타 앱 기록 비우기", color = MaterialTheme.colorScheme.error)
+                }
+            }
+            genHistory.take(20).forEach { event ->
+                val isEligible = event.eligibility == com.example.itv.infrastructure.observation.InterventionEligibility.ELIGIBLE
+                val tagColor = if (isEligible) ItvGreen else MaterialTheme.colorScheme.error
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, ItvLine),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                ) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Surface(shape = RoundedCornerShape(4.dp), color = tagColor.copy(alpha = 0.15f)) {
+                                Text(
+                                    "${event.category.badge} · ${event.eligibility.badge}",
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = tagColor
+                                )
+                            }
+                            Text(event.formattedTime, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Text("${event.appName}: ${event.inferredActivity}", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+                        Text("• 판정 사유: ${event.eligibilityReason}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+        }
+    }
+
+    TestSection("실시간 인스타그램 관측 상태 (홈/피드 · 릴스 · 스토리 · DM · 댓글)") {
+        CompactCheckGroup("현재 인스타그램 화면 상태") {
+            CompactCheckRow(
+                label = "현재 인스타 화면 모드",
+                value = igSnapshot.mode.label,
+                highlight = igSnapshot.isInInstagram
+            )
+            CompactCheckRow(
+                label = "릴스(Reels) 활성 여부",
+                value = if (igSnapshot.isReelsActive) "🎬 릴스 재생 중 (스와이프 ${igSnapshot.reelsSwipeCount}회)" else "비활성",
+                highlight = igSnapshot.isReelsActive
+            )
+            CompactCheckRow(
+                label = "DM / 작성 보호 상태",
+                value = if (igSnapshot.isDmProtected) "🛡 DM 또는 키보드 활성 (개입 자동 차단)" else "보호 조건 없음",
+                highlight = igSnapshot.isDmProtected
+            )
+            val reelsSec = igSnapshot.reelsWatchDurationMs / 1000L
+            val reelsStr = if (reelsSec >= 60) "${reelsSec / 60}분 ${reelsSec % 60}초" else "${reelsSec}초"
+            CompactCheckRow(
+                label = "누적 릴스 시청 시간",
+                value = "$reelsStr (스와이프 전환 ${igSnapshot.reelsSwipeCount}회)"
+            )
+            val modeSec = igSnapshot.currentModeDurationMs / 1000L
+            val modeStr = if (modeSec >= 60) "${modeSec / 60}분 ${modeSec % 60}초" else "${modeSec}초"
+            CompactCheckRow(
+                label = "현재 화면 체류 시간",
+                value = if (igSnapshot.isInInstagram) modeStr else "0초 (외부 화면)"
+            )
+            CompactCheckRow(
+                label = "절전 스캔 모드",
+                value = if (igSnapshot.isPowerSaveScanMode) "🔋 절전 스캔 동작 중 (1.5초 주기)" else "일반 반응형 스캔 (0.1초)"
+            )
+            CompactCheckRow(
+                label = "상세 상태",
+                value = igSnapshot.detail
+            )
+        }
+    }
+
+    TestSection("실시간 유튜브 관측 상태") {
+        CompactCheckGroup("현재 화면 상태 및 영상 정보") {
+            val isWatching = snapshot.mode == com.example.itv.infrastructure.observation.youtube.YoutubeWatchMode.LANDSCAPE_FULLSCREEN ||
+                snapshot.mode == com.example.itv.infrastructure.observation.youtube.YoutubeWatchMode.PORTRAIT_WATCH
+            CompactCheckRow(
+                label = "현재 화면 모드",
+                value = snapshot.mode.label,
+                highlight = isWatching
+            )
+            CompactCheckRow(
+                label = "인식된 영상 제목",
+                value = snapshot.currentTitle?.take(35)?.let { if (it.length >= 35) "$it…" else it } ?: "제목 미감지 (대기 중)"
+            )
+            CompactCheckRow(
+                label = "실제 재생 상태",
+                value = when {
+                    snapshot.isEndscreenDetected -> "🏁 영상 종료 (엔드스크린)"
+                    isWatching && snapshot.isPlaying -> "▶ 재생 중 (시청 시간 카운트 중)"
+                    isWatching && !snapshot.isPlaying -> "⏸ 일시정지됨 (시청 시간 멈춤)"
+                    else -> "⏹ 시청 중 아님 (타이머 정지)"
+                },
+                highlight = isWatching && snapshot.isPlaying
+            )
+            val watchSec = snapshot.currentVideoWatchDurationMs / 1000L
+            val watchStr = if (watchSec >= 60) "${watchSec / 60}분 ${watchSec % 60}초" else "${watchSec}초"
+            CompactCheckRow(
+                label = "실제 재생 시청 시간",
+                value = if (isWatching || watchSec > 0L) "$watchStr (일시정지·타앱 제외)" else "0초"
+            )
+            CompactCheckRow(
+                label = "유튜브 재생바 위치",
+                value = snapshot.playbackPositionText ?: "재생바 숨김 (화면 터치 시 표시)"
+            )
+            CompactCheckRow(
+                label = "화면 방향",
+                value = if (snapshot.isLandscape) "가로 모드 (Landscape)" else "세로 모드 (Portrait)"
+            )
+            CompactCheckRow(
+                label = "상세 상태",
+                value = snapshot.detail
+            )
+        }
+    }
+
+    TestSection("인스타그램 화면 전환 이벤트 로그 (최근 100건)") {
+        Text(
+            "인스타 홈/피드, 릴스, 댓글, 스토리, DM, 탐색, 프로필 전환 및 우리 앱↔인스타 복귀 시나리오가 시간순으로 기록됩니다.",
+            style = MaterialTheme.typography.bodySmall
+        )
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                onClick = { refreshTick = android.os.SystemClock.elapsedRealtime() },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("기록 새로고침")
+            }
+            TextButton(
+                onClick = {
+                    com.example.itv.infrastructure.observation.instagram.InstagramTracker.clearHistory()
+                    refreshTick = android.os.SystemClock.elapsedRealtime()
+                },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("인스타 기록 비우기", color = MaterialTheme.colorScheme.error)
+            }
+        }
+        if (igHistory.isEmpty()) {
+            Text("아직 기록된 인스타그램 전환 이벤트가 없습니다.\n인스타그램을 실행하고 피드·릴스·스토리·DM 등을 이동해보세요.", style = MaterialTheme.typography.bodySmall)
+        } else {
+            igHistory.forEach { event ->
+                val tagColor = when (event.eventType) {
+                    "IG_REELS", "IG_REELS_SWIPE" -> MaterialTheme.colorScheme.error
+                    "IG_DM" -> ItvGreen
+                    "IG_STORY" -> MaterialTheme.colorScheme.primary
+                    "IG_COMMENTS" -> MaterialTheme.colorScheme.secondary
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                }
+                val tagLabel = when (event.eventType) {
+                    "IG_REELS" -> "인스타 릴스 진입"
+                    "IG_REELS_SWIPE" -> "릴스 스와이프 전환"
+                    "IG_COMMENTS" -> "인스타 댓글 열람"
+                    "IG_STORY" -> "인스타 스토리 시청"
+                    "IG_DM" -> "인스타 DM (보호)"
+                    "IG_HOME_FEED" -> "인스타 홈/피드"
+                    "IG_EXPLORE" -> "인스타 검색/탐색"
+                    "IG_PROFILE" -> "인스타 프로필"
+                    "IG_TO_ITV" -> "인스타 → 우리 앱 복귀"
+                    "ITV_TO_IG" -> "우리 앱 → 인스타 복귀"
+                    "IG_EXITED_TO_HOME" -> "홈 화면 복귀 (이탈)"
+                    "ENTERED_IG" -> "홈 → 인스타 진입"
+                    else -> event.eventType
+                }
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, ItvLine),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                ) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Surface(shape = RoundedCornerShape(4.dp), color = tagColor.copy(alpha = 0.15f)) {
+                                Text(
+                                    tagLabel,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = tagColor
+                                )
+                            }
+                            Text(event.formattedTime, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Text(event.description, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+                    }
+                }
+            }
+        }
+    }
+
+    TestSection("유튜브 롱폼 전환 & 시청 이벤트 로그 (최근 100건)") {
+        Text(
+            "우리 앱↔유튜브 복귀, 휴대폰 홈 화면 복귀, 세로 시청, 가로 시청, 유튜브 홈 이동, 영상 종료(한 영상 끝), 다음 영상 전환 시나리오가 상태 변화 시점마다 1회씩 기록됩니다.",
+            style = MaterialTheme.typography.bodySmall
+        )
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                onClick = { refreshTick = android.os.SystemClock.elapsedRealtime() },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("기록 새로고침")
+            }
+            TextButton(
+                onClick = {
+                    com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.clearHistory()
+                    refreshTick = android.os.SystemClock.elapsedRealtime()
+                },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("유튜브 기록 비우기", color = MaterialTheme.colorScheme.error)
+            }
+        }
+        if (history.isEmpty()) {
+            Text("아직 기록된 롱폼 전환 이벤트가 없습니다.\n유튜브를 실행하고 영상을 보거나 화면을 전환해보세요.", style = MaterialTheme.typography.bodySmall)
+        } else {
+            history.forEachIndexed { _, event ->
+                val tagColor = when (event.eventType) {
+                    "TITLE_CHANGED" -> ItvGreen
+                    "VIDEO_ENDED", "ENDSCREEN" -> MaterialTheme.colorScheme.error
+                    "YOUTUBE_TO_ITV", "SWITCHED_TO_ITV" -> ItvGreen
+                    "ITV_TO_YOUTUBE", "ENTERED_YOUTUBE" -> MaterialTheme.colorScheme.primary
+                    "PORTRAIT_WATCH", "LANDSCAPE_WATCH" -> ItvGreen
+                    "MOVED_TO_YT_HOME", "EXITED_TO_FEED", "EXITED_TO_HOME" -> MaterialTheme.colorScheme.secondary
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                }
+                val tagLabel = when (event.eventType) {
+                    "TITLE_CHANGED" -> "다음 영상 전환"
+                    "VIDEO_ENDED", "ENDSCREEN" -> "유튜브 영상 종료"
+                    "YOUTUBE_TO_ITV", "SWITCHED_TO_ITV" -> "유튜브 → 우리 앱 복귀"
+                    "ITV_TO_YOUTUBE" -> "우리 앱 → 유튜브 복귀"
+                    "EXITED_TO_HOME" -> "홈 화면 복귀 (이탈)"
+                    "ENTERED_YOUTUBE" -> "홈 → 유튜브 진입"
+                    "PORTRAIT_WATCH" -> "세로 영상 시청"
+                    "LANDSCAPE_WATCH" -> "가로 전체화면 시청"
+                    "MOVED_TO_YT_HOME", "EXITED_TO_FEED" -> "유튜브 홈 이동"
+                    "SHORTS_WATCH" -> "쇼츠 시청 진입"
+                    "SHORTS_COMMENTS" -> "숏폼 댓글 열람"
+                    else -> event.eventType
+                }
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, ItvLine),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                ) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Surface(shape = RoundedCornerShape(4.dp), color = tagColor.copy(alpha = 0.15f)) {
+                                Text(
+                                    tagLabel,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = tagColor
+                                )
+                            }
+                            Text(event.formattedTime, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Text(event.description, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+                        if (event.watchedDurationMs > 0L) {
+                            val sec = event.watchedDurationMs / 1000L
+                            Text("• 누적 실제 시청: ${if (sec >= 60) "${sec / 60}분 ${sec % 60}초" else "${sec}초"}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 
 

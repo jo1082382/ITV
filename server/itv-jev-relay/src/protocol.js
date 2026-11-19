@@ -94,6 +94,23 @@ export function evaluation(data, uuid) {
   const swipeAccel = optionalMetric(data.swipe_accel_1m, -600, 600);
   const fastStreak = optionalMetric(data.fast_swipe_streak, 0, 1000, true);
   const swipeOverheated = optionalBoolean(data.swipe_overheated);
+  const rawShortform = optionalMetric(data.raw_shortform_minutes, 0, 1440);
+  const rawGeneral = optionalMetric(data.raw_general_minutes, 0, 1440);
+  const continuousEq = optionalMetric(data.continuous_equivalent_minutes, 0, 1440);
+  const shortformShare = optionalMetric(data.shortform_share_of_phone_ratio, 0, 1);
+  const ambientLux = optionalMetric(data.ambient_lux, 0, 100000);
+  const screenBrightness = optionalMetric(data.screen_brightness, 0, 255, true);
+  const isNear = optionalBoolean(data.is_near_or_occluded);
+  const bedtimeDist = optionalMetric(data.bedtime_distance_minutes, -1440, 1440, true);
+  const userEnvState = text(data.user_environment_state, "user_environment_state", 100, true);
+  const longformWatch = optionalMetric(data.longform_watch_minutes, 0, 1440);
+  const currentVideoWatch = optionalMetric(data.current_video_watch_minutes, 0, 1440);
+  const completedLongform = optionalMetric(data.completed_longform_count, 0, 500, true);
+  const youtubeWatchMode = text(data.youtube_watch_mode, "youtube_watch_mode", 50, true);
+  const appCategory = text(data.app_category, "app_category", 50, true);
+  const activityPhase = text(data.activity_phase, "activity_phase", 60, true);
+  const audioPipelineKind = text(data.audio_pipeline_kind, "audio_pipeline_kind", 50, true);
+  const generalIdleSeconds = optionalMetric(data.general_app_idle_seconds, 0, 86400, true);
   if (personalAvgSession !== undefined) context.personal_avg_session_minutes = personalAvgSession;
   if (sessionRatio !== undefined) context.session_vs_personal_avg_ratio = sessionRatio;
   if (todayShortform !== undefined) context.today_shortform_minutes = todayShortform;
@@ -106,6 +123,24 @@ export function evaluation(data, uuid) {
   if (swipeAccel !== undefined) context.swipe_accel_1m = swipeAccel;
   if (fastStreak !== undefined) context.fast_swipe_streak = fastStreak;
   if (swipeOverheated !== undefined) context.swipe_overheated = swipeOverheated;
+  if (rawShortform !== undefined) context.raw_shortform_minutes = rawShortform;
+  if (rawGeneral !== undefined) context.raw_general_minutes = rawGeneral;
+  if (continuousEq !== undefined) context.continuous_equivalent_minutes = continuousEq;
+  if (shortformShare !== undefined) context.shortform_share_of_phone_ratio = shortformShare;
+  if (ambientLux !== undefined) context.ambient_lux = ambientLux;
+  if (screenBrightness !== undefined) context.screen_brightness = screenBrightness;
+  if (isNear !== undefined) context.is_near_or_occluded = isNear;
+  if (bedtimeDist !== undefined) context.bedtime_distance_minutes = bedtimeDist;
+  if (userEnvState) context.user_environment_state = userEnvState;
+  if (longformWatch !== undefined) context.longform_watch_minutes = longformWatch;
+  if (currentVideoWatch !== undefined) context.current_video_watch_minutes = currentVideoWatch;
+  if (completedLongform !== undefined) context.completed_longform_count = completedLongform;
+  if (youtubeWatchMode) context.youtube_watch_mode = youtubeWatchMode;
+  if (appCategory) context.app_category = appCategory;
+  if (activityPhase) context.activity_phase = activityPhase;
+  if (audioPipelineKind) context.audio_pipeline_kind = audioPipelineKind;
+  if (generalIdleSeconds !== undefined) context.general_app_idle_seconds = generalIdleSeconds;
+  if (userEnvState) context.user_environment_state = userEnvState;
   return { ...who, context,
     settings, trigger: text(data.trigger_reason, "trigger_reason", 200, true),
     packageName: text(data.package_name, "package_name", 100, true),

@@ -321,4 +321,168 @@ class JevPolicyTest {
         // 5. 50%p 초과 격차: 최대 360초 고정
         assertEquals(360, JevCandidatePolicy.calculateDynamicInterval(0.80, 0.10)) // gap 70.0%p -> 360초
     }
+
+    @Test fun dynamicReevaluationIntervalTiersForLongform() {
+        // null or non-finite -> 기본 360초
+        assertEquals(360, JevCandidatePolicy.calculateDynamicInterval(0.80, null, isGeneralOrLongform = true))
+        assertEquals(360, JevCandidatePolicy.calculateDynamicInterval(0.80, Double.NaN, isGeneralOrLongform = true))
+
+        // 1. 기준 초과 또는 일치 (gap <= 0%p): 최단 등가 60초 (실사용 3분)
+        assertEquals(60, JevCandidatePolicy.calculateDynamicInterval(0.80, 0.85, isGeneralOrLongform = true))
+        assertEquals(60, JevCandidatePolicy.calculateDynamicInterval(0.80, 0.80, isGeneralOrLongform = true))
+
+        // 2. 작은 격차 (0%p < gap <= 15%p): 등가 60초 ~ 120초 (실사용 3분 ~ 6분)
+        assertEquals(90, JevCandidatePolicy.calculateDynamicInterval(0.80, 0.725, isGeneralOrLongform = true))
+        assertEquals(120, JevCandidatePolicy.calculateDynamicInterval(0.80, 0.65, isGeneralOrLongform = true))
+
+        // 3. 중간 격차 (15%p < gap <= 30%p): 등가 120초 ~ 240초 (실사용 6분 ~ 12분)
+        assertEquals(180, JevCandidatePolicy.calculateDynamicInterval(0.80, 0.575, isGeneralOrLongform = true))
+        assertEquals(240, JevCandidatePolicy.calculateDynamicInterval(0.80, 0.50, isGeneralOrLongform = true))
+
+        // 4. 큰 격차 (30%p < gap <= 50%p): 등가 240초 ~ 360초 (실사용 12분 ~ 18분)
+        assertEquals(300, JevCandidatePolicy.calculateDynamicInterval(0.80, 0.40, isGeneralOrLongform = true))
+        assertEquals(360, JevCandidatePolicy.calculateDynamicInterval(0.80, 0.30, isGeneralOrLongform = true))
+
+        // 5. 50%p 초과 격차: 최대 등가 360초 (실사용 18분) 고정
+        assertEquals(360, JevCandidatePolicy.calculateDynamicInterval(0.80, 0.10, isGeneralOrLongform = true))
+    }
+
+    @Test fun youtubeLongformAccumulatesAtOneThirdRatio() {
+        val tracker = JevSessionTracker { "id" }
+        tracker.observe(0L, JevSettings.YOUTUBE, null)
+        for (i in 1..90) {
+            tracker.observe(i * 1000L, JevSettings.YOUTUBE, null)
+        }
+        val state = tracker.states.getValue(JevSettings.YOUTUBE)
+        assertEquals(90_000L, state.rawGeneralMs)
+        assertEquals(0L, state.rawShortformMs)
+        // 90초 일반 롱폼 시청 -> 1:3 비율 적용으로 continuousMs는 30초(30,000ms)
+        assertEquals(30_000L, state.continuousMs)
+        assertEquals(30_000L, state.totalMs)
+    }
+
+    @Test fun allModeAppliesAllPersonalizedJudgmentsExceptSwipe() {
+        val s = JevSettings(continuousSeconds = 600, returnsThreshold = 3, bedtimeDelayMinutes = 5)
+        // continuousMs: 900,000ms (15분 등가 시간 = 45분 롱폼 실사용)
+        val ctxAll = JevContext(
+            sessionId = "s-all",
+            packageName = "ALL",
+            sessionMs = 900_000L,
+            continuousMs = 900_000L,
+            returns10m = 0,
+            returnsObservedSeconds = 600,
+            bedtimePassedMinutes = 10,
+            observedAt = 1000L,
+            quality = "VALID",
+            sessionVsAvgRatio = 1.3, // 평소 세션 대비 1.3배
+            effectiveSpm1m = 18.0,   // 스와이프가 있더라도 전체 모드에서는 무시되어야 함
+            fastSwipeStreak = 5,
+            swipeAccel1m = 4.0,
+            swipeOverheated = true,
+            ambientLux = 5f,
+            screenBrightness = 20,
+            bedtimeDistanceMinutes = 10,
+            lastInterventionOutcome = "LATER",
+            postInterventionActivity = true,
+            resistanceStreak = 2
+        )
+
+        // 1. Threshold adjustments
+        val adj = JevCandidatePolicy.computeThresholdAdjustment(s, ctxAll)
+        // 세션 과몰입 적용 (1.3배 -> -0.06)
+        assertTrue(adj.sessionDelta < 0.0)
+        // 스와이프 과열은 전체 모드에서 반드시 0.0%p
+        assertEquals(0.0, adj.swipeDelta, 0.001)
+        // 취침 전 암실 적용 (-15%p 부근)
+        assertTrue(adj.bedtimeDelta < 0.0)
+        // 연속 시청 피로도 적용 (15분 등가 도달 -> 0%p ~ -2%p)
+        assertTrue(adj.fatigueDelta <= 0.0)
+        // 직전 개입 저항 적용 (2회 LATER -> -0.08)
+        assertEquals(-0.08, adj.resistanceDelta, 0.001)
+
+        // 2. Candidate reasons
+        val reasons = JevCandidatePolicy.reasons(ctxAll, s)
+        assertTrue("CONTINUOUS" in reasons)
+        assertTrue("PRE_BEDTIME_DARK_USAGE" in reasons || "BEDTIME" in reasons)
+        assertTrue("INTERVENTION_RESISTANCE" in reasons)
+        // 스와이프 과열은 전체 모드 후보 사유에서 제외
+        assertFalse("RAPID_SWIPE_OVERHEAT" in reasons)
+    }
+
+    @Test fun optionBTargetsAllUserAppsWhileExcludingLaunchersAndSystem() {
+        val s = JevSettings()
+        assertTrue(s.targets("com.netflix.mediaclient"))
+        assertTrue(s.targets("com.supercell.clashroyale"))
+        assertTrue(s.targets("com.nhn.android.webtoon"))
+        assertTrue(s.targets(JevSettings.YOUTUBE))
+        assertTrue(s.targets(JevSettings.INSTAGRAM))
+        assertTrue(s.targets("ALL"))
+
+        // Exclusions
+        assertFalse(s.targets("com.sec.android.app.launcher"))
+        assertFalse(s.targets("com.google.android.apps.nexuslauncher"))
+        assertFalse(s.targets("com.android.launcher3"))
+        assertFalse(s.targets("com.android.systemui"))
+        assertFalse(s.targets("com.android.settings"))
+        assertFalse(s.targets("com.samsung.android.incallui"))
+        assertFalse(s.targets("com.team.itv"))
+        assertFalse(s.targets("com.example.itv"))
+        assertFalse(s.targets("LOCKED"))
+        assertFalse(s.targets("GUARD_BLOCKED"))
+
+        // Disabling specific toggles
+        assertFalse(s.copy(instagram = false).targets(JevSettings.INSTAGRAM))
+        assertFalse(s.copy(youtube = false).targets(JevSettings.YOUTUBE))
+    }
+
+    @Test fun continuousUsageAccumulatesAcrossAppHopsInOptionB() {
+        val tracker = JevSessionTracker { "session-all" }
+        // 90초 YouTube 롱폼 시청
+        for (i in 0..90) {
+            tracker.observe(i * 1000L, JevSettings.YOUTUBE, null)
+        }
+        val ytContext = tracker.context(JevSettings.YOUTUBE, 90_000L, 90_000L, null)
+        assertEquals(30_000L, ytContext?.continuousMs)
+        assertEquals(90_000L, ytContext?.rawGeneralMs)
+
+        // 이어서 앱 전환: 넷플릭스 90초 시청 (전환 지연 없이 연속)
+        for (i in 91..180) {
+            tracker.observe(i * 1000L, "com.netflix.mediaclient", null)
+        }
+        val netflixContext = tracker.context("com.netflix.mediaclient", 180_000L, 180_000L, null)
+        // 폰 전체 통합 연속 사용 시간은 180초 일반 사용의 1/3인 60초 (60,000ms)
+        assertEquals(60_000L, netflixContext?.continuousMs)
+        assertEquals(180_000L, netflixContext?.rawGeneralMs)
+        assertEquals(0L, netflixContext?.rawShortformMs)
+
+        // ALL 컨텍스트도 일치
+        val allContext = tracker.context("ALL", 180_000L, 180_000L, null)
+        assertEquals(60_000L, allContext?.continuousMs)
+        assertEquals(180_000L, allContext?.rawGeneralMs)
+    }
+
+    @Test fun generalAppExcludesSwipeOverheatFromReasonsAndThreshold() {
+        val s = JevSettings(continuousSeconds = 600)
+        val ctxGame = JevContext(
+            sessionId = "s-game",
+            packageName = "com.supercell.clashroyale",
+            sessionMs = 900_000L,
+            continuousMs = 900_000L,
+            returns10m = 0,
+            returnsObservedSeconds = 600,
+            bedtimePassedMinutes = null,
+            observedAt = 1000L,
+            quality = "VALID",
+            effectiveSpm1m = 20.0,
+            fastSwipeStreak = 5,
+            swipeAccel1m = 5.0,
+            swipeOverheated = true
+        )
+        val adj = JevCandidatePolicy.computeThresholdAdjustment(s, ctxGame)
+        assertEquals(0.0, adj.swipeDelta, 0.001)
+
+        val reasons = JevCandidatePolicy.reasons(ctxGame, s)
+        assertTrue("CONTINUOUS" in reasons)
+        assertFalse("RAPID_SWIPE_OVERHEAT" in reasons)
+    }
 }

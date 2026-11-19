@@ -100,6 +100,9 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
     private var currentGz: Float? = null
     private var facedownMonitoring = false
     private var facedownObserved = false
+    private var facedownAccumulatedMs = 0L
+    private var lastFacedownSampleAt = 0L
+    private var lastSampleWasFacedown = false
 
     private val motionSamples = java.util.ArrayDeque<FloatArray>(20)
     private var isCurrentlyStationary = false
@@ -394,39 +397,66 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
 
     fun isFacedown(): Boolean {
         val gz = currentGz ?: _snapshot.value.gravityZ ?: return false
-        val isNear = _snapshot.value.isNear
-        val lux = currentLux ?: _snapshot.value.lux
-        val roll = _snapshot.value.rollDegrees
-        val absRoll = roll?.let { abs(it) } ?: 0f
         val gy = currentGy ?: 0f
         val gx = currentGx ?: 0f
+
+        val isNear = _snapshot.value.isNear
+        val lux = currentLux ?: _snapshot.value.lux
         val screenInteractive = powerManager?.isInteractive ?: isScreenOn
+        val isPitchBlack = lux != null && lux <= 2.5f
 
-        val isPitchBlack = lux != null && lux <= 0.8f
-        val isFlatResting = gz < -8.5f && abs(gy) < 2.5f && abs(gx) < 2.5f
+        // 1. 화면이 꺼져 있는 경우 (휴식 미션 실행 중):
+        // 화면이 바닥 방향(Z축 음수)을 향하고 있는지 확인.
+        // 울퉁불퉁한 바닥(침대, 소파, 카펫)이나 두꺼운 케이스(카드 수납, 링, 카툭튀)로 인해 기울어져 있어도
+        // 화면이 아래를 향해 엎어져 있다면 안정적으로 감지 (gz <= -3.8f 허용)
+        if (!screenInteractive) {
+            // (a) 물리적 각도: Z축이 아래를 확실히 향함 (기울기 최대 약 67도까지 허용)
+            val isAngleFacedown = gz <= -3.8f && abs(gy) < 9.0f && abs(gx) < 9.0f
+            // (b) 센서 보조: 근접 센서 감지 또는 조도 차단 상태에서 화면이 아래를 향함 (gz <= -2.2f)
+            val isSensorAssisted = (isNear || isPitchBlack) && gz <= -2.2f
+            return isAngleFacedown || isSensorAssisted
+        }
 
-        // 1. 화면이 꺼져 있는 경우 (휴식 미션 실행 중)
-        if (!screenInteractive && (gz < -5.0f || absRoll > 135f || isNear)) return true
+        // 2. 화면이 켜져 있는 경우: 근접 센서가 가려졌거나 조도가 차단된 상태에서 엎어진 각도
+        if (isNear && (isPitchBlack || gz < -4.0f)) return true
 
-        // 2. 근접 센서가 확실히 가려진 경우 (침대/이불/베개 밀착)
-        if (isNear && (isPitchBlack || gz < -3.5f)) return true
+        // 3. 조도가 차단되고 책상/바닥에 엎어둔 경우
+        if (isPitchBlack && gz <= -4.0f && abs(gy) < 8.5f) return true
 
-        // 3. 조도가 0 lux로 차단되고 책상에 수평으로 놓인 경우 (카툭튀 대응)
-        if (isPitchBlack && (isFlatResting || (absRoll > 165f && abs(gy) < 2.5f))) return true
-
-        // 화면이 켜져 있고 조도가 있거나(lux > 0.8) 근접 센서가 열려 있다면, 누워서 얼굴 위로 들고 시청 중!
         return false
     }
 
     fun startFacedownMonitoring() {
         facedownMonitoring = true
-        facedownObserved = isFacedown()
+        facedownObserved = false
+        facedownAccumulatedMs = 0L
+        lastFacedownSampleAt = android.os.SystemClock.elapsedRealtime()
+        lastSampleWasFacedown = !(powerManager?.isInteractive ?: isScreenOn) && isFacedown()
+        startSensors()
+    }
+
+    fun onMissionScreenOff() {
+        facedownMonitoring = true
+        facedownObserved = false
+        facedownAccumulatedMs = 0L
+        lastFacedownSampleAt = android.os.SystemClock.elapsedRealtime()
+        lastSampleWasFacedown = isFacedown()
         startSensors()
     }
 
     fun stopFacedownMonitoring(): Boolean {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (facedownMonitoring && lastSampleWasFacedown && isFacedown() && lastFacedownSampleAt > 0L) {
+            val dt = (now - lastFacedownSampleAt).coerceIn(0L, 5000L)
+            facedownAccumulatedMs += dt
+        }
+        // 화면이 꺼진 상태에서 최소 3초 이상 실제로 스마트폰이 바닥에 엎어져 있었으면 성공으로 인정
+        val wasFacedown = facedownObserved || facedownAccumulatedMs >= 3_000L
         facedownMonitoring = false
-        val wasFacedown = facedownObserved || isFacedown()
+        facedownObserved = false
+        facedownAccumulatedMs = 0L
+        lastFacedownSampleAt = 0L
+        lastSampleWasFacedown = false
         if (!isScreenOn && continuousPostureClients == 0) stopSensors()
         return wasFacedown
     }
@@ -452,8 +482,23 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
                 if (gx != null && gy != null && gz != null) {
                     trackMotion(gx, gy, gz)
                 }
-                if (facedownMonitoring && isFacedown()) {
-                    facedownObserved = true
+                if (facedownMonitoring) {
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    val screenOff = !(powerManager?.isInteractive ?: isScreenOn)
+                    val currentlyFacedown = screenOff && isFacedown()
+                    if (currentlyFacedown) {
+                        val dt = if (lastFacedownSampleAt > 0L && lastSampleWasFacedown) {
+                            (now - lastFacedownSampleAt).coerceIn(0L, 5000L)
+                        } else {
+                            60L
+                        }
+                        facedownAccumulatedMs += dt
+                        if (facedownAccumulatedMs >= 3_000L) {
+                            facedownObserved = true
+                        }
+                    }
+                    lastSampleWasFacedown = currentlyFacedown
+                    lastFacedownSampleAt = now
                 }
                 update(force = isContinuous, isSampling = true, triggerReason = if (isContinuous) "실시간 자세 감지" else _snapshot.value.lastTriggerReason)
             }
@@ -886,15 +931,15 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         val postureTriple = when {
             // 1. 스마트폰 화면 하향 각도 (Z축 음수 또는 반전 135° 이상)
             // -> 바닥/침대에 엎어둔 것인지 vs 얼굴 위로 들고 시청 중인 것인지 조도/근접/화면상태로 정밀 분기
-            gz < -2.5f || absRoll > 135f -> {
+            gz < -2.5f || (gz < -1.5f && absRoll > 135f && abs(gy) < 6.5f) -> {
                 val isTrulyFacedown = when {
-                    // 화면 꺼짐: 미션 중 화면 끄고 엎어둠
-                    !screenInteractive -> true
-                    // 근접 센서가 밀착 가림 (침구류/베개/손바닥)
-                    isNear && (isPitchBlack || gz < -3.5f) -> true
+                    // 화면 꺼짐: 미션 중 화면을 끄고 실제로 바닥을 향해 엎어둔 각도만 인정
+                    !screenInteractive -> gz <= -6.5f && abs(gy) < 6.0f
+                    // 근접 센서가 밀착 가림 (침구류/베개/바닥) + 하향 각도
+                    isNear && gz <= -6.0f && abs(gy) < 6.5f && (isPitchBlack || gz < -6.5f) -> true
                     // 조도 0 lux 차단 및 바닥 수평 거치
                     isPitchBlack && isFlatResting -> true
-                    isPitchBlack && absRoll > 165f && abs(gy) < 2.5f -> true
+                    isPitchBlack && gz < -6.5f && absRoll > 150f && abs(gy) < 3.5f -> true
                     else -> false
                 }
 

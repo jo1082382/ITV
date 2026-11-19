@@ -35,28 +35,34 @@ import com.example.itv.infrastructure.storage.shortform.ShortformPersonalStatsSt
 import com.example.itv.infrastructure.storage.shortform.ShortformPersonalStatsStore.TargetFilter
 import com.example.itv.presentation.components.ItvLine
 import java.util.Locale
+import kotlin.math.roundToInt
 
 private val InstaAccent = Color(0xFFD62976)
 private val YoutubeAccent = Color(0xFFE52D27)
 private val CombinedAccent = Color(0xFF2B6CB0)
-private val CardInk = Color(0xFF1E2433)
-private val CardSubInk = Color(0xFF505A74)
+private val PhoneAccent = Color(0xFF0F9D58)
+private val CardInk: Color
+    @Composable
+    get() = if (com.example.itv.presentation.components.LocalDarkTheme.current) Color(0xFFE2EBE4) else Color(0xFF1E2433)
+private val CardSubInk: Color
+    @Composable
+    get() = if (com.example.itv.presentation.components.LocalDarkTheme.current) Color(0xFFA6B7A9) else Color(0xFF505A74)
 
 @Composable
 internal fun ShortformPersonalUsageSection(summary: PersonalizedSummary?, days: Int = 1) {
-    var selectedFilterName by rememberSaveable { mutableStateOf(TargetFilter.COMBINED.name) }
+    var selectedFilterName by rememberSaveable { mutableStateOf(TargetFilter.PHONE_TOTAL.name) }
     val selectedFilter = remember(selectedFilterName) {
-        runCatching { TargetFilter.valueOf(selectedFilterName) }.getOrDefault(TargetFilter.COMBINED)
+        runCatching { TargetFilter.valueOf(selectedFilterName) }.getOrDefault(TargetFilter.PHONE_TOTAL)
     }
     val periodTitle = when {
-        days >= 30 -> "최근 1달(30일) 평균 세션·일평균 비율"
-        days >= 7 -> "최근 1주일(7일) 평균 세션·일평균 비율"
-        else -> "오늘 개인화 숏폼 사용량·평균 및 비율"
+        days >= 30 -> "최근 1달(30일) 스마트폰 및 숏폼 세션·사용량 분석"
+        days >= 7 -> "최근 1주일(7일) 스마트폰 및 숏폼 세션·사용량 분석"
+        else -> "오늘 스마트폰 및 숏폼 개인화 세션·사용량 분석"
     }
     val periodDescription = when {
-        days >= 30 -> "최근 1달 내 실제 사용한 날·유효 시청 세션만 반영한 1달 평균 세션 길이와 1달 일평균 비율입니다. (무사용 날·시간 제외)"
-        days >= 7 -> "최근 1주일 내 실제 사용한 날·유효 시청 세션만 반영한 1주일 평균 세션 길이와 1주일 일평균 비율입니다. (무사용 날·시간 제외)"
-        else -> "아이콘을 눌러 오늘의 인스타 릴스, 유튜브 쇼츠, 통합(릴스+쇼츠) 사용량과 개인 평균 대비 비율을 확인하세요."
+        days >= 30 -> "최근 1달 내 실제 사용한 날·세션 기록을 반영한 휴대폰 전체 및 숏폼 1회 평균 세션 길이와 일평균 비율입니다. (무사용 날·시간 제외)"
+        days >= 7 -> "최근 1주일 내 실제 사용한 날·세션 기록을 반영한 휴대폰 전체 및 숏폼 1회 평균 세션 길이와 1주일 일평균 비율입니다. (무사용 날·시간 제외)"
+        else -> "아이콘을 눌러 오늘의 휴대폰 전체, 통합 숏폼, 릴스, 쇼츠 사용량과 1회 평균 세션 길이, 개인 평균 대비 비율을 확인하세요."
     }
     fun tabSubtitle(m: PersonalizedTargetMetrics?): String {
         if (m == null) return "—"
@@ -81,11 +87,31 @@ internal fun ShortformPersonalUsageSection(summary: PersonalizedSummary?, days: 
                 color = CardSubInk
             )
 
-            // 3 Icons selector row: Instagram Icon, YouTube Icon, Combined Icon
+            // 4 Icons selector row: Phone Total, Combined, Instagram, YouTube
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
+                ShortformTargetIconTab(
+                    filter = TargetFilter.PHONE_TOTAL,
+                    selected = selectedFilter == TargetFilter.PHONE_TOTAL,
+                    accent = PhoneAccent,
+                    subtitle = tabSubtitle(summary?.phoneTotal),
+                    onClick = { selectedFilterName = TargetFilter.PHONE_TOTAL.name },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    PhonePlatformIcon()
+                }
+                ShortformTargetIconTab(
+                    filter = TargetFilter.COMBINED,
+                    selected = selectedFilter == TargetFilter.COMBINED,
+                    accent = CombinedAccent,
+                    subtitle = tabSubtitle(summary?.combined),
+                    onClick = { selectedFilterName = TargetFilter.COMBINED.name },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    CombinedShortformIcon()
+                }
                 ShortformTargetIconTab(
                     filter = TargetFilter.INSTAGRAM,
                     selected = selectedFilter == TargetFilter.INSTAGRAM,
@@ -106,16 +132,6 @@ internal fun ShortformPersonalUsageSection(summary: PersonalizedSummary?, days: 
                 ) {
                     YoutubePlatformIcon()
                 }
-                ShortformTargetIconTab(
-                    filter = TargetFilter.COMBINED,
-                    selected = selectedFilter == TargetFilter.COMBINED,
-                    accent = CombinedAccent,
-                    subtitle = tabSubtitle(summary?.combined),
-                    onClick = { selectedFilterName = TargetFilter.COMBINED.name },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    CombinedShortformIcon()
-                }
             }
 
             if (summary == null) {
@@ -125,6 +141,7 @@ internal fun ShortformPersonalUsageSection(summary: PersonalizedSummary?, days: 
             } else {
                 val metrics = summary.forFilter(selectedFilter)
                 val accent = when (selectedFilter) {
+                    TargetFilter.PHONE_TOTAL -> PhoneAccent
                     TargetFilter.INSTAGRAM -> InstaAccent
                     TargetFilter.YOUTUBE -> YoutubeAccent
                     TargetFilter.COMBINED -> CombinedAccent
@@ -145,15 +162,20 @@ private fun ShortformTargetIconTab(
     modifier: Modifier = Modifier,
     icon: @Composable () -> Unit
 ) {
+    val isDark = com.example.itv.presentation.components.LocalDarkTheme.current
     Surface(
         modifier = modifier
             .clip(RoundedCornerShape(18.dp))
             .clickable(role = Role.Tab, onClick = onClick),
         shape = RoundedCornerShape(18.dp),
-        color = if (selected) Color.White else Color.White.copy(alpha = 0.55f),
+        color = if (selected) {
+            if (isDark) Color(0xFF2C392F) else Color.White
+        } else {
+            if (isDark) Color(0xFF1B241D).copy(alpha = 0.7f) else Color.White.copy(alpha = 0.55f)
+        },
         border = BorderStroke(
             width = if (selected) 2.2.dp else 1.dp,
-            color = if (selected) accent else ItvLine
+            color = if (selected) accent else (if (isDark) ItvLine.copy(alpha = 0.5f) else ItvLine)
         ),
         shadowElevation = if (selected) 3.dp else 0.dp
     ) {
@@ -305,6 +327,43 @@ private fun CombinedShortformIcon() {
     }
 }
 
+@Composable
+private fun PhonePlatformIcon() {
+    Canvas(Modifier.size(42.dp)) {
+        val bgBrush = Brush.linearGradient(
+            colors = listOf(Color(0xFF0F9D58), Color(0xFF1E8E3E), Color(0xFF137333)),
+            start = Offset(0f, 0f),
+            end = Offset(size.width, size.height)
+        )
+        drawRoundRect(brush = bgBrush, cornerRadius = CornerRadius(12.dp.toPx(), 12.dp.toPx()))
+        val phoneWidth = size.width * 0.44f
+        val phoneHeight = size.height * 0.68f
+        val left = (size.width - phoneWidth) / 2f
+        val top = (size.height - phoneHeight) / 2f
+        drawRoundRect(
+            color = Color.White,
+            topLeft = Offset(left, top),
+            size = Size(phoneWidth, phoneHeight),
+            cornerRadius = CornerRadius(4.dp.toPx(), 4.dp.toPx()),
+            style = Stroke(width = 1.8.dp.toPx())
+        )
+        drawLine(
+            color = Color.White,
+            start = Offset(left + phoneWidth * 0.35f, top + phoneHeight * 0.14f),
+            end = Offset(left + phoneWidth * 0.65f, top + phoneHeight * 0.14f),
+            strokeWidth = 1.4.dp.toPx(),
+            cap = StrokeCap.Round
+        )
+        drawLine(
+            color = Color.White,
+            start = Offset(left + phoneWidth * 0.30f, top + phoneHeight * 0.86f),
+            end = Offset(left + phoneWidth * 0.70f, top + phoneHeight * 0.86f),
+            strokeWidth = 1.6.dp.toPx(),
+            cap = StrokeCap.Round
+        )
+    }
+}
+
 private fun loadInstalledAppBitmap(context: android.content.Context, packageName: String): Bitmap? =
     runCatching {
         val drawable = context.packageManager.getApplicationIcon(packageName)
@@ -318,11 +377,13 @@ private fun loadInstalledAppBitmap(context: android.content.Context, packageName
 @Composable
 private fun PersonalizedMetricsContent(m: PersonalizedTargetMetrics, accent: Color, days: Int) {
     val targetTitle = when (m.filter) {
+        TargetFilter.PHONE_TOTAL -> "휴대폰 전체 사용"
         TargetFilter.INSTAGRAM -> "Instagram 릴스"
         TargetFilter.YOUTUBE -> "YouTube 쇼츠"
         TargetFilter.COMBINED -> "통합 숏폼 (릴스 + 쇼츠)"
     }
     val appShareLabel = when (m.filter) {
+        TargetFilter.PHONE_TOTAL -> "휴대폰 전체 사용 중 숏폼 비율"
         TargetFilter.INSTAGRAM -> "Instagram 전체 사용 중 릴스 비율"
         TargetFilter.YOUTUBE -> "YouTube 전체 사용 중 쇼츠 비율"
         TargetFilter.COMBINED -> "인스타+유튜브 사용 중 숏폼 비율"
@@ -357,6 +418,16 @@ private fun PersonalizedMetricsContent(m: PersonalizedTargetMetrics, accent: Col
                     rightLabel = "1주일 내 평균 세션 길이",
                     rightValue = "${formatFullDuration(m.avg7dSessionMs)} (${m.sessionCount7d}회)"
                 )
+                if (m.phoneAvg30dSessionMs > 0L) {
+                    HorizontalDivider(color = ItvLine)
+                    val sfRatioText = m.phoneAvg30dShortformRatio?.let { " · 숏폼 비중 ${(it * 100).roundToInt()}%" } ?: ""
+                    MetricKeyValueRow(
+                        leftLabel = "1달 휴대폰 전체 평균 세션 (물리 사용)",
+                        leftValue = "${formatFullDuration(m.phoneAvg30dSessionMs)} (${m.phoneSessionCount30d}회)",
+                        rightLabel = "숏폼 배율(1.0x+1/3x) 환산 세션",
+                        rightValue = "${formatFullDuration(m.phoneAvg30dWeightedSessionMs)}$sfRatioText"
+                    )
+                }
             }
 
             PersonalSubCard(title = "2. 1달 일평균 비율 및 누적 사용량 ($targetTitle)", accent = accent) {
@@ -387,19 +458,38 @@ private fun PersonalizedMetricsContent(m: PersonalizedTargetMetrics, accent: Col
                 )
             }
 
-            PersonalSubCard(title = "3. 1달 스와이프 평균 및 앱 내 일평균 비율 ($targetTitle)", accent = accent) {
-                MetricKeyValueRow(
-                    leftLabel = "1달 일평균 스와이프 (실사용일 기준)",
-                    leftValue = "${String.format(Locale.KOREA, "%.1f", m.avg30dDailySwipes)}회/일 (총 ${m.total30dSwipes}회)",
-                    rightLabel = "1달 세션당 평균 스와이프",
-                    rightValue = "${String.format(Locale.KOREA, "%.1f", m.avg30dSwipesPerSession)}회/세션"
-                )
-                MetricKeyValueRow(
-                    leftLabel = "1달 분당 평균 스와이프 (유효 시청시간)",
-                    leftValue = "${String.format(Locale.KOREA, "%.1f", m.personalAvgSpm)} 회/분",
-                    rightLabel = appShareLabel,
-                    rightValue = m.periodShareOfAppRatio?.let { formatPercent(it) } ?: "—"
-                )
+            if (m.filter == TargetFilter.PHONE_TOTAL) {
+                PersonalSubCard(title = "3. 1달 휴대폰 세션 특성 및 숏폼 비중 (휴대폰 전체)", accent = accent) {
+                    val sfRatio = m.phoneAvg30dShortformRatio
+                    val sfRatioStr = sfRatio?.let { "${(it * 100).roundToInt()}%" } ?: "—"
+                    MetricKeyValueRow(
+                        leftLabel = "휴대폰 전체 1회 평균 세션",
+                        leftValue = "${formatFullDuration(m.avg30dSessionMs)} (${m.sessionCount30d}회 평균)",
+                        rightLabel = "숏폼 배율(1.0x+1/3x) 환산 세션",
+                        rightValue = formatFullDuration(m.phoneAvg30dWeightedSessionMs)
+                    )
+                    MetricKeyValueRow(
+                        leftLabel = "1달 휴대폰 사용 중 숏폼 비중",
+                        leftValue = sfRatioStr,
+                        rightLabel = "1달 일평균 휴대폰 세션 횟수",
+                        rightValue = "${String.format(Locale.KOREA, "%.1f", m.avg30dSessionCount)}회/일"
+                    )
+                }
+            } else {
+                PersonalSubCard(title = "3. 1달 스와이프 평균 및 앱 내 일평균 비율 ($targetTitle)", accent = accent) {
+                    MetricKeyValueRow(
+                        leftLabel = "1달 일평균 스와이프 (실사용일 기준)",
+                        leftValue = "${String.format(Locale.KOREA, "%.1f", m.avg30dDailySwipes)}회/일 (총 ${m.total30dSwipes}회)",
+                        rightLabel = "1달 세션당 평균 스와이프",
+                        rightValue = "${String.format(Locale.KOREA, "%.1f", m.avg30dSwipesPerSession)}회/세션"
+                    )
+                    MetricKeyValueRow(
+                        leftLabel = "1달 분당 평균 스와이프 (유효 시청시간)",
+                        leftValue = "${String.format(Locale.KOREA, "%.1f", m.personalAvgSpm)} 회/분",
+                        rightLabel = appShareLabel,
+                        rightValue = m.periodShareOfAppRatio?.let { formatPercent(it) } ?: "—"
+                    )
+                }
             }
         }
 
@@ -431,6 +521,16 @@ private fun PersonalizedMetricsContent(m: PersonalizedTargetMetrics, accent: Col
                     rightLabel = "평소(1달) 평균 세션 길이",
                     rightValue = "${formatFullDuration(m.avg30dSessionMs)} (${m.sessionCount30d}회)"
                 )
+                if (m.phoneAvg7dSessionMs > 0L) {
+                    HorizontalDivider(color = ItvLine)
+                    val sfRatioText = m.phoneAvg7dShortformRatio?.let { " · 숏폼 비중 ${(it * 100).roundToInt()}%" } ?: ""
+                    MetricKeyValueRow(
+                        leftLabel = "1주일 휴대폰 전체 평균 세션 (물리 사용)",
+                        leftValue = "${formatFullDuration(m.phoneAvg7dSessionMs)} (${m.phoneSessionCount7d}회)",
+                        rightLabel = "숏폼 배율(1.0x+1/3x) 환산 세션",
+                        rightValue = "${formatFullDuration(m.phoneAvg7dWeightedSessionMs)}$sfRatioText"
+                    )
+                }
             }
 
             PersonalSubCard(title = "2. 1주일 일평균 비율 및 누적 사용량 ($targetTitle)", accent = accent) {
@@ -461,19 +561,38 @@ private fun PersonalizedMetricsContent(m: PersonalizedTargetMetrics, accent: Col
                 )
             }
 
-            PersonalSubCard(title = "3. 1주일 스와이프 평균 및 앱 내 일평균 비율 ($targetTitle)", accent = accent) {
-                MetricKeyValueRow(
-                    leftLabel = "1주일 일평균 스와이프 (실사용일 기준)",
-                    leftValue = "${String.format(Locale.KOREA, "%.1f", m.avg7dDailySwipes)}회/일 (총 ${m.total7dSwipes}회)",
-                    rightLabel = "1주일 세션당 평균 스와이프",
-                    rightValue = "${String.format(Locale.KOREA, "%.1f", m.avg7dSwipesPerSession)}회/세션"
-                )
-                MetricKeyValueRow(
-                    leftLabel = "1주일 분당 평균 스와이프 (유효 시청시간)",
-                    leftValue = "${String.format(Locale.KOREA, "%.1f", m.avg7dSpm)} 회/분",
-                    rightLabel = appShareLabel,
-                    rightValue = m.periodShareOfAppRatio?.let { formatPercent(it) } ?: "—"
-                )
+            if (m.filter == TargetFilter.PHONE_TOTAL) {
+                PersonalSubCard(title = "3. 1주일 휴대폰 세션 특성 및 숏폼 비중 (휴대폰 전체)", accent = accent) {
+                    val sfRatio = m.phoneAvg7dShortformRatio
+                    val sfRatioStr = sfRatio?.let { "${(it * 100).roundToInt()}%" } ?: "—"
+                    MetricKeyValueRow(
+                        leftLabel = "휴대폰 전체 1회 평균 세션",
+                        leftValue = "${formatFullDuration(m.avg7dSessionMs)} (${m.sessionCount7d}회 평균)",
+                        rightLabel = "숏폼 배율(1.0x+1/3x) 환산 세션",
+                        rightValue = formatFullDuration(m.phoneAvg7dWeightedSessionMs)
+                    )
+                    MetricKeyValueRow(
+                        leftLabel = "1주일 휴대폰 사용 중 숏폼 비중",
+                        leftValue = sfRatioStr,
+                        rightLabel = "1주일 일평균 휴대폰 세션 횟수",
+                        rightValue = "${String.format(Locale.KOREA, "%.1f", m.avg7dSessionCount)}회/일"
+                    )
+                }
+            } else {
+                PersonalSubCard(title = "3. 1주일 스와이프 평균 및 앱 내 일평균 비율 ($targetTitle)", accent = accent) {
+                    MetricKeyValueRow(
+                        leftLabel = "1주일 일평균 스와이프 (실사용일 기준)",
+                        leftValue = "${String.format(Locale.KOREA, "%.1f", m.avg7dDailySwipes)}회/일 (총 ${m.total7dSwipes}회)",
+                        rightLabel = "1주일 세션당 평균 스와이프",
+                        rightValue = "${String.format(Locale.KOREA, "%.1f", m.avg7dSwipesPerSession)}회/세션"
+                    )
+                    MetricKeyValueRow(
+                        leftLabel = "1주일 분당 평균 스와이프 (유효 시청시간)",
+                        leftValue = "${String.format(Locale.KOREA, "%.1f", m.avg7dSpm)} 회/분",
+                        rightLabel = appShareLabel,
+                        rightValue = m.periodShareOfAppRatio?.let { formatPercent(it) } ?: "—"
+                    )
+                }
             }
         }
 
@@ -506,6 +625,16 @@ private fun PersonalizedMetricsContent(m: PersonalizedTargetMetrics, accent: Col
                     rightLabel = "개인 최장 세션 기록",
                     rightValue = formatFullDuration(m.maxSessionMs)
                 )
+                if (m.phoneCurrentSessionMs > 0L) {
+                    HorizontalDivider(color = ItvLine)
+                    val sfRatioText = m.phoneCurrentShortformRatio?.let { " · 숏폼 ${(it * 100).roundToInt()}%" } ?: ""
+                    MetricKeyValueRow(
+                        leftLabel = "오늘 휴대폰 세션 (물리 사용)",
+                        leftValue = formatFullDuration(m.phoneCurrentSessionMs),
+                        rightLabel = "숏폼 배율(1.0x+1/3x) 환산 세션",
+                        rightValue = "${formatFullDuration(m.phoneCurrentWeightedSessionMs)}$sfRatioText"
+                    )
+                }
             }
 
             PersonalSubCard(title = "2. 오늘 누적시간 vs 최근 7일 일평균 비율 ($targetTitle)", accent = accent) {
@@ -537,26 +666,45 @@ private fun PersonalizedMetricsContent(m: PersonalizedTargetMetrics, accent: Col
                 )
             }
 
-            PersonalSubCard(title = "3. 오늘 스와이프 평균 및 숏폼 시청 비중 ($targetTitle)", accent = accent) {
-                MetricKeyValueRow(
-                    leftLabel = "오늘 누적 전환(스와이프)",
-                    leftValue = "${m.todaySwipes}회",
-                    rightLabel = "최근 7일 일평균 스와이프",
-                    rightValue = "${String.format(Locale.KOREA, "%.1f", m.avg7dDailySwipes)}회 (${m.todayVs7dSwipesRatio?.let { formatRatioBadge(it) } ?: "—"})"
-                )
-                MetricKeyValueRow(
-                    leftLabel = "세션당 평균 스와이프",
-                    leftValue = "${String.format(Locale.KOREA, "%.1f", m.avgSwipesPerSession)}회/세션",
-                    rightLabel = "분당 평균 스와이프 (오늘 / 평소)",
-                    rightValue = "${String.format(Locale.KOREA, "%.1f", m.todayAvgSpm)} / ${String.format(Locale.KOREA, "%.1f", m.personalAvgSpm)} 회/분"
-                )
-                HorizontalDivider(color = ItvLine)
-                MetricKeyValueRow(
-                    leftLabel = appShareLabel,
-                    leftValue = m.shortformShareOfAppRatio?.let { formatPercent(it) } ?: "—",
-                    rightLabel = "오늘 휴대폰 전체 사용 중 비중",
-                    rightValue = m.shortformShareOfPhoneRatio?.let { formatPercent(it) } ?: "—"
-                )
+            if (m.filter == TargetFilter.PHONE_TOTAL) {
+                PersonalSubCard(title = "3. 오늘 세션 특성 및 숏폼 비중 (휴대폰 전체)", accent = accent) {
+                    val sfRatio = m.phoneCurrentShortformRatio
+                    val sfRatioStr = sfRatio?.let { "${(it * 100).roundToInt()}%" } ?: "—"
+                    MetricKeyValueRow(
+                        leftLabel = "오늘 휴대폰 세션 (물리 사용)",
+                        leftValue = formatFullDuration(m.currentSessionMs),
+                        rightLabel = "숏폼 배율(1.0x+1/3x) 환산 세션",
+                        rightValue = formatFullDuration(m.phoneCurrentWeightedSessionMs)
+                    )
+                    MetricKeyValueRow(
+                        leftLabel = "오늘 숏폼 시청 비중",
+                        leftValue = sfRatioStr,
+                        rightLabel = "오늘 휴대폰 세션 횟수",
+                        rightValue = "${m.todaySessionCount}회 (7일 평균 ${String.format(Locale.KOREA, "%.1f", m.avg7dSessionCount)}회/일)"
+                    )
+                }
+            } else {
+                PersonalSubCard(title = "3. 오늘 스와이프 평균 및 숏폼 시청 비중 ($targetTitle)", accent = accent) {
+                    MetricKeyValueRow(
+                        leftLabel = "오늘 누적 전환(스와이프)",
+                        leftValue = "${m.todaySwipes}회",
+                        rightLabel = "최근 7일 일평균 스와이프",
+                        rightValue = "${String.format(Locale.KOREA, "%.1f", m.avg7dDailySwipes)}회 (${m.todayVs7dSwipesRatio?.let { formatRatioBadge(it) } ?: "—"})"
+                    )
+                    MetricKeyValueRow(
+                        leftLabel = "세션당 평균 스와이프",
+                        leftValue = "${String.format(Locale.KOREA, "%.1f", m.avgSwipesPerSession)}회/세션",
+                        rightLabel = "분당 평균 스와이프 (오늘 / 평소)",
+                        rightValue = "${String.format(Locale.KOREA, "%.1f", m.todayAvgSpm)} / ${String.format(Locale.KOREA, "%.1f", m.personalAvgSpm)} 회/분"
+                    )
+                    HorizontalDivider(color = ItvLine)
+                    MetricKeyValueRow(
+                        leftLabel = appShareLabel,
+                        leftValue = m.shortformShareOfAppRatio?.let { formatPercent(it) } ?: "—",
+                        rightLabel = "오늘 휴대폰 전체 사용 중 비중",
+                        rightValue = m.shortformShareOfPhoneRatio?.let { formatPercent(it) } ?: "—"
+                    )
+                }
             }
         }
     }
@@ -653,11 +801,12 @@ private fun PersonalSubCard(
     accent: Color,
     content: @Composable ColumnScope.() -> Unit
 ) {
+    val isDark = com.example.itv.presentation.components.LocalDarkTheme.current
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(18.dp),
-        color = Color.White.copy(alpha = 0.85f),
-        border = BorderStroke(1.dp, accent.copy(alpha = 0.25f))
+        color = if (isDark) Color(0xFF253027) else Color.White.copy(alpha = 0.85f),
+        border = BorderStroke(1.dp, if (isDark) accent.copy(alpha = 0.40f) else accent.copy(alpha = 0.25f))
     ) {
         Column(
             modifier = Modifier.padding(14.dp),
@@ -671,6 +820,7 @@ private fun PersonalSubCard(
 
 @Composable
 private fun RatioHighlightRow(label: String, ratio: Double?, accent: Color) {
+    val isDark = com.example.itv.presentation.components.LocalDarkTheme.current
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -691,7 +841,7 @@ private fun RatioHighlightRow(label: String, ratio: Double?, accent: Color) {
                 .fillMaxWidth()
                 .height(10.dp)
                 .clip(RoundedCornerShape(5.dp))
-                .background( Color(0xFFE2E8F0) )
+                .background( if (isDark) Color(0xFF38463B) else Color(0xFFE2E8F0) )
         ) {
             Box(
                 modifier = Modifier

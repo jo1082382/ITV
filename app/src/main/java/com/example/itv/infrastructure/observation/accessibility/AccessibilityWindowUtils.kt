@@ -4,6 +4,9 @@ import android.view.accessibility.AccessibilityWindowInfo
 import com.example.itv.infrastructure.jev.JevObservationHub
 
 internal fun AccessibilityWindowInfo.isTransientSystemWindow(): Boolean {
+    if (type == AccessibilityWindowInfo.TYPE_SYSTEM || type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) {
+        return true
+    }
     val r = root ?: return false
     return try {
         JevObservationHub.isTransientSystemPackage(r.packageName?.toString())

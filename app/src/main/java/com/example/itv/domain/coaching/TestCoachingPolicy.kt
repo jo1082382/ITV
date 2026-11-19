@@ -37,22 +37,25 @@ internal class TestRestMission {
     var offAt: Long? = null
     var pending = false
     var requireFacedown = false
+    var isStrong = false
 
     fun begin(
         value: String,
         now: Long,
         startMs: Long = TestCoachingPolicy.MISSION_START_MS,
         restMs: Long = TestCoachingPolicy.REST_MS,
-        requireFacedown: Boolean = false
+        requireFacedown: Boolean = false,
+        isStrong: Boolean = false
     ) {
         id = value; offAt = null; pending = false; started = false
         startWindowMs = startMs
         requiredRestMs = restMs
         startDeadline = now + startMs
         this.requireFacedown = requireFacedown
+        this.isStrong = isStrong
     }
     fun isLate(now: Long) = id != null && !started && !pending && now > startDeadline
-    fun failStart() { id = null; offAt = null; startDeadline = 0L; requireFacedown = false }
+    fun failStart() { id = null; offAt = null; startDeadline = 0L; requireFacedown = false; isStrong = false }
     fun screenOff(now: Long): Boolean {
         if (id == null || pending || offAt != null) return false
         val first = !started
@@ -69,6 +72,6 @@ internal class TestRestMission {
             pending = true; TestMissionWake.SUCCESS to duration
         } else TestMissionWake.INCOMPLETE to duration
     }
-    fun displayed() { pending = false; id = null; requireFacedown = false }
-    fun clear() { id = null; pending = false; offAt = null; requireFacedown = false }
+    fun displayed() { pending = false; id = null; requireFacedown = false; isStrong = false }
+    fun clear() { id = null; pending = false; offAt = null; requireFacedown = false; isStrong = false }
 }

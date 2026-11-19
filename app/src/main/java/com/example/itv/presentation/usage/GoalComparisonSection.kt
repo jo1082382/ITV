@@ -78,8 +78,10 @@ internal fun GoalComparisonSection(goals: List<HomeGoalRow>, period: Report?, to
 
 @Composable
 private fun ComparisonCard(title: String, body: @Composable ColumnScope.() -> Unit) {
+    val isDark = com.example.itv.presentation.components.LocalDarkTheme.current
+    val contentColor = if (isDark) androidx.compose.ui.graphics.Color(0xFFE2EBE4) else androidx.compose.ui.graphics.Color(0xFF243025)
     OutlinedCard(Modifier.fillMaxWidth(), colors = CardDefaults.outlinedCardColors(
-        containerColor = RecordContentGreen, contentColor = androidx.compose.ui.graphics.Color(0xFF243025))) {
+        containerColor = RecordContentGreen, contentColor = contentColor)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(title, style = MaterialTheme.typography.titleMedium)
             body()

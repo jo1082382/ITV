@@ -15,6 +15,29 @@ internal class AndroidCoachingObserver(context: Context) {
     private val context = context.applicationContext
     fun unlocked(): Boolean = context.getSystemService(PowerManager::class.java).isInteractive &&
         !context.getSystemService(KeyguardManager::class.java).isKeyguardLocked
-    fun snapshot() = CoachingObservation(unlocked(), WritingGuard.blockReason(),
-        YoutubeProbe.screenState(), ReelsProbe.screenState())
+    fun snapshot(): CoachingObservation {
+        val rawYt = YoutubeProbe.screenState()
+        val effectiveYt = if (rawYt == 0 && com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.isActivelyInShortsOrComments()) {
+            1
+        } else {
+            rawYt
+        }
+        val rawReels = ReelsProbe.screenState()
+        val effectiveReels = if (rawReels == 0 && com.example.itv.infrastructure.observation.instagram.InstagramTracker.isActivelyInReelsCommentsOrStory()) {
+            1
+        } else {
+            rawReels
+        }
+        val longformWatching = com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.isActivelyWatchingLongform()
+        val fgPkg = com.example.itv.infrastructure.jev.JevObservationHub.foregroundPackage
+        val genDeferredReason = com.example.itv.infrastructure.observation.GeneralAppTracker.blockingOrWaitingReason(fgPkg)
+        return CoachingObservation(
+            using = unlocked(),
+            guardReason = WritingGuard.blockReason(),
+            youtubeState = effectiveYt,
+            reelsState = effectiveReels,
+            youtubeLongformWatching = longformWatching,
+            generalAppDeferredReason = genDeferredReason
+        )
+    }
 }
