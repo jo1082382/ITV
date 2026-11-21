@@ -153,10 +153,10 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
         setTypeface(null, android.graphics.Typeface.BOLD)
         gravity = Gravity.CENTER
         setTextColor(Color.rgb(18, 25, 16))
-        setLineSpacing(dp(3).toFloat(), 1.2f)
+        setLineSpacing(dp(3).toFloat(), 1.18f)
         background = com.example.itv.presentation.character.PuppyBubbleDrawable()
-        setPadding(dp(24), dp(18), dp(24), dp(22))
-        minHeight = dp(96)
+        // 글자가 말풍선 밖으로 절대 나가지 않도록 넉넉한 여백 설정
+        setPadding(dp(22), dp(16), dp(22), dp(28))
     }
 
     private fun root(
@@ -240,7 +240,15 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
                 return
             }
 
-            com.example.itv.infrastructure.media.MediaPauseController.pause(context)
+            if (s.characterIntensity == CharacterIntensity.STRONG) {
+                com.example.itv.infrastructure.media.MediaPauseController.pause(context)
+            }
+
+            if (s.retry && s.characterIntensity == CharacterIntensity.STRONG) {
+                // [강한 개입 전용]: 휴식을 완료하지 않고 화면을 다시 켠 경우 취침 3분기 케어 스타일의 암전 화면 유지
+                attachStrongControls(s, width, height, ::add)
+                return
+            }
 
             when (s.characterIntensity) {
                 CharacterIntensity.GENTLE -> attachGentleControls(s, width, height, ::add)
@@ -277,11 +285,11 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
         }
         s.speech = label(gentleText, customTextSize = 13.5f)
         s.speech.visibility = View.INVISIBLE
-        val speechWidth = minOf(dp(290), width - dp(24))
+        val speechWidth = minOf(dp(300), width - dp(20))
         val speechY = (s.homeY - dp(115)).coerceAtLeast(dp(24))
         s.speechParams = params(
             speechWidth, WindowManager.LayoutParams.WRAP_CONTENT,
-            width - speechWidth - dp(12), speechY, false
+            width - speechWidth - dp(10), speechY, false
         )
         add(s.speech, s.speechParams!!)
 
@@ -435,58 +443,18 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
             }
 
             val noteView = TextView(context).apply {
-                text = "📱 폰을 엎어두면 화면이 꺼지고 휴식이 이어져요"
-                textSize = 11.5f
+                text = "📱 스마트폰을 바닥에 엎어두면 화면이 꺼지고 휴식이 이어져요.\n휴식을 완료하면 개입이 자동으로 사라집니다."
+                textSize = 12.5f
                 setTypeface(null, android.graphics.Typeface.BOLD)
                 setTextColor(Color.rgb(194, 65, 12))
                 gravity = Gravity.CENTER_HORIZONTAL
-                setPadding(0, 0, 0, dp(4))
+                setLineSpacing(dp(2).toFloat(), 1.2f)
+                setPadding(0, dp(6), 0, dp(4))
             }
             topHudCard.addView(noteView)
 
-            val divider = View(context).apply {
-                setBackgroundColor(Color.rgb(226, 232, 240))
-            }
-            topHudCard.addView(divider, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)))
-
-            val timerRow = LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER
-                setPadding(0, dp(6), 0, 0)
-            }
-            val timerLabel = TextView(context).apply {
-                text = "남은 시간 : "
-                textSize = 13f
-                setTextColor(Color.rgb(100, 116, 139))
-            }
-            val timerCount = TextView(context).apply {
-                text = "${prepSec}초"
-                textSize = 15.5f
-                setTypeface(null, android.graphics.Typeface.BOLD)
-                setTextColor(Color.rgb(220, 38, 38))
-            }
-            timerRow.addView(timerLabel)
-            timerRow.addView(timerCount)
-            topHudCard.addView(timerRow)
-
-            val topHudParams = params(topHudWidth, WindowManager.LayoutParams.WRAP_CONTENT, cardX, cardY, touch = true)
+            val topHudParams = params(topHudWidth, WindowManager.LayoutParams.WRAP_CONTENT, cardX, cardY, touch = false)
             add(topHudCard, topHudParams)
-
-            var remainingSeconds = prepSec
-            val timerRunnable = object : Runnable {
-                override fun run() {
-                    if (s.stopped) return
-                    remainingSeconds -= 1
-                    if (remainingSeconds > 0) {
-                        timerCount.text = "${remainingSeconds}초"
-                        handler.postDelayed(this, 1000L)
-                    } else {
-                        timerCount.text = "0초"
-                    }
-                }
-            }
-            s.countdownTimerRunnable = timerRunnable
-            handler.postDelayed(timerRunnable, 1000L)
 
             val speechWidth = minOf(dp(320), width - dp(32))
             val speechY = (s.homeY - dp(120)).coerceAtLeast(cardY + dp(130))
@@ -1133,13 +1101,43 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
         s.reactionFinished = finished
         when (title) {
             "쉬기" -> {
+                val screenWidth = previewHost?.width?.takeIf { it > 0 } ?: context.resources.displayMetrics.widthPixels
+                val screenHeight = previewHost?.height?.takeIf { it > 0 } ?: context.resources.displayMetrics.heightPixels
+                val isStrong = s.characterIntensity == CharacterIntensity.STRONG
+
+                // 1. [강한 개입 전용]: 취침 3분기 케어처럼 전체 화면을 서서히 어둡게 하는 백그라운드 딤 추가
+                if (isStrong) {
+                    val dimScrim = View(context).apply {
+                        setBackgroundColor(Color.parseColor("#090D16"))
+                        alpha = 0f
+                    }
+                    val scrimParams = params(screenWidth, screenHeight, 0, 0, false).apply {
+                        flags = WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                    }
+                    wm.addView(dimScrim, scrimParams)
+                    s.windows.add(dimScrim)
+                    dimScrim.animate().alpha(0.85f).setDuration(800L).start()
+                }
+
+                // 2. 강아지 캐릭터 배치
                 if (s.house.width() > 0) {
                     s.dogParams.x = s.house.centerX() - s.dogParams.width / 2
                     s.dogParams.y = s.house.bottom - s.dogParams.height * 2 / 3
+                } else {
+                    s.dogParams.x = (screenWidth - s.dogParams.width) / 2
+                    s.dogParams.y = (screenHeight - s.dogParams.height - dp(24)).coerceAtLeast(dp(20))
                 }
                 s.dog.setImageResource(R.drawable.itv_motion_sleep)
                 s.speech.visibility = View.GONE
-                try { wm.updateViewLayout(s.dog, s.dogParams) } catch (_: Exception) {}
+                try {
+                    wm.removeView(s.dog)
+                    wm.addView(s.dog, s.dogParams)
+                } catch (_: Exception) {
+                    try { wm.updateViewLayout(s.dog, s.dogParams) } catch (_: Exception) {}
+                }
 
                 s.animator = ValueAnimator.ofFloat(1f, 1.035f, 1f, 1.035f, 1f).apply {
                     duration = 2700
@@ -1149,9 +1147,6 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
                 }
 
                 val rec = recommendation ?: s.recommendation ?: com.example.itv.domain.coaching.RestMissionCatalog.pick(com.example.itv.domain.coaching.UserPosture.UNKNOWN, false)
-
-                val screenWidth = previewHost?.width?.takeIf { it > 0 } ?: context.resources.displayMetrics.widthPixels
-                val screenHeight = previewHost?.height?.takeIf { it > 0 } ?: context.resources.displayMetrics.heightPixels
                 val cardWidth = minOf(dp(320), screenWidth - dp(32))
 
                 val missionCard = LinearLayout(context).apply {
@@ -1162,7 +1157,7 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
                         setStroke(dp(2), Color.rgb(76, 175, 80))
                         cornerRadius = dp(20).toFloat()
                     }
-                    elevation = dp(12).toFloat()
+                    elevation = dp(14).toFloat()
                 }
 
                 val titleView = TextView(context).apply {
@@ -1203,9 +1198,11 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
                 }
                 missionCard.addView(actionView)
 
+                val restMinutes = (restSeconds + 59L) / 60L
+                val restDisplayDesc = if (restSeconds >= 60L) "${restMinutes}분" else "${restSeconds}초"
+
                 val targetTimeCal = java.util.Calendar.getInstance().apply {
                     add(java.util.Calendar.SECOND, (prepareSeconds + restSeconds).toInt())
-                    // 분 단위 올림: 초가 0보다 크면 분을 1 올리고 초를 0으로 맞춤
                     if (get(java.util.Calendar.SECOND) > 0) {
                         add(java.util.Calendar.MINUTE, 1)
                         set(java.util.Calendar.SECOND, 0)
@@ -1214,92 +1211,107 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
                 val targetHour = targetTimeCal.get(java.util.Calendar.HOUR_OF_DAY)
                 val targetMinute = targetTimeCal.get(java.util.Calendar.MINUTE)
                 val targetTimeStr = String.format(java.util.Locale.KOREA, "%02d시 %02d분", targetHour, targetMinute)
-                val restMinutes = (restSeconds + 59L) / 60L
-                val restDisplayDesc = if (restSeconds >= 60L) "${restMinutes}분" else "${restSeconds}초"
 
-                val conditionText = if (rec.isFacedownRequired) {
-                    "※ 10초 내 폰을 바닥에 엎어두면 화면이 꺼지고 ${targetTimeStr}까지 (${restDisplayDesc}) 휴식돼요."
+                if (isStrong) {
+                    val guideBox = LinearLayout(context).apply {
+                        orientation = LinearLayout.VERTICAL
+                        setPadding(dp(16), dp(14), dp(16), dp(14))
+                        background = GradientDrawable().apply {
+                            setColor(Color.rgb(241, 248, 233))
+                            setStroke(dp(1), Color.rgb(200, 230, 201))
+                            cornerRadius = dp(14).toFloat()
+                        }
+                    }
+                    val guideTitle = TextView(context).apply {
+                        text = "📱 스마트폰을 엎어두면 휴식이 시작돼요"
+                        textSize = 14f
+                        setTypeface(null, android.graphics.Typeface.BOLD)
+                        setTextColor(Color.rgb(46, 125, 50))
+                        gravity = Gravity.CENTER_HORIZONTAL
+                        setPadding(0, 0, 0, dp(4))
+                    }
+                    guideBox.addView(guideTitle)
+
+                    val guideDesc = TextView(context).apply {
+                        text = "폰을 바닥에 엎어두면 화면이 꺼지며 ${restDisplayDesc} 휴식이 시작되고,\n휴식을 완료하면 개입이 자동으로 사라집니다."
+                        textSize = 12.5f
+                        setTextColor(Color.rgb(55, 65, 81))
+                        gravity = Gravity.CENTER_HORIZONTAL
+                        setLineSpacing(dp(2).toFloat(), 1.2f)
+                    }
+                    guideBox.addView(guideDesc)
+                    missionCard.addView(guideBox)
                 } else {
-                    "※ 10초 내 화면을 끄고 ${targetTimeStr}까지 (${restDisplayDesc}) 쉬어주세요."
-                }
-                val conditionSpannable = android.text.SpannableString(conditionText).apply {
-                    val boldTarget = targetTimeStr
-                    val idx = conditionText.indexOf(boldTarget)
-                    if (idx >= 0) {
-                        setSpan(
-                            android.text.style.StyleSpan(android.graphics.Typeface.BOLD),
-                            idx,
-                            (idx + boldTarget.length).coerceAtMost(conditionText.length),
-                            android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
-                        )
-                        setSpan(
-                            android.text.style.ForegroundColorSpan(Color.rgb(46, 125, 50)),
-                            idx,
-                            (idx + boldTarget.length).coerceAtMost(conditionText.length),
-                            android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
-                        )
+                    val conditionText = if (rec.isFacedownRequired) {
+                        "※ 10초 내 폰을 바닥에 엎어두면 화면이 꺼지고 ${targetTimeStr}까지 (${restDisplayDesc}) 휴식돼요."
+                    } else {
+                        "※ 10초 내 화면을 끄고 ${targetTimeStr}까지 (${restDisplayDesc}) 쉬어주세요."
                     }
-                }
-                val conditionView = TextView(context).apply {
-                    text = conditionSpannable
-                    textSize = 12f
-                    setTextColor(Color.rgb(100, 116, 139))
-                    gravity = Gravity.CENTER_HORIZONTAL
-                    setPadding(0, 0, 0, dp(16))
-                }
-                missionCard.addView(conditionView)
+                    val conditionView = TextView(context).apply {
+                        text = conditionText
+                        textSize = 12.5f
+                        setTypeface(null, android.graphics.Typeface.BOLD)
+                        setTextColor(Color.rgb(100, 116, 139))
+                        gravity = Gravity.CENTER_HORIZONTAL
+                        setPadding(0, 0, 0, dp(14))
+                    }
+                    missionCard.addView(conditionView)
 
-                val acceptButton = Button(context).apply {
-                    text = "미션 확인"
-                    textSize = 14.5f
-                    setTypeface(null, android.graphics.Typeface.BOLD)
-                    setTextColor(Color.WHITE)
-                    background = GradientDrawable().apply {
-                        setColor(Color.rgb(46, 125, 50))
-                        cornerRadius = dp(12).toFloat()
+                    val acceptButton = Button(context).apply {
+                        text = "미션 확인"
+                        textSize = 14.5f
+                        setTypeface(null, android.graphics.Typeface.BOLD)
+                        setTextColor(Color.WHITE)
+                        background = GradientDrawable().apply {
+                            setColor(Color.rgb(46, 125, 50))
+                            cornerRadius = dp(12).toFloat()
+                        }
+                        setOnClickListener {
+                            s.reaction?.let { handler.removeCallbacks(it) }
+                            s.reaction = null
+                            try { wm.removeView(missionCard) } catch (_: Exception) {}
+                            s.windows.remove(missionCard)
+
+                            showMissionCountdownHud(
+                                rec = rec,
+                                targetTimeStr = targetTimeStr,
+                                restDisplayDesc = restDisplayDesc,
+                                prepareSeconds = prepareSeconds
+                            )
+
+                            val callback = s.reactionFinished
+                            s.reactionFinished = null
+                            callback?.invoke()
+                        }
                     }
+                    missionCard.addView(acceptButton, LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, dp(48)
+                    ))
                 }
-                missionCard.addView(acceptButton, LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT, dp(48)
-                ))
 
                 val cardX = (screenWidth - cardWidth) / 2
-                val cardY = ((screenHeight - dp(240)) / 2).coerceAtLeast(dp(60))
+                val cardY = ((screenHeight - dp(260)) / 2).coerceAtLeast(dp(40))
                 val cardParams = params(cardWidth, WindowManager.LayoutParams.WRAP_CONTENT, cardX, cardY, touch = true)
                 wm.addView(missionCard, cardParams)
                 s.windows.add(missionCard)
 
-                acceptButton.setOnClickListener {
-                    s.reaction?.let { handler.removeCallbacks(it) }
-                    s.reaction = null
-                    try { wm.removeView(missionCard) } catch (_: Exception) {}
-                    s.windows.remove(missionCard)
-
-                    // 미션 확인을 누른 뒤: 10초 타이머와 미션 행동 요령 및 목표 시각을 보여주는 카운트다운 리마인더 HUD 표시
-                    // (스마트폰을 바닥에 엎어두면 센서 감지로 자동으로 화면이 꺼집니다)
-                    showMissionCountdownHud(
-                        rec = rec,
-                        targetTimeStr = targetTimeStr,
-                        restDisplayDesc = restDisplayDesc,
-                        prepareSeconds = prepareSeconds
-                    )
-
-                    val callback = s.reactionFinished
-                    s.reactionFinished = null
-                    callback?.invoke()
-                }
-
-                s.reaction = Runnable {
-                    if (!s.stopped) {
-                        try { wm.removeView(missionCard) } catch (_: Exception) {}
-                        s.windows.remove(missionCard)
-                        val callback = s.reactionFinished
-                        s.reactionFinished = null
-                        callback?.invoke()
+                if (isStrong) {
+                    // 강한 개입: 화면을 끄고 휴식을 완료할 때까지 미션 창과 캐릭터를 유지 (카운트다운으로 사라지지 않음)
+                    return
+                } else {
+                    // 약한 개입/보통 개입: 무응답 시 자동 정리 콜백
+                    s.reaction = Runnable {
+                        if (!s.stopped) {
+                            try { wm.removeView(missionCard) } catch (_: Exception) {}
+                            s.windows.remove(missionCard)
+                            val callback = s.reactionFinished
+                            s.reactionFinished = null
+                            callback?.invoke()
+                        }
                     }
+                    handler.postDelayed(s.reaction!!, 60_000L)
+                    return
                 }
-                handler.postDelayed(s.reaction!!, 60_000L)
-                return
             }
             "나중에" -> {
                 s.dog.setImageResource(R.drawable.itv_motion_wave)

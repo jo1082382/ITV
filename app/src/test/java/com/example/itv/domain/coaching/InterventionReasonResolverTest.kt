@@ -215,4 +215,100 @@ class InterventionReasonResolverTest {
         // 낮 시간이므로 "취침 목표보다 X분이나 지났어"가 나오지 않아야 함
         assertTrue(reasons.none { it.contains("취침 목표") })
     }
+
+    @Test
+    fun twoHoursBeforeBedtimeWithLightsOnSuppressesBedtimePhrases() {
+        // 취침 2시간 전(ACTIVE_HOURS), 실내 조명 켜짐(150 lux), 충전 및 와이파이 상태
+        val ambient = AmbientSnapshot(
+            lux = 150f,
+            proximityDistanceCm = 5f,
+            proximityMaxRangeCm = 5f,
+            isNear = false,
+            isOccluded = false,
+            screenBrightness = 140,
+            nightModeActive = false,
+            stateLabel = "실내 일상 활동 상태 (실내 조명 + 일반 화면)",
+            explanation = "test",
+            bedtimePhase = com.example.itv.infrastructure.observation.BedtimePhase.ACTIVE_HOURS,
+            bedtimeDistanceMinutes = -120,
+            isCharging = true,
+            isWifiConnected = true,
+            isStationary = true,
+            userEnvironmentState = com.example.itv.infrastructure.observation.UserEnvironmentState.INDOOR_ACTIVE
+        )
+
+        val reasons = InterventionReasonResolver.resolveReasons(
+            isJev = false,
+            jevContext = null,
+            continuousUsedMs = 300_000L,
+            ambient = ambient,
+            shortformAppName = "YouTube 쇼츠",
+            localTime = LocalTime.of(21, 30)
+        )
+
+        // 취침 2시간 전이므로 취침/수면/늦은 밤 관련 멘트가 절대 포함되지 않아야 함
+        assertTrue(reasons.none { it.contains("취침") || it.contains("늦은 밤") || it.contains("잘 시간") || it.contains("자던 시간") })
+    }
+
+    @Test
+    fun approachingBedtimeWithLightsOnSuppressesBedtimePhrases() {
+        // 취침 40분 전(APPROACHING)이지만 방 조명이 켜져 있는 상태(80 lux)
+        val ambient = AmbientSnapshot(
+            lux = 80f,
+            proximityDistanceCm = 5f,
+            proximityMaxRangeCm = 5f,
+            isNear = false,
+            isOccluded = false,
+            screenBrightness = 120,
+            nightModeActive = false,
+            stateLabel = "취침 전 일상 활동 상태 (실내 조명 켜짐)",
+            explanation = "test",
+            bedtimePhase = com.example.itv.infrastructure.observation.BedtimePhase.APPROACHING,
+            bedtimeDistanceMinutes = -40,
+            userEnvironmentState = com.example.itv.infrastructure.observation.UserEnvironmentState.INDOOR_ACTIVE
+        )
+
+        val reasons = InterventionReasonResolver.resolveReasons(
+            isJev = false,
+            jevContext = null,
+            continuousUsedMs = 120_000L,
+            ambient = ambient,
+            shortformAppName = "Instagram 릴스",
+            localTime = LocalTime.of(22, 50)
+        )
+
+        // 조명이 켜져 있으므로 취침 개입 멘트가 뜨지 않아야 함
+        assertTrue(reasons.none { it.contains("취침") || it.contains("늦은 밤") || it.contains("잘 시간") || it.contains("자던 시간") })
+    }
+
+    @Test
+    fun approachingBedtimeDarkAmbientWithContinuousUsageGeneratesPreSleepReason() {
+        // 취침 30분 전(APPROACHING) + 불 끈 어두운 방(3 lux) + 40초 연속 시청
+        val ambient = AmbientSnapshot(
+            lux = 3f,
+            proximityDistanceCm = 5f,
+            proximityMaxRangeCm = 5f,
+            isNear = false,
+            isOccluded = false,
+            screenBrightness = 60,
+            nightModeActive = true,
+            stateLabel = "취침 지연 과몰입 상태",
+            explanation = "test",
+            bedtimePhase = com.example.itv.infrastructure.observation.BedtimePhase.APPROACHING,
+            bedtimeDistanceMinutes = -30,
+            userEnvironmentState = com.example.itv.infrastructure.observation.UserEnvironmentState.BEDTIME_DELAY_WATCH
+        )
+
+        val reasons = InterventionReasonResolver.resolveReasons(
+            isJev = false,
+            jevContext = null,
+            continuousUsedMs = 40_000L,
+            ambient = ambient,
+            shortformAppName = "YouTube 쇼츠",
+            localTime = LocalTime.of(23, 0)
+        )
+
+        // 어두운 방에서 연속 사용 중이므로 눈 건강 경고 멘트 포함
+        assertTrue(reasons.any { it.contains("어두운 방에서 밝은 화면") })
+    }
 }

@@ -81,7 +81,7 @@ internal class TestRestMission {
         this.requireFacedown = requireFacedown
         this.isStrong = isStrong
     }
-    fun isLate(now: Long) = id != null && !started && !pending && now > startDeadline
+    fun isLate(now: Long) = false // 휴식하기 전까지는 개입이 사라지지 않고 유지됨
     fun failStart() { id = null; offAt = null; startDeadline = 0L; accumulatedRestMs = 0L; requireFacedown = false; isStrong = false }
     fun screenOff(now: Long): Boolean {
         if (id == null || pending || offAt != null) return false

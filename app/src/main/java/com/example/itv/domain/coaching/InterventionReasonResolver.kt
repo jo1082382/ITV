@@ -29,10 +29,14 @@ object InterventionReasonResolver {
                     val continuousMs = jevContext?.continuousMs?.takeIf { it > 0 } ?: continuousUsedMs
                     isDark && continuousMs >= 30_000L
                 }
-                else -> false
+                com.example.itv.infrastructure.observation.BedtimePhase.ACTIVE_HOURS -> false
+                com.example.itv.infrastructure.observation.BedtimePhase.UNKNOWN -> {
+                    // 미측정/초기 상태 fallback: 심야(23시~05시) 암실 환경일 때만 인정
+                    (localTime.hour >= 23 || localTime.hour in 0..4) && (ambient.lux != null && ambient.lux <= 20f)
+                }
             }
         } else {
-            localTime.hour in 0..4
+            localTime.hour >= 23 || localTime.hour in 0..4
         }
 
         // 1. 취침 목표 초과 / 야간 시간대 (최우선 순위: 수면 및 눈 건강)

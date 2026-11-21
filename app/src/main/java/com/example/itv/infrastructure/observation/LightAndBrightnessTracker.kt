@@ -443,21 +443,20 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         }
 
         // 2. 화면이 켜져 있는 경우 (바닥에 엎어두면 자동 화면 끄기용):
-        // 누워서 폰을 위로 든 채로 볼 때(천장을 향해 누워서 폰을 위로 든 상태)는 손 떨림(isCurrentlyStationary == false) 및
-        // 허공(isNear == false) 상태이므로 화면이 꺼지지 않음!
-        val isAngleFacedown = gz <= -2.5f && abs(gy) < 9.5f && abs(gx) < 9.5f
+        // 누워서 폰을 위로 든 채로 볼 때(고개를 하늘로 하고 폰을 위로 든 상태)는 허공 상태(isNear == false)이므로
+        // 화면이 절대 꺼지지 않아야 함! 사용자가 화면을 확실히 안 보고 표면에 엎어두었을 때만 감지.
+        val isAngleFacedown = gz <= -3.5f && abs(gy) < 9.0f && abs(gx) < 9.0f
+        if (!isAngleFacedown) return false
 
-        // (1) 근접 센서 감지: 화면 밀착 감지 (화면 반사광 최대 160 lux까지 허용)
-        val nearFacedown = isNear && isAngleFacedown && (lux == null || lux <= 160f)
+        // (1) 근접 센서 감지: 바닥/침구류/책상 등에 화면을 엎어두면 0~5cm 이내로 밀착되어 isNear == true가 됨.
+        // 누워서 폰을 위로 든 상태(얼굴과 20~40cm 거리)는 isNear == false이므로 화면이 꺼지지 않음!
+        val nearFacedown = isNear && (lux == null || lux <= 120f)
 
-        // (2) 케이스 돌출 턱, 카툭튀, 울퉁불퉁한 침구류(이불/매트리스) 또는 가상 근접 센서로 인해 근접 센서(isNear)가 반응하지 못한 경우:
-        // 손을 떼고 바닥/침대에 거치된 정지 상태(isCurrentlyStationary)와 하향 각도(gz <= -4.0f), 차광 상태를 결합
-        val stationaryFacedown = isCurrentlyStationary && gz <= -4.0f && abs(gy) < 9.0f && abs(gx) < 9.0f && (lux == null || lux <= 120f)
+        // (2) 근접 센서가 없는 기기이거나 특수 상황:
+        // 손을 떼고 바닥에 완전히 올려둔 정지 상태(isCurrentlyStationary) + 완전 수평 엎어둠(gz <= -7.5f) + 조도 완벽 차단(lux <= 2f)만 제한적 허용
+        val strictStationaryFacedown = !hasProximitySensor && isCurrentlyStationary && gz <= -7.5f && abs(gy) < 6.0f && abs(gx) < 6.0f && (lux != null && lux <= 2f)
 
-        // (3) 완전 수평에 가깝게 바닥에 엎어둔 경우 (각도가 수평 -6.0 이하이면서 주변 조도가 차단된 상태)
-        val flatFacedown = gz <= -6.0f && abs(gy) < 7.0f && abs(gx) < 7.0f && (lux == null || lux <= 70f)
-
-        return nearFacedown || stationaryFacedown || flatFacedown
+        return nearFacedown || strictStationaryFacedown
     }
 
     fun startFacedownMonitoring() {
@@ -522,7 +521,7 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
             if (isFacedown()) {
                 if (facedownOnscreenStartTime == 0L) {
                     facedownOnscreenStartTime = now
-                } else if (now - facedownOnscreenStartTime >= 200L) {
+                } else if (now - facedownOnscreenStartTime >= 1000L) {
                     onFacedownDetectedWhileScreenOn?.invoke()
                     facedownOnscreenStartTime = 0L
                 }

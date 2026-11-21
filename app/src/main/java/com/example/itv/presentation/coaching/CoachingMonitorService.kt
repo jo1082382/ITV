@@ -293,18 +293,29 @@ class CoachingMonitorService : Service() {
     private fun onMissionStartTimeout() {
         if (missionController.state.id != null && !missionController.state.started && !missionController.state.pending) {
             if (!pm.isInteractive) missionScreenOff()
-            if (!missionController.state.started) failMissionStart()
+            val isStrong = missionController.state.isStrong || missionController.state.requireFacedown
+            if (!isStrong) {
+                // 약한/보통 개입: 준비 시간 만료 시 미션 시작 실패 처리
+                if (!missionController.state.started) failMissionStart()
+            }
+            // 강한 개입: 사용자가 휴식을 완료하기 전까지는 미션 창이 자동으로 닫히거나 취소되지 않고 유지됨
         }
     }
     private val missionResumeTimeout: Runnable = Runnable { onMissionResumeTimeout() }
     private fun onMissionResumeTimeout() {
         if (missionController.state.id != null && missionController.state.offAt == null && !missionController.state.pending) {
-            overlayFactory.dismissMissionCountdownHud()
-            com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this).stopFacedownMonitoring()
-            missionController.failResume()
-            retryPending = true
-            isRestMissionFailure = true
-            checkRetry(transition = true)
+            if (!pm.isInteractive) missionScreenOff()
+            val isStrong = missionController.state.isStrong || missionController.state.requireFacedown
+            if (!isStrong) {
+                // 약한/보통 개입: 재개 준비 시간(카운트다운 HUD) 만료 시 HUD 종료 및 재개 실패 처리
+                overlayFactory.dismissMissionCountdownHud()
+                com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this).stopFacedownMonitoring()
+                missionController.failResume()
+                retryPending = true
+                isRestMissionFailure = true
+                checkRetry(transition = true)
+            }
+            // 강한 개입: 사용자가 휴식을 완료하기 전까지는 미션 창이 자동으로 닫히거나 취소되지 않고 유지됨
         }
     }
     private fun failMissionStart() {
@@ -457,6 +468,7 @@ class CoachingMonitorService : Service() {
             val restDisplayDesc = if (remainingSec >= 60L) "${restMinutes}분" else "${remainingSec}초"
 
             if (isStrong) {
+                // [강한 개입 전용]: 휴식을 다 채우지 않고 다시 킨 경우 카운트다운 없이 어두운 배경 + 남은 휴식 안내 창 + 캐릭터를 다시 띄워 휴식을 완료하도록 유도
                 removeOverlay()
                 val (root, params) = overlayFactory.retryOffer(
                     onChoice = ::onChoice,
@@ -471,7 +483,13 @@ class CoachingMonitorService : Service() {
                     retryVisible = true
                     overlayFactory.attachControls(root)
                 } catch (_: Exception) {}
+
+                tracker.onFacedownDetectedWhileScreenOn = {
+                    com.example.itv.infrastructure.observation.accessibility.WritingGuardService.lockScreen()
+                }
+                tracker.startFacedownMonitoring()
             } else {
+                // [약한/보통 개입]: 화면을 어둡게 막지 않고 상단 카운트다운 HUD만 띄우며, 카운트다운 만료 시 사라짐
                 overlayFactory.showMissionCountdownHud(
                     rec = rec,
                     targetTimeStr = targetTimeStr,
@@ -480,17 +498,15 @@ class CoachingMonitorService : Service() {
                     isResume = true,
                     remainingRestSeconds = remainingSec
                 )
-            }
-
-            if (rec.isFacedownRequired) {
-                tracker.onFacedownDetectedWhileScreenOn = {
-                    com.example.itv.infrastructure.observation.accessibility.WritingGuardService.lockScreen()
+                if (rec.isFacedownRequired) {
+                    tracker.onFacedownDetectedWhileScreenOn = {
+                        com.example.itv.infrastructure.observation.accessibility.WritingGuardService.lockScreen()
+                    }
+                    tracker.startFacedownMonitoring()
                 }
-                tracker.startFacedownMonitoring()
+                handler.removeCallbacks(missionResumeTimeout)
+                handler.postDelayed(missionResumeTimeout, prepareSeconds * 1000L)
             }
-
-            handler.removeCallbacks(missionResumeTimeout)
-            handler.postDelayed(missionResumeTimeout, prepareSeconds * 1000L)
         } else if (wake == com.example.itv.domain.coaching.TestMissionWake.SUCCESS) {
             handler.removeCallbacks(missionResumeTimeout)
             overlayFactory.dismissMissionCountdownHud()

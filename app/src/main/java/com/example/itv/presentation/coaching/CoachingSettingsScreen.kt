@@ -141,7 +141,11 @@ fun CoachingSettingsScreen(
             // 6. 취침 개입 (취침 3분기 케어 On/Off)
             BedtimeCareSection(
                 enabled = settings.bedtimeCareEnabled,
-                onToggle = { store.updateBedtimeCareEnabled(it) }
+                settings = settings,
+                onToggle = { store.updateBedtimeCareEnabled(it) },
+                onUpdateCustomBedtime = { hour, minute ->
+                    store.updateCustomBedtime(hour, minute)
+                }
             )
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -152,10 +156,32 @@ fun CoachingSettingsScreen(
 @Composable
 private fun BedtimeCareSection(
     enabled: Boolean,
-    onToggle: (Boolean) -> Unit
+    settings: UserCoachingSettings,
+    onToggle: (Boolean) -> Unit,
+    onUpdateCustomBedtime: (Int?, Int?) -> Unit
 ) {
     val context = LocalContext.current
+    val ambientTracker = remember { com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(context) }
+    val ambientSnapshot by ambientTracker.snapshot.collectAsState()
+
     var showHelpDialog by remember { mutableStateOf(false) }
+    var showTimePickerDialog by remember { mutableStateOf(false) }
+
+    val displayHour = settings.customBedtimeHour ?: ambientSnapshot.estimatedBedtimeHour ?: 23
+    val displayMinute = settings.customBedtimeMinute ?: ambientSnapshot.estimatedBedtimeMinute ?: 30
+    val ampm = if (displayHour < 12) "오전" else "오후"
+    val hour12 = when (val h = displayHour % 12) { 0 -> 12 else -> h }
+    val timeText = "$ampm ${hour12}시 ${String.format("%02d", displayMinute)}분"
+    val isCustom = settings.customBedtimeHour != null
+
+    val diffMinutes = ambientSnapshot.bedtimeDistanceMinutes
+    val statusText = when {
+        diffMinutes == null -> "취침 시각 추정 중"
+        diffMinutes < -60 -> "취침까지 ${(-diffMinutes) / 60}시간 ${(-diffMinutes) % 60}분 남음 · 일상 활동 시간대 (개입 비대상)"
+        diffMinutes in -60..-1 -> "취침까지 ${-diffMinutes}분 남음 · 취침 준비 시간대 (암실 30분 사용 시 개입)"
+        diffMinutes == 0 -> "지금이 평소 취침 시각입니다"
+        else -> "평소 취침 시각보다 ${diffMinutes}분 지남 · 심야 수면 지연 케어 대상"
+    }
 
     if (showHelpDialog) {
         AlertDialog(
@@ -172,7 +198,7 @@ private fun BedtimeCareSection(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
-                        "어두운 암실이나 야간 취침 시간대에 스마트폰 또는 숏폼을 시청할 때, 수면을 방해하지 않고 자연스럽게 잠자리에 들 수 있도록 돕는 3단계 수면 케어입니다.",
+                        "어두운 방에서 평소 취침 시간이 지났거나 직전에 잠들지 못하고 장시간 스마트폰을 사용할 때, 수면을 방해하지 않고 자연스럽게 잠자리에 들 수 있도록 돕는 3단계 수면 케어입니다.",
                         style = MaterialTheme.typography.bodyMedium
                     )
                     Surface(
@@ -200,6 +226,240 @@ private fun BedtimeCareSection(
             confirmButton = {
                 TextButton(onClick = { showHelpDialog = false }) {
                     Text("확인", fontWeight = FontWeight.Bold, color = ItvGreen)
+                }
+            }
+        )
+    }
+
+    if (showTimePickerDialog) {
+        var selectedModeIsCustom by remember { mutableStateOf(settings.customBedtimeHour != null) }
+        var isAm by remember { mutableStateOf(displayHour < 12) }
+        var currentHour12 by remember {
+            mutableStateOf(when (val h = displayHour % 12) { 0 -> 12 else -> h })
+        }
+        var currentMinute by remember { mutableStateOf(displayMinute) }
+
+        AlertDialog(
+            onDismissRequest = { showTimePickerDialog = false },
+            title = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("⏰", fontSize = 20.sp)
+                    Text("평소 취침 시각 설정", fontWeight = FontWeight.Bold, color = ItvGreen)
+                }
+            },
+            text = {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        "야간 취침 개입(3분기 케어)의 기준이 되는 평소 취침 시각을 설정합니다.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    // 모드 선택: 자동 vs 직접 지정
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Surface(
+                            onClick = { selectedModeIsCustom = false },
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (!selectedModeIsCustom) ItvGreen else MaterialTheme.colorScheme.surface,
+                            border = BorderStroke(1.dp, if (!selectedModeIsCustom) ItvGreen else ItvLine),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Box(modifier = Modifier.padding(vertical = 10.dp), contentAlignment = Alignment.Center) {
+                                Text(
+                                    "수면 기록 자동",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (!selectedModeIsCustom) Color.White else MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+                        Surface(
+                            onClick = { selectedModeIsCustom = true },
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (selectedModeIsCustom) ItvGreen else MaterialTheme.colorScheme.surface,
+                            border = BorderStroke(1.dp, if (selectedModeIsCustom) ItvGreen else ItvLine),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Box(modifier = Modifier.padding(vertical = 10.dp), contentAlignment = Alignment.Center) {
+                                Text(
+                                    "직접 시각 지정",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (selectedModeIsCustom) Color.White else MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+                    }
+
+                    if (!selectedModeIsCustom) {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(10.dp),
+                            colors = CardDefaults.cardColors(containerColor = ItvMint),
+                            border = BorderStroke(1.dp, ItvLine)
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("📊 수면 기록 기반 자동 추정", fontWeight = FontWeight.Bold, fontSize = 12.5.sp, color = ItvGreen)
+                                Text(
+                                    "스마트폰 비사용 시간대와 수면 기록을 분석하여 일상 취침 패턴에 맞춰 유동적으로 취침 시간을 계산합니다.",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    } else {
+                        // 직접 시각 지정 UI (오전/오후, 시, 분)
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                            border = BorderStroke(1.dp, ItvLine)
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                // AM/PM 토글
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Button(
+                                        onClick = { isAm = true },
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = if (isAm) ItvGreen else MaterialTheme.colorScheme.surface,
+                                            contentColor = if (isAm) Color.White else MaterialTheme.colorScheme.onSurface
+                                        ),
+                                        shape = RoundedCornerShape(8.dp),
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Text("오전 (AM)", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                    Button(
+                                        onClick = { isAm = false },
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = if (!isAm) ItvGreen else MaterialTheme.colorScheme.surface,
+                                            contentColor = if (!isAm) Color.White else MaterialTheme.colorScheme.onSurface
+                                        ),
+                                        shape = RoundedCornerShape(8.dp),
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Text("오후 (PM)", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+
+                                // 시간 및 분 선택
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.Center,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    // 시 조절
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        IconButton(
+                                            onClick = {
+                                                currentHour12 = if (currentHour12 <= 1) 12 else currentHour12 - 1
+                                            }
+                                        ) { Text("◀", fontSize = 14.sp) }
+                                        Text(
+                                            text = "${currentHour12}시",
+                                            fontSize = 18.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 6.dp)
+                                        )
+                                        IconButton(
+                                            onClick = {
+                                                currentHour12 = if (currentHour12 >= 12) 1 else currentHour12 + 1
+                                            }
+                                        ) { Text("▶", fontSize = 14.sp) }
+                                    }
+
+                                    Spacer(modifier = Modifier.width(8.dp))
+
+                                    // 분 조절
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        IconButton(
+                                            onClick = {
+                                                currentMinute = (currentMinute - 10 + 60) % 60
+                                            }
+                                        ) { Text("◀", fontSize = 14.sp) }
+                                        Text(
+                                            text = "${String.format("%02d", currentMinute)}분",
+                                            fontSize = 18.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 6.dp)
+                                        )
+                                        IconButton(
+                                            onClick = {
+                                                currentMinute = (currentMinute + 10) % 60
+                                            }
+                                        ) { Text("▶", fontSize = 14.sp) }
+                                    }
+                                }
+
+                                // 분 퀵 칩 (00분, 15분, 30분, 45분)
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    listOf(0, 15, 30, 45).forEach { m ->
+                                        val isSel = currentMinute == m
+                                        Surface(
+                                            onClick = { currentMinute = m },
+                                            shape = RoundedCornerShape(6.dp),
+                                            color = if (isSel) ItvGreen else MaterialTheme.colorScheme.surface,
+                                            border = BorderStroke(1.dp, if (isSel) ItvGreen else ItvLine),
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Box(modifier = Modifier.padding(vertical = 4.dp), contentAlignment = Alignment.Center) {
+                                                Text(
+                                                    text = "${String.format("%02d", m)}분",
+                                                    fontSize = 11.sp,
+                                                    fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
+                                                    color = if (isSel) Color.White else MaterialTheme.colorScheme.onSurface
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (selectedModeIsCustom) {
+                            val h24 = if (isAm) {
+                                if (currentHour12 == 12) 0 else currentHour12
+                            } else {
+                                if (currentHour12 == 12) 12 else currentHour12 + 12
+                            }
+                            onUpdateCustomBedtime(h24, currentMinute)
+                        } else {
+                            onUpdateCustomBedtime(null, null)
+                        }
+                        ambientTracker.refreshBedtimeEstimates()
+                        showTimePickerDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = ItvGreen)
+                ) {
+                    Text("저장", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showTimePickerDialog = false }) {
+                    Text("취소")
                 }
             }
         )
@@ -251,6 +511,112 @@ private fun BedtimeCareSection(
                         checkedTrackColor = ItvGreen
                     )
                 )
+            }
+
+            if (enabled) {
+                // 평소 취침 시각 카드
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                    border = BorderStroke(1.dp, ItvLine)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text("⏰", fontSize = 16.sp)
+                                Text(
+                                    text = "평소 취침 시각",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp,
+                                    color = ItvGreen
+                                )
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = if (isCustom) ItvGreen.copy(alpha = 0.15f) else Color(0xFF0284C7).copy(alpha = 0.15f),
+                                border = BorderStroke(1.dp, if (isCustom) ItvGreen.copy(alpha = 0.5f) else Color(0xFF0284C7).copy(alpha = 0.5f))
+                            ) {
+                                Text(
+                                    text = if (isCustom) "직접 설정" else "수면 기록 자동 분석",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (isCustom) ItvGreen else Color(0xFF0284C7),
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                )
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column {
+                                Text(
+                                    text = timeText,
+                                    fontSize = 20.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = statusText,
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            OutlinedButton(
+                                onClick = { showTimePickerDialog = true },
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                            ) {
+                                Text("시각 변경", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+
+                // 취침 개입 철저한 오발동 방지 규칙 카드
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = ItvMint),
+                    border = BorderStroke(1.dp, ItvLine)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text("🛡️", fontSize = 14.sp)
+                            Text(
+                                "취침 개입 철저한 오발동 방지 규칙",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = ItvGreen
+                            )
+                        }
+                        Text(
+                            "• 어두운 방 필수: 실내 조명이 켜져 있거나(20 lux 초과) 낮 시간대에는 절대 취침 개입이 뜨지 않습니다.\n" +
+                            "• 취침 시간대 한정: 취침 2시간 전 등 일상 시간대에는 뜨지 않으며, 취침 1시간 이내(어두운 방 30분 연속 사용) 또는 취침 시간 이후에만 발동합니다.\n" +
+                            "• 금융 앱 보호: 은행, 뱅킹, 결제 앱 사용 중에는 모든 코칭 개입이 완전 차단됩니다.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
             }
 
             Row(
