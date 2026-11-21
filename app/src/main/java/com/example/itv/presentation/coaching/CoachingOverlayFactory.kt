@@ -263,7 +263,7 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
 
         s.dog = EquippedDogView(context).apply {
             setImageResource(R.drawable.itv_motion_front)
-            contentDescription = "화면 모서리로 걸어나와 선 강아지. 탭하면 휴식을 시작합니다."
+            contentDescription = "화면 모서리로 걸어나와 선 강아지. 강아지를 터치하면 미션이 진행됩니다."
         }
         val startX = width + dp(4)
         s.dogParams = params(dogSize, dogSize, startX, s.homeY, true)
@@ -375,7 +375,7 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
             // 달려오기보단, 화면 아래쪽에서 팔을 벌린 채(강한 개입의 마지막 자세: itv_gallop_front_00) 점프하듯 위로 튀어오름!
             s.dog = EquippedDogView(context).apply {
                 setImageResource(R.drawable.itv_gallop_front_00)
-                contentDescription = "아직 시간 안 됐어요! 터치하면 화면이 다시 꺼집니다."
+                contentDescription = "아직 시간 안 됐어요! 스마트폰을 엎어두면 화면이 꺼집니다."
             }
             val startY = height
             s.dogParams = params(targetDogSize, targetDogSize, s.homeX, startY, true)
@@ -435,7 +435,7 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
             }
 
             val noteView = TextView(context).apply {
-                text = if (rec?.isFacedownRequired != false) "📱 폰을 엎어두면 화면이 꺼져요" else "💡 화면을 끄면 휴식이 이어져요"
+                text = "📱 폰을 엎어두면 화면이 꺼지고 휴식이 이어져요"
                 textSize = 11.5f
                 setTypeface(null, android.graphics.Typeface.BOLD)
                 setTextColor(Color.rgb(194, 65, 12))
@@ -515,19 +515,16 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
                         s.speech.visibility = View.VISIBLE
                         startTailWagging(s)
 
-                        // 터치 시 다시 화면 끄기!
-                        val turnOffAction = View.OnClickListener {
+                        // 터치 시 화면을 끄지 않고 안내 토스트 표시 (엎어두어야 화면이 꺼짐)
+                        val guideAction = View.OnClickListener {
                             if (!s.stopped) {
-                                val locked = com.example.itv.infrastructure.observation.accessibility.WritingGuardService.lockScreen()
-                                if (!locked) {
-                                    android.widget.Toast.makeText(context, "접근성 권한이 필요합니다. 전원 버튼을 눌러 화면을 꺼주세요.", android.widget.Toast.LENGTH_SHORT).show()
-                                }
+                                android.widget.Toast.makeText(context, "📱 스마트폰을 바닥에 엎어두면 화면이 꺼지고 휴식이 이어져요", android.widget.Toast.LENGTH_SHORT).show()
                             }
                         }
-                        s.dog.setOnClickListener(turnOffAction)
-                        s.speech.setOnClickListener(turnOffAction)
-                        dimView.setOnClickListener(turnOffAction)
-                        topHudCard.setOnClickListener(turnOffAction)
+                        s.dog.setOnClickListener(guideAction)
+                        s.speech.setOnClickListener(guideAction)
+                        dimView.setOnClickListener(guideAction)
+                        topHudCard.setOnClickListener(guideAction)
 
                         s.onReady?.invoke()
                         s.onReady = null
@@ -543,7 +540,7 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
 
             s.dog = EquippedDogView(context).apply {
                 setImageResource(rewardFrames[0])
-                contentDescription = "화면을 바라보며 달려와 앞을 막아선 강아지. 강아지를 터치하면 미션이 시작됩니다."
+                contentDescription = "화면을 바라보며 달려와 앞을 막아선 강아지. 강아지를 터치하면 미션이 진행됩니다."
             }
             s.dogParams = params(startSize, startSize, startX, startY, true)
             s.dogParams.flags = s.dogParams.flags or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS

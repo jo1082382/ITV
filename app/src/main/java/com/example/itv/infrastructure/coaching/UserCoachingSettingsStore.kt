@@ -43,13 +43,17 @@ class UserCoachingSettingsStore(context: Context) {
         }.getOrDefault(CoachingTone.SOFT)
 
         val bedtimeCareEnabled = prefs.getBoolean(KEY_BEDTIME_CARE_ENABLED, true)
+        val customBedtimeHour = if (prefs.contains(KEY_CUSTOM_BEDTIME_HOUR)) prefs.getInt(KEY_CUSTOM_BEDTIME_HOUR, 23) else null
+        val customBedtimeMinute = if (prefs.contains(KEY_CUSTOM_BEDTIME_MINUTE)) prefs.getInt(KEY_CUSTOM_BEDTIME_MINUTE, 30) else null
 
         return UserCoachingSettings(
             interventionType = interventionType,
             coachingIntensity = coachingIntensity,
             characterIntensity = characterIntensity,
             tone = tone,
-            bedtimeCareEnabled = bedtimeCareEnabled
+            bedtimeCareEnabled = bedtimeCareEnabled,
+            customBedtimeHour = customBedtimeHour,
+            customBedtimeMinute = customBedtimeMinute
         )
     }
 
@@ -80,6 +84,19 @@ class UserCoachingSettingsStore(context: Context) {
         _settings.value = _settings.value.copy(bedtimeCareEnabled = enabled)
     }
 
+    fun updateCustomBedtime(hour: Int?, minute: Int?) {
+        val editor = prefs.edit()
+        if (hour != null && minute != null) {
+            editor.putInt(KEY_CUSTOM_BEDTIME_HOUR, hour)
+            editor.putInt(KEY_CUSTOM_BEDTIME_MINUTE, minute)
+        } else {
+            editor.remove(KEY_CUSTOM_BEDTIME_HOUR)
+            editor.remove(KEY_CUSTOM_BEDTIME_MINUTE)
+        }
+        editor.apply()
+        _settings.value = _settings.value.copy(customBedtimeHour = hour, customBedtimeMinute = minute)
+    }
+
     companion object {
         private const val PREFS_NAME = "user_coaching_settings_prefs"
         private const val KEY_INTERVENTION_TYPE = "key_intervention_type"
@@ -87,6 +104,8 @@ class UserCoachingSettingsStore(context: Context) {
         private const val KEY_CHARACTER_INTENSITY = "key_character_intensity"
         private const val KEY_TONE = "key_tone"
         private const val KEY_BEDTIME_CARE_ENABLED = "key_bedtime_care_enabled"
+        private const val KEY_CUSTOM_BEDTIME_HOUR = "key_custom_bedtime_hour"
+        private const val KEY_CUSTOM_BEDTIME_MINUTE = "key_custom_bedtime_minute"
 
         @Volatile
         private var instance: UserCoachingSettingsStore? = null

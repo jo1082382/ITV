@@ -347,9 +347,14 @@ class CompanionPreviewActivity : Activity() {
                 )
             }
 
-            if (rec.isFacedownRequired) {
+            if (lastIntensity == CharacterIntensity.STRONG || rec.isFacedownRequired) {
                 tracker.onFacedownDetectedWhileScreenOn = {
-                    com.example.itv.infrastructure.observation.accessibility.WritingGuardService.lockScreen()
+                    handler.post {
+                        val locked = com.example.itv.infrastructure.observation.accessibility.WritingGuardService.lockScreen()
+                        if (!locked) {
+                            android.widget.Toast.makeText(applicationContext, "엎어둠 감지! 전원 버튼을 눌러 화면을 꺼주세요.", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    }
                 }
                 tracker.startFacedownMonitoring()
             }
@@ -489,9 +494,18 @@ class CompanionPreviewActivity : Activity() {
             tracker.onFacedownDetectedWhileScreenOn = {
                 handler.post {
                     if (current != null && !missionActive) {
-                        choose("쉬기", mode == "retry")
+                        missionActive = true
+                        missionAccumulatedRestMs = 0L
+                        missionOffAt = 0L
+                        current?.let { factory.detachPreview(it) }
+                        current = null
+                        selected = false
+                        statusText.text = "스마트폰을 바닥에 엎어두면 화면이 꺼지고 휴식이 시작돼요!"
                     }
-                    com.example.itv.infrastructure.observation.accessibility.WritingGuardService.lockScreen()
+                    val locked = com.example.itv.infrastructure.observation.accessibility.WritingGuardService.lockScreen()
+                    if (!locked) {
+                        android.widget.Toast.makeText(applicationContext, "엎어둠 감지! 전원 버튼을 눌러 화면을 꺼주세요.", android.widget.Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
             tracker.startFacedownMonitoring()

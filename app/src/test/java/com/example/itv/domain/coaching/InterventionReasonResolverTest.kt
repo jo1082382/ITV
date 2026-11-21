@@ -147,4 +147,72 @@ class InterventionReasonResolverTest {
 
         assertTrue(reasons.any { it.contains("불을 끄고 누워서 보고 있네") })
     }
+
+    @Test
+    fun daytimeDarkAmbientUsesContextualExplanationNotBedtime() {
+        val ambient = AmbientSnapshot(
+            lux = 4f,
+            proximityDistanceCm = 5f,
+            proximityMaxRangeCm = 5f,
+            isNear = false,
+            isOccluded = false,
+            screenBrightness = 150,
+            nightModeActive = false,
+            stateLabel = "활동 시간대 암실 시청 상태",
+            explanation = "test",
+            bedtimePhase = com.example.itv.infrastructure.observation.BedtimePhase.ACTIVE_HOURS,
+            userEnvironmentState = com.example.itv.infrastructure.observation.UserEnvironmentState.INDOOR_DARK_ACTIVE
+        )
+
+        val reasons = InterventionReasonResolver.resolveReasons(
+            isJev = false,
+            jevContext = null,
+            continuousUsedMs = 120_000L,
+            ambient = ambient,
+            shortformAppName = "YouTube 쇼츠",
+            localTime = LocalTime.of(14, 30)
+        )
+
+        assertTrue(reasons.any { it.contains("낮 시간인데 어두운 곳에서") })
+        // 낮 시간이므로 취침 관련 문구가 절대 나오지 않아야 함
+        assertTrue(reasons.none { it.contains("취침") || it.contains("잘 시간") })
+    }
+
+    @Test
+    fun daytimeSuppressesBedtimePassedReason() {
+        val jevContext = JevContext(
+            sessionId = "s1",
+            packageName = "com.google.android.youtube",
+            sessionMs = 600_000L,
+            continuousMs = 600_000L,
+            returns10m = 1,
+            returnsObservedSeconds = 600,
+            bedtimePassedMinutes = 600, // 낮 시간 경과치
+            observedAt = 0L
+        )
+        val ambient = AmbientSnapshot(
+            lux = 200f,
+            proximityDistanceCm = 5f,
+            proximityMaxRangeCm = 5f,
+            isNear = false,
+            isOccluded = false,
+            screenBrightness = 120,
+            nightModeActive = false,
+            stateLabel = "주간/밝은 실내 활동 상태",
+            explanation = "test",
+            bedtimePhase = com.example.itv.infrastructure.observation.BedtimePhase.ACTIVE_HOURS
+        )
+
+        val reasons = InterventionReasonResolver.resolveReasons(
+            isJev = true,
+            jevContext = jevContext,
+            continuousUsedMs = 600_000L,
+            ambient = ambient,
+            shortformAppName = "YouTube 쇼츠",
+            localTime = LocalTime.of(15, 0)
+        )
+
+        // 낮 시간이므로 "취침 목표보다 X분이나 지났어"가 나오지 않아야 함
+        assertTrue(reasons.none { it.contains("취침 목표") })
+    }
 }

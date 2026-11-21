@@ -20,44 +20,72 @@ object InterventionReasonResolver {
     ): List<String> {
         val candidates = mutableListOf<PrioritizedReason>()
 
+        val isBedtimeWindow = if (ambient != null) {
+            when (ambient.bedtimePhase) {
+                com.example.itv.infrastructure.observation.BedtimePhase.PAST_BEDTIME -> true
+                com.example.itv.infrastructure.observation.BedtimePhase.APPROACHING -> {
+                    // 취침 1시간 이내: 반드시 암실(lux <= 20)이고 30초/30분 이상 연속 사용한 경우에만 취침 개입 맥락 인정
+                    val isDark = ambient.lux != null && ambient.lux <= 20f
+                    val continuousMs = jevContext?.continuousMs?.takeIf { it > 0 } ?: continuousUsedMs
+                    isDark && continuousMs >= 30_000L
+                }
+                else -> false
+            }
+        } else {
+            localTime.hour in 0..4
+        }
+
         // 1. 취침 목표 초과 / 야간 시간대 (최우선 순위: 수면 및 눈 건강)
-        val bedtimePassed = jevContext?.bedtimePassedMinutes
-        if (bedtimePassed != null) {
+        // 취침 개입 윈도우(isBedtimeWindow == true)일 때만 발동
+        val bedtimePassed = jevContext?.bedtimePassedMinutes ?: ambient?.bedtimeDistanceMinutes
+        if (isBedtimeWindow && bedtimePassed != null) {
             if (bedtimePassed > 0) {
                 candidates.add(PrioritizedReason(100, "취침 목표보다 ${bedtimePassed}분이나 지났어!"))
             } else if (bedtimePassed == 0) {
                 candidates.add(PrioritizedReason(98, "지금이 딱 약속한 취침 시간이야!"))
             }
-        } else {
-            // 심야 시간대 (23시 ~ 06시)
-            val hour = localTime.hour
-            if (hour >= 23 || hour in 0..5) {
-                candidates.add(PrioritizedReason(95, "벌써 늦은 밤이야, 내일을 위해 눈 붙이자!"))
-            }
+        } else if (isBedtimeWindow && (ambient?.bedtimePhase == com.example.itv.infrastructure.observation.BedtimePhase.PAST_BEDTIME || ambient == null)) {
+            // 심야 취침 시간 경과 시간대
+            candidates.add(PrioritizedReason(95, "벌써 늦은 밤이야, 내일을 위해 눈 붙이자!"))
         }
 
         // 2. 환경 조도 및 취침 연계 상태
         if (ambient != null) {
-            when (ambient.userEnvironmentState) {
-                com.example.itv.infrastructure.observation.UserEnvironmentState.BEDTIME_DELAY_WATCH -> {
-                    candidates.add(PrioritizedReason(92, "취침 시간인데 어두운 방에서 밝은 화면을 보면 눈이 많이 지쳐!"))
+            val isDarkAmbient = ambient.lux != null && ambient.lux <= 20f
+            val isDaytime = !isBedtimeWindow && localTime.hour in 6..20
+
+            // 낮 시간에 어두운 곳에서 사용 중인 경우: 취침 개입 대신 어두운 사용 환경 맥락 설명 제공
+            if (isDaytime && isDarkAmbient && !ambient.isOccluded) {
+                val isBrightScreen = (ambient.screenBrightness ?: 0) > 100
+                if (isBrightScreen) {
+                    candidates.add(PrioritizedReason(94, "낮 시간인데 어두운 곳에서 밝은 화면을 보면 눈이 많이 지쳐!"))
+                } else {
+                    candidates.add(PrioritizedReason(94, "주변이 어두운데 화면을 보고 있어 눈이 피로해 보여!"))
                 }
-                com.example.itv.infrastructure.observation.UserEnvironmentState.PRE_SLEEP_REST -> {
-                    candidates.add(PrioritizedReason(90, "불을 끄고 누워서 보고 있네! 이제 눈을 감고 같이 잘 시간이야"))
-                }
-                com.example.itv.infrastructure.observation.UserEnvironmentState.NIGHT_ACTIVE -> {
-                    candidates.add(PrioritizedReason(88, "평소 자던 시간보다 늦었어! 내일을 위해 슬슬 마무리하자!"))
-                }
-                com.example.itv.infrastructure.observation.UserEnvironmentState.INDOOR_DARK_ACTIVE -> {
-                    candidates.add(PrioritizedReason(82, "어두운 실내에서 밝은 화면을 보고 있어 눈이 피로해 보여!"))
-                }
-                else -> {
-                    val isDarkAmbient = ambient.lux != null && ambient.lux <= 15f
-                    if (ambient.stateLabel.contains("취침") || (isDarkAmbient && !ambient.isOccluded)) {
-                        candidates.add(PrioritizedReason(85, "주변이 어두운데 화면을 보고 있어 눈이 피로해 보여!"))
-                    } else if (ambient.stateLabel.contains("야간 시청") || (isDarkAmbient && (ambient.screenBrightness ?: 0) > 100)) {
-                        candidates.add(PrioritizedReason(85, "어두운 방에서 밝은 화면을 보면 눈이 많이 지쳐!"))
+            } else if (isBedtimeWindow) {
+                when (ambient.userEnvironmentState) {
+                    com.example.itv.infrastructure.observation.UserEnvironmentState.BEDTIME_DELAY_WATCH -> {
+                        candidates.add(PrioritizedReason(92, "취침 시간인데 어두운 방에서 밝은 화면을 보면 눈이 많이 지쳐!"))
                     }
+                    com.example.itv.infrastructure.observation.UserEnvironmentState.PRE_SLEEP_REST -> {
+                        candidates.add(PrioritizedReason(90, "불을 끄고 누워서 보고 있네! 이제 눈을 감고 같이 잘 시간이야"))
+                    }
+                    com.example.itv.infrastructure.observation.UserEnvironmentState.NIGHT_ACTIVE -> {
+                        candidates.add(PrioritizedReason(88, "평소 자던 시간보다 늦었어! 내일을 위해 슬슬 마무리하자!"))
+                    }
+                    com.example.itv.infrastructure.observation.UserEnvironmentState.INDOOR_DARK_ACTIVE -> {
+                        candidates.add(PrioritizedReason(82, "어두운 실내에서 밝은 화면을 보고 있어 눈이 피로해 보여!"))
+                    }
+                    else -> {
+                        if (isDarkAmbient && !ambient.isOccluded) {
+                            candidates.add(PrioritizedReason(85, "주변이 어두운데 화면을 보고 있어 눈이 피로해 보여!"))
+                        }
+                    }
+                }
+            } else {
+                // 일상 활동 시간대 (취침 전 2시간 이상 등) 또는 실내 조명이 켜진 경우: 취침 관련 멘트 일체 배제
+                if (isDarkAmbient && !ambient.isOccluded) {
+                    candidates.add(PrioritizedReason(85, "어두운 실내에서 밝은 화면을 보고 있어 눈이 피로해 보여!"))
                 }
             }
             when (ambient.posture) {

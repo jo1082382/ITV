@@ -552,7 +552,10 @@ class JevRuntime private constructor(context: Context) {
         val now=SystemClock.elapsedRealtime()
         val pkg=a.captured.packageName
         val fgPkg=JevObservationHub.foregroundPackage
-        if (JevSettings.isDocumentOrMessagingPackage(fgPkg) || WritingGuard.blockReason() != null) return false
+        if (JevSettings.isDocumentOrMessagingPackage(fgPkg) ||
+            com.example.itv.infrastructure.observation.GeneralAppTracker.isFinancialPackage(fgPkg) ||
+            WritingGuard.blockReason() != null
+        ) return false
         val control=controls[pkg] ?: fgPkg?.let { controls[it] }
         val probe=when {
             pkg == JevSettings.INSTAGRAM || fgPkg == JevSettings.INSTAGRAM -> ReelsProbe.screenState()
@@ -727,7 +730,10 @@ class JevRuntime private constructor(context: Context) {
         val now = SystemClock.elapsedRealtime()
         val nowWall = System.currentTimeMillis()
         val targetPkg = pkg ?: JevObservationHub.foregroundPackage ?: return false
-        if (JevSettings.isDocumentOrMessagingPackage(targetPkg) || WritingGuard.blockReason() != null) return false
+        if (JevSettings.isDocumentOrMessagingPackage(targetPkg) ||
+            com.example.itv.infrastructure.observation.GeneralAppTracker.isFinancialPackage(targetPkg) ||
+            WritingGuard.blockReason() != null
+        ) return false
         if (!s.targets(targetPkg)) return false
         val c = tracker.context(targetPkg, now, nowWall, bedtime(s))?.let { enrichContext(it, now) } ?: return false
         approval = pending.copy(captured = c.copy(quality = "VALID"), requestedAt = now)

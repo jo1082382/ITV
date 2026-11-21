@@ -214,12 +214,114 @@ object GeneralAppTracker {
     }
 
     /**
+     * 금융, 뱅킹, 카드, 결제, 증권, 가상자산 등 금융 앱 여부를 엄격하게 판별합니다.
+     * 금융 거래/조회 중에는 사용자 자산 보호 및 집중 방해 방지를 위해 모든 개입이 완전히 차단됩니다.
+     */
+    fun isFinancialPackage(pkg: String?, appName: String? = null): Boolean {
+        if (pkg.isNullOrBlank()) return false
+        val lower = pkg.lowercase()
+
+        // 1. 한국 주요 은행 / 카드 / 증권 / 페이 / 가상자산 패키지 키워드
+        if (lower.contains("kbstar") ||
+            lower.contains("kbbank") ||
+            lower.contains("kbcard") ||
+            lower.contains("kbsec") ||
+            lower.contains("kblife") ||
+            lower.contains("kbank") ||
+            lower.contains("kakaobank") ||
+            lower.contains("kakaopay") ||
+            lower.contains("shinhan") ||
+            lower.contains("shcard") ||
+            lower.contains("wooribank") ||
+            lower.contains("wooricard") ||
+            lower.contains("hanabank") ||
+            lower.contains("hanaskcard") ||
+            lower.contains("hanafn") ||
+            lower.contains("ibk") ||
+            lower.contains("nonghyup") ||
+            lower.contains("nh.smart") ||
+            lower.contains("nhbank") ||
+            lower.contains("nhqv") ||
+            lower.contains("scbank") ||
+            lower.contains("standardchartered") ||
+            lower.contains("epost.pser") ||
+            lower.contains("kfcc") ||
+            lower.contains("cu.sbanking") ||
+            lower.contains("suhyup") ||
+            lower.contains("fsb.sbk") ||
+            lower.contains("viva.republica") ||
+            lower.contains("toss") ||
+            lower.contains("samsungpay") ||
+            lower.contains("spay") ||
+            lower.contains("payco") ||
+            lower.contains("naver.pay") ||
+            lower.contains("naverpay") ||
+            lower.contains("hyundaicard") ||
+            lower.contains("samsungcard") ||
+            lower.contains("lottecard") ||
+            lower.contains("lottesmartpay") ||
+            lower.contains("bccard") ||
+            lower.contains("kiwoom") ||
+            lower.contains("miraeasset") ||
+            lower.contains("samsung.pop") ||
+            lower.contains("truefriend") ||
+            lower.contains("daishin") ||
+            lower.contains("upbit") ||
+            lower.contains("bithumb") ||
+            lower.contains("coinone") ||
+            lower.contains("korbit")
+        ) {
+            return true
+        }
+
+        // 2. 범용 금융 키워드 (wallpaper, game 등 제외)
+        val containsFinancialWord = lower.contains("bank") ||
+            lower.contains("banking") ||
+            lower.contains("card") ||
+            lower.contains("credit") ||
+            lower.contains("finance") ||
+            lower.contains("stock")
+        if (containsFinancialWord && !lower.contains("wallpaper") && !lower.contains("game")) {
+            return true
+        }
+
+        // 3. 앱 레이블(이름)에 포함된 키워드
+        val name = appName ?: _snapshot.value.takeIf { it.packageName == pkg }?.appName
+        if (name != null) {
+            val nameLower = name.lowercase()
+            if (nameLower.contains("은행") ||
+                nameLower.contains("뱅크") ||
+                nameLower.contains("뱅킹") ||
+                nameLower.contains("금융") ||
+                nameLower.contains("카드") ||
+                nameLower.contains("페이") ||
+                nameLower.contains("증권") ||
+                nameLower.contains("저축") ||
+                nameLower.contains("결제") ||
+                nameLower.contains("kb스타") ||
+                nameLower.contains("k스타") ||
+                nameLower.contains("국민은행") ||
+                nameLower.contains("신한sol") ||
+                nameLower.contains("우리won") ||
+                nameLower.contains("하나원큐") ||
+                nameLower.contains("nh스마트")
+            ) {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    /**
      * 유튜브·인스타그램 외의 현재 포그라운드 앱이 개입 가능(ELIGIBLE) 상태인지 판별합니다.
      * - false(대기/차단)일 때는 30초 테스트 모드 및 Jev 실제 개입이 보류되고,
      *   true(개입 가능)로 전환되는 시점에 개입이 수행됩니다.
      */
     fun isInterventionDeferredOrBlocked(pkg: String?): Boolean {
-        if (pkg.isNullOrBlank() || pkg == JevSettings.YOUTUBE || pkg == JevSettings.INSTAGRAM) return false
+        if (pkg.isNullOrBlank()) return false
+        if (isFinancialPackage(pkg)) return true
+        if (pkg == JevSettings.YOUTUBE || pkg == JevSettings.INSTAGRAM) return false
         val snap = _snapshot.value
         if (snap.packageName != pkg) return false
         return snap.eligibility != InterventionEligibility.ELIGIBLE
@@ -230,6 +332,7 @@ object GeneralAppTracker {
      */
     fun blockingOrWaitingReason(pkg: String?): String? {
         if (!isInterventionDeferredOrBlocked(pkg)) return null
+        if (isFinancialPackage(pkg)) return "금융/뱅킹 앱 보호 중 · 개입 금지"
         val snap = _snapshot.value
         return "${snap.appName}: ${snap.eligibilityReason}"
     }
@@ -327,6 +430,7 @@ object GeneralAppTracker {
         val (baseCategory, source) = classifyBaseCategory(
             pkg = pkg,
             lower = lower,
+            appName = label,
             osCategory = osCategory,
             isFlagGame = isFlagGame,
             engineSignature = engineDetected,
@@ -359,6 +463,7 @@ object GeneralAppTracker {
     private fun classifyBaseCategory(
         pkg: String,
         lower: String,
+        appName: String?,
         osCategory: Int,
         isFlagGame: Boolean,
         engineSignature: String?,
@@ -512,18 +617,7 @@ object GeneralAppTracker {
         }
 
         // 8. 금융 / 뱅킹 / 결제
-        if (lower.contains("vivarepublica.toss") ||
-            lower.contains("kakaobank") ||
-            lower.contains("kakaopay") ||
-            lower.contains("kbstar") ||
-            lower.contains("shinhan") ||
-            lower.contains("wooribank") ||
-            lower.contains("hanabank") ||
-            lower.contains("nh.mobilenoti") ||
-            lower.contains("samsungpay") ||
-            lower.contains("upbit") ||
-            lower.contains("bithumb")
-        ) {
+        if (isFinancialPackage(pkg, appName)) {
             return InferredAppCategory.FINANCE to "금융/결제 앱 확정"
         }
 
@@ -1011,6 +1105,8 @@ object GeneralAppTracker {
                 InterventionEligibility.BLOCKED to "음성 통화·보이스톡 진행 중 (개입 금지)"
             isWritingActive ->
                 InterventionEligibility.BLOCKED to "키보드·입력창 활성 (${guardReason ?: "작성 중 개입 금지 원칙"})"
+            effectiveCategory == InferredAppCategory.FINANCE || isFinancialPackage(pkg, meta.appName) ->
+                InterventionEligibility.BLOCKED to "금융·뱅킹 앱 보호 중 (금융 작업 중 개입 금지 원칙)"
             JevSettings.isDocumentOrMessagingPackage(pkg) || effectiveCategory == InferredAppCategory.MESSENGER ->
                 InterventionEligibility.BLOCKED to "메신저 앱 보호 중 (메시지 중 개입 금지 원칙)"
             effectiveCategory == InferredAppCategory.DOCUMENT ->

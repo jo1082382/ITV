@@ -127,7 +127,7 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
                     varX += dx * dx; varY += dy * dy; varZ += dz * dz
                 }
                 val totalVariance = (varX + varY + varZ) / n
-                isCurrentlyStationary = totalVariance < 0.006f
+                isCurrentlyStationary = totalVariance < 0.035f
             }
         }
     }
@@ -268,31 +268,40 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
                 val nightReport = try {
                     com.example.itv.composition.queryNightReport(appContext, 30)
                 } catch (_: Exception) { null }
-                val window = com.example.itv.domain.records.SleepSummaryPolicy.estimateBedtimeWindow(
-                    confirmations = confirmations,
-                    candidates = nightReport?.candidates.orEmpty(),
-                    zone = nightReport?.zone ?: ZoneId.systemDefault()
-                )
+
+                val coachingSettings = com.example.itv.infrastructure.coaching.UserCoachingSettingsStore(appContext).loadSettings()
 
                 var h: Int? = null
                 var m: Int? = null
                 var src = "기본값 (23:30)"
 
-                if (window != null) {
-                    h = window.avgStartHour
-                    m = window.avgStartMinute
-                    src = "수면 추정/확인 기록 (${window.validCount}일 평균)"
+                if (coachingSettings.customBedtimeHour != null && coachingSettings.customBedtimeMinute != null) {
+                    h = coachingSettings.customBedtimeHour
+                    m = coachingSettings.customBedtimeMinute
+                    src = "직접 지정한 평소 취침 시각"
                 } else {
-                    val goal = db.dao().goal("demo-guest", "BEDTIME")
-                    val goalDetail = goal?.goalId?.let { db.dao().bedtimeGoal(it) }
-                    if (goal?.enabled == true && goalDetail != null) {
-                        h = goalDetail.localMinuteOfDay / 60
-                        m = goalDetail.localMinuteOfDay % 60
-                        src = "설정된 취침 목표"
+                    val window = com.example.itv.domain.records.SleepSummaryPolicy.estimateBedtimeWindow(
+                        confirmations = confirmations,
+                        candidates = nightReport?.candidates.orEmpty(),
+                        zone = nightReport?.zone ?: ZoneId.systemDefault()
+                    )
+
+                    if (window != null) {
+                        h = window.avgStartHour
+                        m = window.avgStartMinute
+                        src = "수면 추정/확인 기록 (${window.validCount}일 평균)"
                     } else {
-                        h = 23
-                        m = 30
-                        src = "기본 기준 시각 (23:30)"
+                        val goal = db.dao().goal("demo-guest", "BEDTIME")
+                        val goalDetail = goal?.goalId?.let { db.dao().bedtimeGoal(it) }
+                        if (goal?.enabled == true && goalDetail != null) {
+                            h = goalDetail.localMinuteOfDay / 60
+                            m = goalDetail.localMinuteOfDay % 60
+                            src = "설정된 취침 목표"
+                        } else {
+                            h = 23
+                            m = 30
+                            src = "기본 기준 시각 (23:30)"
+                        }
                     }
                 }
 
@@ -304,6 +313,10 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
                 }
             } catch (_: Exception) {}
         }
+    }
+
+    fun refreshBedtimeEstimates() {
+        loadBedtimeEstimates()
     }
 
     fun onAppSwitched() {
@@ -432,17 +445,17 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         // 2. 화면이 켜져 있는 경우 (바닥에 엎어두면 자동 화면 끄기용):
         // 누워서 폰을 위로 든 채로 볼 때(천장을 향해 누워서 폰을 위로 든 상태)는 손 떨림(isCurrentlyStationary == false) 및
         // 허공(isNear == false) 상태이므로 화면이 꺼지지 않음!
-        val isAngleFacedown = gz <= -3.0f && abs(gy) < 9.0f && abs(gx) < 9.0f
+        val isAngleFacedown = gz <= -2.5f && abs(gy) < 9.5f && abs(gx) < 9.5f
 
-        // (1) 근접 센서 감지: 화면 밀착 감지 (화면 반사광 최대 80 lux까지 허용)
-        val nearFacedown = isNear && isAngleFacedown && (lux == null || lux <= 80f)
+        // (1) 근접 센서 감지: 화면 밀착 감지 (화면 반사광 최대 160 lux까지 허용)
+        val nearFacedown = isNear && isAngleFacedown && (lux == null || lux <= 160f)
 
         // (2) 케이스 돌출 턱, 카툭튀, 울퉁불퉁한 침구류(이불/매트리스) 또는 가상 근접 센서로 인해 근접 센서(isNear)가 반응하지 못한 경우:
-        // 손을 떼고 바닥/침대에 거치된 정지 상태(isCurrentlyStationary)와 하향 각도(gz <= -4.8f), 차광 상태를 결합
-        val stationaryFacedown = isCurrentlyStationary && gz <= -4.8f && abs(gy) < 8.5f && abs(gx) < 8.5f && (lux == null || lux <= 60f)
+        // 손을 떼고 바닥/침대에 거치된 정지 상태(isCurrentlyStationary)와 하향 각도(gz <= -4.0f), 차광 상태를 결합
+        val stationaryFacedown = isCurrentlyStationary && gz <= -4.0f && abs(gy) < 9.0f && abs(gx) < 9.0f && (lux == null || lux <= 120f)
 
-        // (3) 완전 수평에 가깝게 바닥에 엎어둔 경우 (각도가 수평 -6.5 이하이면서 주변 조도가 차단된 상태)
-        val flatFacedown = gz <= -6.5f && abs(gy) < 6.0f && abs(gx) < 6.0f && (lux == null || lux <= 40f)
+        // (3) 완전 수평에 가깝게 바닥에 엎어둔 경우 (각도가 수평 -6.0 이하이면서 주변 조도가 차단된 상태)
+        val flatFacedown = gz <= -6.0f && abs(gy) < 7.0f && abs(gx) < 7.0f && (lux == null || lux <= 70f)
 
         return nearFacedown || stationaryFacedown || flatFacedown
     }
@@ -509,7 +522,7 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
             if (isFacedown()) {
                 if (facedownOnscreenStartTime == 0L) {
                     facedownOnscreenStartTime = now
-                } else if (now - facedownOnscreenStartTime >= 300L) {
+                } else if (now - facedownOnscreenStartTime >= 200L) {
                     onFacedownDetectedWhileScreenOn?.invoke()
                     facedownOnscreenStartTime = 0L
                 }
@@ -692,7 +705,7 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
 
         val bedtimePhase = when {
             !hasBedtime -> BedtimePhase.UNKNOWN
-            diffMinutes in -120..-1 -> BedtimePhase.APPROACHING
+            diffMinutes in -60..-1 -> BedtimePhase.APPROACHING // 취침 1시간 이내(60분)만 임박으로 인정 (2시간 전 등 먼 시간대는 일상 활동)
             diffMinutes in 0..360 -> BedtimePhase.PAST_BEDTIME
             else -> BedtimePhase.ACTIVE_HOURS
         }
@@ -764,10 +777,20 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
                     }
                     // 1-3. 조명 켜짐 (취침 시간대이나 실내 불을 켜두고 활동 중)
                     else -> {
+                        val state = if (bedtimePhase == BedtimePhase.PAST_BEDTIME) {
+                            UserEnvironmentState.NIGHT_ACTIVE
+                        } else {
+                            UserEnvironmentState.INDOOR_ACTIVE
+                        }
+                        val title = if (bedtimePhase == BedtimePhase.PAST_BEDTIME) {
+                            "야간 활동 유지 상태 (취침 시간 경과 · 실내 조명 켜짐)"
+                        } else {
+                            "취침 전 일상 활동 상태 (실내 조명 켜짐)"
+                        }
                         Triple(
-                            UserEnvironmentState.NIGHT_ACTIVE,
-                            "야간 활동 유지 상태 (취침 시간대 실내 조명 켜짐)",
-                            "$timePrefix 아직 실내 조명(조도 ${lux.toInt()} lux)이 켜져 있고 화면(${brightness ?: "-"} / 255)을 사용 중으로, 잠자리에 들지 않고 야간 활동을 이어가고 있습니다."
+                            state,
+                            title,
+                            "$timePrefix 아직 실내 조명(조도 ${lux.toInt()} lux)이 켜져 있고 화면(${brightness ?: "-"} / 255)을 사용 중으로, 조명을 켜둔 채 정상적인 활동을 이어가고 있습니다."
                         )
                     }
                 }
@@ -831,9 +854,9 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
             isNear, lux, isCurrentlyStationary
         )
 
-        // 배터리 소모 0을 위해 시간대나 암실/자세 조건 중 일부가 통과되었을 때만 1회성 소프트 맥락 조회
+        // 배터리 소모 0을 위해 시간대가 취침 시간대(임박/경과)에 진입했을 때만 1회성 소프트 맥락 조회
         val isBedtimeTimeWindow = bedtimePhase == BedtimePhase.APPROACHING || bedtimePhase == BedtimePhase.PAST_BEDTIME
-        val isLikelyNight = isBedtimeTimeWindow || isDarkAmbient || posture == com.example.itv.domain.coaching.UserPosture.LYING_DOWN
+        val isLikelyNight = isBedtimeTimeWindow
 
         var isCharging: Boolean? = null
         var isWifi: Boolean? = null
@@ -856,66 +879,70 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         }
 
         // 취침 확신도 점수 계산 (100점 만점)
+        // 취침 케어는 '평소 취침 시각 전후에 불을 끈 어두운 방에서 잠에 들지 못하고 사용하는 수면 지연(베드타임 프로크래스티네이션)'을 방지하기 위함입니다.
+        // 불을 켜고 생활 중인 경우(lux > 20f)에는 취침 개입 대상이 아니므로 조도 가중치를 엄격하게 반영하고,
+        // 어두운 방(isDarkAmbient) 상태에서만 취침 확신도 후보(isBedtimeCandidate)로 인정합니다.
         var score = 0
         val breakdownList = mutableListOf<String>()
 
-        // 1) 시간대 (최대 35점)
+        // 1) 시간대 (최대 40점): 취침 1시간 이내 또는 심야 취침 경과 시간대
         when (bedtimePhase) {
             BedtimePhase.PAST_BEDTIME -> {
-                score += 35
-                breakdownList.add("심야취침(+35)")
+                score += 40
+                breakdownList.add("심야취침(+40)")
             }
             BedtimePhase.APPROACHING -> {
-                score += 25
-                breakdownList.add("취침임박(+25)")
+                score += 30
+                breakdownList.add("취침1시간내(+30)")
             }
             else -> {}
         }
 
-        // 2) 암실/조도 (최대 35점)
+        // 2) 암실/조도 (최대 30점): 불을 끈 어두운 환경이 필수
         if (lux != null) {
             when {
-                lux <= 5f -> {
-                    score += 35
-                    breakdownList.add("암실(+35)")
+                lux <= 3f -> {
+                    score += 30
+                    breakdownList.add("완전암실(+30)")
                 }
-                lux <= 15f -> {
+                lux <= 10f -> {
                     score += 25
-                    breakdownList.add("어두움(+25)")
+                    breakdownList.add("어두운방(+25)")
                 }
-                lux <= 30f -> {
-                    score += 10
-                    breakdownList.add("약한조명(+10)")
+                lux <= 20f -> {
+                    score += 15
+                    breakdownList.add("미약조명(+15)")
                 }
             }
         }
 
-        // 3) 자세 (누움 최대 20점)
+        // 3) 자세 (누움 최대 15점)
         if (posture == com.example.itv.domain.coaching.UserPosture.LYING_DOWN) {
-            score += 20
-            breakdownList.add("누운자세(+20)")
-        }
-
-        // 4) 정지 상태 (가만히 있음 최대 10점)
-        if (isCurrentlyStationary) {
-            score += 10
-            breakdownList.add("정지상태(+10)")
-        }
-
-        // 5) [보조 소프트 맥락] 충전 중 (+15점)
-        if (isCharging == true) {
             score += 15
-            breakdownList.add("충전중(+15)")
+            breakdownList.add("누운자세(+15)")
         }
 
-        // 6) [보조 소프트 맥락] Wi-Fi 연결 (+10점)
+        // 4) 정지 상태 (가만히 있음 최대 5점)
+        if (isCurrentlyStationary) {
+            score += 5
+            breakdownList.add("정지상태(+5)")
+        }
+
+        // 5) [보조 소프트 맥락] 충전 중 (+5점)
+        if (isCharging == true) {
+            score += 5
+            breakdownList.add("충전중(+5)")
+        }
+
+        // 6) [보조 소프트 맥락] Wi-Fi 연결 (+5점)
         if (isWifi == true) {
-            score += 10
-            breakdownList.add("Wi-Fi(+10)")
+            score += 5
+            breakdownList.add("Wi-Fi(+5)")
         }
 
         val bedtimeScore = score.coerceIn(0, 100)
-        val isBedtimeCandidate = bedtimeScore >= 60
+        // 불을 켜고 생활 중(lux > 20f)이거나, 취침 1시간 이전(ACTIVE_HOURS)인 경우에는 절대 취침 후보로 인정하지 않음
+        val isBedtimeCandidate = isDarkAmbient && isBedtimeTimeWindow && bedtimeScore >= 60
         val bedtimeScoreBreakdown = if (breakdownList.isEmpty()) "점수 없음 (0점)" else breakdownList.joinToString(" · ")
 
         return AmbientSnapshot(

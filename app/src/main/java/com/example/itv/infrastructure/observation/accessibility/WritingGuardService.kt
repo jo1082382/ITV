@@ -189,6 +189,8 @@ open class WritingGuardService : AccessibilityService() {
                     @Suppress("DEPRECATION") root.recycle()
                 }
                 when {
+                    com.example.itv.infrastructure.observation.GeneralAppTracker.isFinancialPackage(pkg) ->
+                        result(true, "금융/뱅킹/결제 앱 보호 중 · 개입 금지")
                     pkg == "com.instagram.android" && ReelsProbe.dmScreen() ->
                         result(true, "Instagram DM 화면 감지 · 개입 보류")
                     isInputFocused ->

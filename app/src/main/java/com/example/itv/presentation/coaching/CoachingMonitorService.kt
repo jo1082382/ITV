@@ -326,6 +326,7 @@ class CoachingMonitorService : Service() {
         val inActiveRest = missionController.state.id != null && (missionController.state.offAt != null || missionController.state.pending)
         if (overlay != null || feedbackView != null || completionView != null || inActiveRest || !unlocked()) return
         if (!com.example.itv.composition.CoachingAccess.ready(this) || !Settings.canDrawOverlays(this)) return
+        if (com.example.itv.infrastructure.observation.GeneralAppTracker.isFinancialPackage(JevObservationHub.foregroundPackage)) return
         val blockReason = WritingGuard.blockReason()
         if (blockReason != null && (!isRestMissionFailure || blockReason.contains("키보드"))) return
         val inVideo = ReelsProbe.screenState() == 1 ||
@@ -368,7 +369,10 @@ class CoachingMonitorService : Service() {
                 val tracker = com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this)
                 tracker.onFacedownDetectedWhileScreenOn = {
                     handler.post {
-                        com.example.itv.infrastructure.observation.accessibility.WritingGuardService.lockScreen()
+                        val locked = com.example.itv.infrastructure.observation.accessibility.WritingGuardService.lockScreen()
+                        if (!locked) {
+                            android.widget.Toast.makeText(applicationContext, "엎어둠 감지! 전원 버튼을 눌러 화면을 꺼주세요.", android.widget.Toast.LENGTH_SHORT).show()
+                        }
                     }
                 }
                 tracker.startFacedownMonitoring()
@@ -690,6 +694,7 @@ class CoachingMonitorService : Service() {
 
         // 5. 현재 사용자가 게임, 롱폼 영상, 숏폼/댓글, 입력 등 몰입 중인지 판정
         val currentFg = JevObservationHub.foregroundPackage
+        if (com.example.itv.infrastructure.observation.GeneralAppTracker.isFinancialPackage(currentFg)) return
         val isGamingOrDeferred = currentFg != JevSettings.YOUTUBE &&
             currentFg != JevSettings.INSTAGRAM &&
             com.example.itv.infrastructure.observation.GeneralAppTracker.isInterventionDeferredOrBlocked(currentFg)
@@ -858,6 +863,11 @@ class CoachingMonitorService : Service() {
 
     fun triggerTestIntervention(forceStrong: Boolean = false) {
         if (!Settings.canDrawOverlays(this)) return
+        val currentFg = JevObservationHub.foregroundPackage
+        if (com.example.itv.infrastructure.observation.GeneralAppTracker.isFinancialPackage(currentFg)) {
+            android.widget.Toast.makeText(this, "금융/뱅킹 앱 사용 중에는 개입이 발생하지 않습니다.", android.widget.Toast.LENGTH_SHORT).show()
+            return
+        }
         removeOverlay()
         dismissJevFeedback()
         dismissCompletion()
@@ -892,9 +902,15 @@ class CoachingMonitorService : Service() {
                 tracker.onFacedownDetectedWhileScreenOn = {
                     handler.post {
                         if (overlay === root) {
-                            onChoice("쉬기", "스마트폰 엎어둠 감지로 자동 휴식 시작")
+                            val offerId = responseController.offerId ?: java.util.UUID.randomUUID().toString().take(8)
+                            startRestMission(offerId)
+                            removeOverlay()
+                            missionController.refreshStartDeadline(SystemClock.elapsedRealtime(), missionFromJev)
                         }
-                        com.example.itv.infrastructure.observation.accessibility.WritingGuardService.lockScreen()
+                        val locked = com.example.itv.infrastructure.observation.accessibility.WritingGuardService.lockScreen()
+                        if (!locked) {
+                            android.widget.Toast.makeText(applicationContext, "엎어둠 감지! 전원 버튼을 눌러 화면을 꺼주세요.", android.widget.Toast.LENGTH_SHORT).show()
+                        }
                     }
                 }
                 tracker.startFacedownMonitoring()
@@ -1053,10 +1069,12 @@ class CoachingMonitorService : Service() {
         if (bedtimeCareController.isDialogShowing()) return
 
         val isJev = jevMode()
-        // 1. 메시지·문서·키보드 입력·인스타 DM 중 개입 절대 금지
+        // 1. 메시지·문서·키보드 입력·인스타 DM·금융/뱅킹 앱 중 개입 절대 금지
         if (WritingGuard.blockReason() != null || observer.snapshot().isActivelyWriting()) return
         val currentFg = JevObservationHub.foregroundPackage
-        if (JevSettings.isDocumentOrMessagingPackage(currentFg)) return
+        if (JevSettings.isDocumentOrMessagingPackage(currentFg) ||
+            com.example.itv.infrastructure.observation.GeneralAppTracker.isFinancialPackage(currentFg)
+        ) return
 
         // 2. 유튜브 숏폼 댓글 또는 인스타그램 댓글·스토리·DM 열람 중에는 절대 개입하지 않음
         val ytMode = com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.snapshot.value.mode
@@ -1111,7 +1129,24 @@ class CoachingMonitorService : Service() {
         }
         val ambient = com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this).snapshot.value
         val coachingSettings = com.example.itv.infrastructure.coaching.UserCoachingSettingsStore.getInstance(this).loadSettings()
-        if (ambient.isBedtimeCandidate && coachingSettings.bedtimeCareEnabled) {
+        val isTest = testMode()
+        val nightBudgetMs = if (isTest) 30_000L else 30 * 60 * 1000L
+        val currentContinuousMs = if (isJev) {
+            jev.state.value.context?.continuousMs ?: usageClock.usedMs
+        } else {
+            usageClock.usedMs
+        }
+        val isPreBedtime = ambient.bedtimeDistanceMinutes != null && ambient.bedtimeDistanceMinutes < 0
+        val isLongUsageBeforeBed = currentContinuousMs >= nightBudgetMs
+
+        // 취침 개입(3분기 케어) 조건:
+        // 1) ambient.isBedtimeCandidate && coachingSettings.bedtimeCareEnabled
+        // 2) 평소 취침 시각 전(1시간 이내, isPreBedtime)이라면 어두운 방에서 30분(테스트 30초) 이상 연속 사용했을 때만 취침 케어로 전환
+        //    (취침 전 연속 사용 시간이 부족하다면 일반 강아지 코칭으로 진행)
+        val shouldTriggerBedtimeCare = ambient.isBedtimeCandidate && coachingSettings.bedtimeCareEnabled &&
+            (!isPreBedtime || isLongUsageBeforeBed)
+
+        if (shouldTriggerBedtimeCare) {
             removeOverlay()
             responseController.offered = true
             val offerId = jevOfferId ?: java.util.UUID.randomUUID().toString().take(8)
@@ -1203,9 +1238,15 @@ class CoachingMonitorService : Service() {
                 tracker.onFacedownDetectedWhileScreenOn = {
                     handler.post {
                         if (overlay === root) {
-                            onChoice("쉬기", "스마트폰 엎어둠 감지로 자동 휴식 시작")
+                            val offerId = responseController.offerId ?: java.util.UUID.randomUUID().toString().take(8)
+                            startRestMission(offerId)
+                            removeOverlay()
+                            missionController.refreshStartDeadline(SystemClock.elapsedRealtime(), missionFromJev)
                         }
-                        com.example.itv.infrastructure.observation.accessibility.WritingGuardService.lockScreen()
+                        val locked = com.example.itv.infrastructure.observation.accessibility.WritingGuardService.lockScreen()
+                        if (!locked) {
+                            android.widget.Toast.makeText(applicationContext, "엎어둠 감지! 전원 버튼을 눌러 화면을 꺼주세요.", android.widget.Toast.LENGTH_SHORT).show()
+                        }
                     }
                 }
                 tracker.startFacedownMonitoring()

@@ -85,7 +85,9 @@ data class UserCoachingSettings(
     val coachingIntensity: CoachingIntensity = CoachingIntensity.NORMAL,
     val characterIntensity: CharacterIntensity = CharacterIntensity.NORMAL,
     val tone: CoachingTone = CoachingTone.SOFT,
-    val bedtimeCareEnabled: Boolean = true
+    val bedtimeCareEnabled: Boolean = true,
+    val customBedtimeHour: Int? = null,
+    val customBedtimeMinute: Int? = null
 ) {
     // 하위 호환성 유지 프로퍼티
     val intensity: CoachingIntensity get() = coachingIntensity
