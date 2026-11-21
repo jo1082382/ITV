@@ -45,6 +45,8 @@ class CompanionPreviewActivity : Activity() {
 
     private var missionActive = false
     private var missionOffAt = 0L
+    private var missionAccumulatedRestMs = 0L
+    private var missionResumeTimeout: Runnable? = null
     private val missionRestDurationMs = 15_000L
     private var lastIntensity: CharacterIntensity = CharacterIntensity.NORMAL
 
@@ -52,7 +54,9 @@ class CompanionPreviewActivity : Activity() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
                 Intent.ACTION_SCREEN_OFF -> {
-                    if (missionActive) {
+                    missionResumeTimeout?.let { handler.removeCallbacks(it) }
+                    factory.dismissMissionCountdownHud()
+                    if (missionActive && missionOffAt == 0L) {
                         missionOffAt = SystemClock.elapsedRealtime()
                         if (activeRecommendation?.isFacedownRequired == true) {
                             tracker.onMissionScreenOff()
@@ -60,8 +64,8 @@ class CompanionPreviewActivity : Activity() {
                     }
                 }
                 Intent.ACTION_SCREEN_ON -> {
-                    if (missionActive) {
-                        checkMissionWake()
+                    if (missionActive && missionOffAt > 0L) {
+                        handler.post { checkMissionWake() }
                     }
                 }
             }
@@ -77,6 +81,30 @@ class CompanionPreviewActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        } else {
+            @Suppress("DEPRECATION")
+            window.addFlags(
+                android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+            )
+        }
+
+        try {
+            val filter = IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_OFF)
+                addAction(Intent.ACTION_SCREEN_ON)
+            }
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(screenReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("DEPRECATION")
+                registerReceiver(screenReceiver, filter)
+            }
+        } catch (_: Exception) {}
+
         tracker = LightAndBrightnessTracker.getInstance(this)
 
         val column = LinearLayout(this).apply {
@@ -174,6 +202,61 @@ class CompanionPreviewActivity : Activity() {
         }
         column.addView(nightBar)
 
+        // 야간 비침해 배너 알림 및 실시간 HUD 수면 모드 미리보기 제어 바
+        val gentleBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(6), dp(3), dp(6), dp(3))
+            setBackgroundColor(Color.parseColor("#0F172A"))
+        }
+        fun gentleButton(text: String, bgColor: Int, action: () -> Unit) {
+            val btn = Button(this).apply {
+                this.text = text
+                textSize = 11f
+                setTextColor(Color.WHITE)
+                setBackgroundColor(bgColor)
+                setPadding(dp(2), dp(2), dp(2), dp(2))
+                setOnClickListener { action() }
+            }
+            gentleBar.addView(btn, LinearLayout.LayoutParams(0, dp(40), 1f).apply {
+                setMargins(dp(2), 0, dp(2), 0)
+            })
+        }
+        gentleButton("🔔 비침해 배너(30초)", Color.parseColor("#4338CA")) {
+            val success = com.example.itv.presentation.sleep.NightGentleAlertController.showGentleBanner(this, isTestMode = true)
+            if (!success && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M && !android.provider.Settings.canDrawOverlays(this)) {
+                android.widget.Toast.makeText(this, "다른 앱 위에 표시 권한을 허용해주세요.", android.widget.Toast.LENGTH_SHORT).show()
+                val intent = android.content.Intent(
+                    android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    android.net.Uri.parse("package:$packageName")
+                )
+                startActivity(intent)
+            }
+        }
+        gentleButton("🐶 HUD 토글", Color.parseColor("#4F46E5")) {
+            if (com.example.itv.presentation.coaching.LongformDiagnosticHud.isShowing) {
+                com.example.itv.presentation.coaching.LongformDiagnosticHud.hide()
+            } else {
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M && !android.provider.Settings.canDrawOverlays(this)) {
+                    android.widget.Toast.makeText(this, "다른 앱 위에 표시 권한을 허용해주세요.", android.widget.Toast.LENGTH_SHORT).show()
+                    val intent = android.content.Intent(
+                        android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        android.net.Uri.parse("package:$packageName")
+                    )
+                    startActivity(intent)
+                } else {
+                    com.example.itv.presentation.coaching.LongformDiagnosticHud.show(this)
+                }
+            }
+        }
+        gentleButton("💤 HUD 수면 전환", Color.parseColor("#6D28D9")) {
+            val hud = com.example.itv.presentation.coaching.LongformDiagnosticHud
+            if (!hud.isShowing) {
+                hud.show(this)
+            }
+            hud.setSleepingState(!hud.isSleeping)
+        }
+        column.addView(gentleBar)
+
         // 3. Companion display host area
         host = FrameLayout(this).apply {
             setBackgroundColor(Color.rgb(221, 236, 225))
@@ -189,48 +272,101 @@ class CompanionPreviewActivity : Activity() {
         }
     }
 
-    override fun onStart() {
-        super.onStart()
-        val filter = IntentFilter().apply {
-            addAction(Intent.ACTION_SCREEN_OFF)
-            addAction(Intent.ACTION_SCREEN_ON)
-        }
-        registerReceiver(screenReceiver, filter)
-    }
-
-    override fun onStop() {
-        super.onStop()
-        try { unregisterReceiver(screenReceiver) } catch (_: Exception) {}
-    }
-
     override fun onResume() {
         super.onResume()
         tracker.start()
         tracker.startContinuousPostureListening()
         handler.removeCallbacks(sensorUpdater)
         handler.post(sensorUpdater)
-        if (missionActive) {
-            checkMissionWake()
+        if (missionActive && missionOffAt > 0L) {
+            handler.post { checkMissionWake() }
         }
     }
 
     private fun checkMissionWake() {
-        if (!missionActive) return
+        if (!missionActive || missionOffAt == 0L) return
         val now = SystemClock.elapsedRealtime()
-        val duration = now - missionOffAt
+        val sessionDuration = (now - missionOffAt).coerceAtLeast(0L)
+        missionOffAt = 0L
         val needFacedown = activeRecommendation?.isFacedownRequired == true
         val facedownOk = if (needFacedown) tracker.stopFacedownMonitoring() else true
-        if (duration < missionRestDurationMs) {
-            val remainSec = ((missionRestDurationMs - duration) / 1000L).coerceAtLeast(1L)
-            statusText.text = "아직 시간 안 됨! (${remainSec}초 남음)"
-            show("retry")
-        } else if (!facedownOk) {
-            statusText.text = "스마트폰을 바닥에 엎어두지 않았어요! 화면을 끄고 바닥에 엎어두어야 인정됩니다."
-            show("retry")
-        } else {
+
+        if (facedownOk) {
+            missionAccumulatedRestMs += sessionDuration
+        }
+
+        val totalRestMs = missionAccumulatedRestMs
+        if (totalRestMs >= missionRestDurationMs) {
             missionActive = false
+            missionAccumulatedRestMs = 0L
+            factory.dismissMissionCountdownHud()
+            missionResumeTimeout?.let { handler.removeCallbacks(it) }
             statusText.text = "휴식 미션 성공! 뼈다귀 보상을 받아보세요."
             show("complete")
+        } else {
+            val remainingMs = (missionRestDurationMs - totalRestMs).coerceAtLeast(0L)
+            val remainingSec = (remainingMs + 999L) / 1000L
+            val rec = activeRecommendation ?: RestMissionCatalog.pick(tracker.snapshot.value.posture, lastIntensity == CharacterIntensity.STRONG)
+
+            val prepareSeconds = 10L
+            val targetTimeCal = java.util.Calendar.getInstance().apply {
+                add(java.util.Calendar.SECOND, (prepareSeconds + remainingSec).toInt())
+                if (get(java.util.Calendar.SECOND) > 0) {
+                    add(java.util.Calendar.MINUTE, 1)
+                    set(java.util.Calendar.SECOND, 0)
+                }
+            }
+            val targetHour = targetTimeCal.get(java.util.Calendar.HOUR_OF_DAY)
+            val targetMinute = targetTimeCal.get(java.util.Calendar.MINUTE)
+            val targetTimeStr = String.format(java.util.Locale.KOREA, "%02d시 %02d분", targetHour, targetMinute)
+            val restMinutes = (remainingSec + 59L) / 60L
+            val restDisplayDesc = if (remainingSec >= 60L) "${restMinutes}분" else "${remainingSec}초"
+
+            val facedownReason = if (needFacedown && !facedownOk) " (엎어두기 미유지)" else ""
+            statusText.text = "휴식 일시정지${facedownReason} · ${totalRestMs / 1000L}초 인정 / 10초 내 다시 화면을 끄면 이어집니다 (남은 시간: ${remainingSec}초)"
+
+            if (lastIntensity == CharacterIntensity.STRONG) {
+                current?.let { factory.detachPreview(it) }
+                val scene = factory.retryOffer(
+                    onChoice = { title, _ -> choose(title, true) },
+                    intensityOverride = CharacterIntensity.STRONG,
+                    recommendation = rec,
+                    remainingRestSeconds = remainingSec,
+                    prepareSeconds = prepareSeconds
+                )
+                current = scene.first
+                factory.attachPreview(scene.first, scene.second)
+            } else {
+                factory.showMissionCountdownHud(
+                    rec = rec,
+                    targetTimeStr = targetTimeStr,
+                    restDisplayDesc = restDisplayDesc,
+                    prepareSeconds = prepareSeconds,
+                    isResume = true,
+                    remainingRestSeconds = remainingSec
+                )
+            }
+
+            if (rec.isFacedownRequired) {
+                tracker.onFacedownDetectedWhileScreenOn = {
+                    com.example.itv.infrastructure.observation.accessibility.WritingGuardService.lockScreen()
+                }
+                tracker.startFacedownMonitoring()
+            }
+
+            missionResumeTimeout?.let { handler.removeCallbacks(it) }
+            val timeoutRunnable = Runnable {
+                if (missionActive && missionOffAt == 0L) {
+                    missionActive = false
+                    missionAccumulatedRestMs = 0L
+                    factory.dismissMissionCountdownHud()
+                    tracker.stopFacedownMonitoring()
+                    statusText.text = "10초 내 화면을 다시 끄지 않아 미션 실패! 다시 도전해보세요."
+                    show("retry")
+                }
+            }
+            missionResumeTimeout = timeoutRunnable
+            handler.postDelayed(timeoutRunnable, prepareSeconds * 1000L)
         }
     }
 
@@ -238,6 +374,16 @@ class CompanionPreviewActivity : Activity() {
         super.onPause()
         handler.removeCallbacks(sensorUpdater)
         tracker.stopContinuousPostureListening()
+        val pm = getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
+        val isInteractive = pm?.isInteractive ?: true
+        if (!isInteractive && missionActive && missionOffAt == 0L) {
+            missionResumeTimeout?.let { handler.removeCallbacks(it) }
+            factory.dismissMissionCountdownHud()
+            missionOffAt = SystemClock.elapsedRealtime()
+            if (activeRecommendation?.isFacedownRequired == true) {
+                tracker.onMissionScreenOff()
+            }
+        }
         if (!missionActive || activeRecommendation?.isFacedownRequired != true) {
             tracker.stop()
         }
@@ -278,7 +424,9 @@ class CompanionPreviewActivity : Activity() {
     }
 
     private fun clear() {
-        handler.removeCallbacksAndMessages(null)
+        missionResumeTimeout?.let { handler.removeCallbacks(it) }
+        factory.dismissMissionCountdownHud()
+        handler.removeCallbacks(sensorUpdater)
         handler.post(sensorUpdater)
         current?.let { factory.detachPreview(it) }
         current = null
@@ -289,6 +437,11 @@ class CompanionPreviewActivity : Activity() {
     private fun show(mode: String) {
         if (!::factory.isInitialized || host.width == 0) return
         clear()
+        if (mode != "retry" && mode != "complete") {
+            missionActive = false
+            missionAccumulatedRestMs = 0L
+            missionOffAt = 0L
+        }
 
         if (mode == "night_care") {
             BedtimeCareController.getInstance(this).showBedtimeCareDialog(containerHost = host) {
@@ -332,6 +485,17 @@ class CompanionPreviewActivity : Activity() {
         }
         current = scene.first
         factory.attachPreview(scene.first, scene.second)
+        if (intensity == CharacterIntensity.STRONG || rec.isFacedownRequired) {
+            tracker.onFacedownDetectedWhileScreenOn = {
+                handler.post {
+                    if (current != null && !missionActive) {
+                        choose("쉬기", mode == "retry")
+                    }
+                    com.example.itv.infrastructure.observation.accessibility.WritingGuardService.lockScreen()
+                }
+            }
+            tracker.startFacedownMonitoring()
+        }
     }
 
     private fun choose(title: String, isRetry: Boolean) {
@@ -344,18 +508,31 @@ class CompanionPreviewActivity : Activity() {
             val rec = activeRecommendation ?: RestMissionCatalog.pick(tracker.snapshot.value.posture, lastIntensity == CharacterIntensity.STRONG)
             activeRecommendation = rec
             if (rec.isFacedownRequired) {
+                tracker.onFacedownDetectedWhileScreenOn = {
+                    com.example.itv.infrastructure.observation.accessibility.WritingGuardService.lockScreen()
+                }
                 tracker.startFacedownMonitoring()
             }
             val restSec = missionRestDurationMs / 1000L
             factory.playReaction(root, "쉬기", 10L, 10L, restSec, rec) {
                 // 사용자가 "미션 확인" 버튼을 눌렀을 때
                 missionActive = true
-                missionOffAt = SystemClock.elapsedRealtime()
-                clear()
+                missionAccumulatedRestMs = 0L
+                missionOffAt = 0L
+                missionResumeTimeout?.let { handler.removeCallbacks(it) }
+                current?.let { factory.detachPreview(it) }
+                current = null
+                selected = false
+                if (rec.isFacedownRequired) {
+                    tracker.onFacedownDetectedWhileScreenOn = {
+                        com.example.itv.infrastructure.observation.accessibility.WritingGuardService.lockScreen()
+                    }
+                    tracker.startFacedownMonitoring()
+                }
                 statusText.text = if (rec.isFacedownRequired) {
-                    "엎어두기 미션 진행 중 (${restSec}초). 화면을 끄고 스마트폰을 바닥에 엎어두세요!"
+                    "스마트폰을 바닥에 엎어두면 화면이 꺼지고 휴식이 시작돼요! (${restSec}초 목표)"
                 } else {
-                    "휴식 미션 진행 중 (${restSec}초). 화면을 껐다가 다시 켜보세요!"
+                    "10초 내 화면을 끄고 휴식을 시작해주세요! (${restSec}초 목표)"
                 }
             }
             return
@@ -368,6 +545,8 @@ class CompanionPreviewActivity : Activity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        missionResumeTimeout?.let { handler.removeCallbacks(it) }
+        factory.dismissMissionCountdownHud()
         clear()
         try { unregisterReceiver(screenReceiver) } catch (_: Exception) {}
         handler.removeCallbacksAndMessages(null)

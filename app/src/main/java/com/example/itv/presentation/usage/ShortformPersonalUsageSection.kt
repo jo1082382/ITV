@@ -625,14 +625,18 @@ private fun PersonalizedMetricsContent(m: PersonalizedTargetMetrics, accent: Col
                     rightLabel = "개인 최장 세션 기록",
                     rightValue = formatFullDuration(m.maxSessionMs)
                 )
-                if (m.phoneCurrentSessionMs > 0L) {
+                val todayPhoneSession = if (m.phoneTodayAvgSessionMs > 0L) m.phoneTodayAvgSessionMs else m.phoneCurrentSessionMs
+                if (todayPhoneSession > 0L) {
                     HorizontalDivider(color = ItvLine)
-                    val sfRatioText = m.phoneCurrentShortformRatio?.let { " · 숏폼 ${(it * 100).roundToInt()}%" } ?: ""
+                    val sfRatio = m.phoneTodayShortformRatio ?: m.phoneCurrentShortformRatio
+                    val sfRatioText = sfRatio?.let { " · 숏폼 ${(it * 100).roundToInt()}%" } ?: ""
+                    val todayWeightedPhone = if (m.phoneTodayAvgWeightedSessionMs > 0L) m.phoneTodayAvgWeightedSessionMs else m.phoneCurrentWeightedSessionMs
+                    val countText = if (m.phoneTodaySessionsCount > 0) " (${m.phoneTodaySessionsCount}회 평균)" else ""
                     MetricKeyValueRow(
                         leftLabel = "오늘 휴대폰 세션 (물리 사용)",
-                        leftValue = formatFullDuration(m.phoneCurrentSessionMs),
+                        leftValue = "${formatFullDuration(todayPhoneSession)}$countText",
                         rightLabel = "숏폼 배율(1.0x+1/3x) 환산 세션",
-                        rightValue = "${formatFullDuration(m.phoneCurrentWeightedSessionMs)}$sfRatioText"
+                        rightValue = "${formatFullDuration(todayWeightedPhone)}$sfRatioText"
                     )
                 }
             }
@@ -668,19 +672,22 @@ private fun PersonalizedMetricsContent(m: PersonalizedTargetMetrics, accent: Col
 
             if (m.filter == TargetFilter.PHONE_TOTAL) {
                 PersonalSubCard(title = "3. 오늘 세션 특성 및 숏폼 비중 (휴대폰 전체)", accent = accent) {
-                    val sfRatio = m.phoneCurrentShortformRatio
+                    val sfRatio = m.phoneTodayShortformRatio ?: m.phoneCurrentShortformRatio
                     val sfRatioStr = sfRatio?.let { "${(it * 100).roundToInt()}%" } ?: "—"
+                    val todayAvgSession = if (m.phoneTodayAvgSessionMs > 0L) m.phoneTodayAvgSessionMs else m.currentSessionMs
+                    val todayAvgWeightedSession = if (m.phoneTodayAvgWeightedSessionMs > 0L) m.phoneTodayAvgWeightedSessionMs else m.phoneCurrentWeightedSessionMs
+                    val sessionCount = if (m.phoneTodaySessionsCount > 0) m.phoneTodaySessionsCount else m.todaySessionCount
                     MetricKeyValueRow(
                         leftLabel = "오늘 휴대폰 세션 (물리 사용)",
-                        leftValue = formatFullDuration(m.currentSessionMs),
+                        leftValue = "${formatFullDuration(todayAvgSession)} (${sessionCount}회 평균)",
                         rightLabel = "숏폼 배율(1.0x+1/3x) 환산 세션",
-                        rightValue = formatFullDuration(m.phoneCurrentWeightedSessionMs)
+                        rightValue = formatFullDuration(todayAvgWeightedSession)
                     )
                     MetricKeyValueRow(
                         leftLabel = "오늘 숏폼 시청 비중",
                         leftValue = sfRatioStr,
                         rightLabel = "오늘 휴대폰 세션 횟수",
-                        rightValue = "${m.todaySessionCount}회 (7일 평균 ${String.format(Locale.KOREA, "%.1f", m.avg7dSessionCount)}회/일)"
+                        rightValue = "${sessionCount}회 (7일 평균 ${String.format(Locale.KOREA, "%.1f", m.avg7dSessionCount)}회/일)"
                     )
                 }
             } else {

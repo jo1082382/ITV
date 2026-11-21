@@ -159,7 +159,7 @@ fun PuppyFaceMascot(modifier: Modifier = Modifier) {
     Image(
         painter = painterResource(R.drawable.itv_puppy_face),
         contentDescription = "정면을 바라보는 강아지 얼굴",
-        modifier = modifier.size(104.dp),
+        modifier = modifier,
         contentScale = ContentScale.Fit
     )
 }

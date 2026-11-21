@@ -84,7 +84,8 @@ data class UserCoachingSettings(
     val interventionType: InterventionType = InterventionType.CHARACTER_OVERLAY,
     val coachingIntensity: CoachingIntensity = CoachingIntensity.NORMAL,
     val characterIntensity: CharacterIntensity = CharacterIntensity.NORMAL,
-    val tone: CoachingTone = CoachingTone.SOFT
+    val tone: CoachingTone = CoachingTone.SOFT,
+    val bedtimeCareEnabled: Boolean = true
 ) {
     // 하위 호환성 유지 프로퍼티
     val intensity: CoachingIntensity get() = coachingIntensity

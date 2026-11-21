@@ -10,6 +10,7 @@ import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewOutlineProvider
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.ImageView
@@ -58,6 +59,10 @@ object LongformDiagnosticHud {
     private var layoutParams: WindowManager.LayoutParams? = null
     private var scope: CoroutineScope? = null
 
+    private var collapsedIconImageView: ImageView? = null
+    private var miniIconImageView: ImageView? = null
+    private var defaultAppIconDrawable: android.graphics.drawable.Drawable? = null
+
     private var modeText: TextView? = null
     private var titleText: TextView? = null
     private var basisText: TextView? = null
@@ -70,6 +75,40 @@ object LongformDiagnosticHud {
 
     var isExpanded: Boolean = false
         private set
+
+    var isSleeping: Boolean = false
+        private set
+
+    /**
+     * 야간 연속 사용 예산 초과 시 눈 감은 강아지(수면) 얼굴로 아이콘 및 테마를 전환합니다.
+     */
+    fun setSleepingState(sleeping: Boolean) {
+        isSleeping = sleeping
+        val icon = collapsedIconImageView
+        val mini = miniIconImageView
+        val statusDot = collapsedStatusDotDrawable
+        val border = collapsedBorderDrawable
+        val density = rootContainer?.resources?.displayMetrics?.density ?: 2f
+        if (sleeping) {
+            icon?.setImageResource(R.drawable.itv_motion_sleep)
+            mini?.setImageResource(R.drawable.itv_motion_sleep)
+            val sleepColor = Color.parseColor("#B197FC")
+            statusDot?.setColor(sleepColor)
+            border?.setStroke((2.5f * density).toInt(), sleepColor)
+            if (isExpanded) {
+                modeText?.text = "🌙 취침 권장 시간 초과 (휴식 대기)"
+                modeText?.setTextColor(sleepColor)
+            }
+        } else {
+            if (defaultAppIconDrawable != null) {
+                icon?.setImageDrawable(defaultAppIconDrawable)
+                mini?.setImageDrawable(defaultAppIconDrawable)
+            } else {
+                icon?.setImageResource(R.drawable.itv_puppy_face)
+                mini?.setImageResource(R.drawable.itv_puppy_face)
+            }
+        }
+    }
 
     private fun formatDurationSec(sec: Long): String =
         if (sec >= 60) "${sec / 60}분 ${sec % 60}초" else "${sec}초"
@@ -96,48 +135,87 @@ object LongformDiagnosticHud {
 
         val root = FrameLayout(appCtx).apply {
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+            background = null
+            elevation = 0f
         }
 
         // =========================================================================
-        // 1. 기본 축소 모드 뷰: 우리 앱(ITV) 아이콘 + 상태 테두리 링 + 우하단 상태 점
+        // 1. 기본 축소 모드 뷰: 우리 앱(ITV) 아이콘 + 최상단 외곽 링 + 우하단 상태 점
         // =========================================================================
-        val iconCircleBg = GradientDrawable().apply {
+        val iconBoxBg = GradientDrawable().apply {
             shape = GradientDrawable.OVAL
-            setColor(Color.parseColor("#F21E2226"))
-            setStroke(2.dp(), Color.parseColor("#48C774"))
+            setColor(Color.parseColor("#EAF5EF"))
         }
-        collapsedBorderDrawable = iconCircleBg
 
         val iconBox = FrameLayout(appCtx).apply {
             layoutParams = FrameLayout.LayoutParams(52.dp(), 52.dp())
-            background = iconCircleBg
-            elevation = 10f * dp
-            setPadding(4.dp(), 4.dp(), 4.dp(), 4.dp())
+            background = iconBoxBg
+            elevation = 0f
+            translationZ = 0f
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                outlineAmbientShadowColor = Color.TRANSPARENT
+                outlineSpotShadowColor = Color.TRANSPARENT
+            }
         }
 
         val appIconDrawable = runCatching {
             appCtx.packageManager.getApplicationIcon(appCtx.packageName)
         }.getOrNull()
+        defaultAppIconDrawable = appIconDrawable
 
+        // 1-1. 앱 아이콘 뷰: 원형으로 클리핑하여 테두리 밖으로 번지지 않도록 함
         val iconImage = ImageView(appCtx).apply {
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 Gravity.CENTER
-            )
+            ).apply {
+                val pad = 1.dp()
+                setMargins(pad, pad, pad, pad)
+            }
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.parseColor("#EAF5EF"))
+            }
+            outlineProvider = ViewOutlineProvider.BACKGROUND
+            clipToOutline = true
             scaleType = ImageView.ScaleType.FIT_CENTER
-            if (appIconDrawable != null) {
+            if (isSleeping) {
+                setImageResource(R.drawable.itv_motion_sleep)
+            } else if (appIconDrawable != null) {
                 setImageDrawable(appIconDrawable)
             } else {
                 setImageResource(R.drawable.itv_puppy_face)
             }
         }
+        collapsedIconImageView = iconImage
         iconBox.addView(iconImage)
 
+        // 1-2. 최상단 외곽 테두리 링: 아이콘 배경 위(최상단)에 배치하여 배경에 묻히거나 끊기지 않고 선명한 원형 유지
+        val borderRingBg = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(Color.TRANSPARENT)
+            setStroke((2.5f * dp).toInt(), if (isSleeping) Color.parseColor("#B197FC") else Color.parseColor("#48C774"))
+        }
+        collapsedBorderDrawable = borderRingBg
+
+        val borderRingView = View(appCtx).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+            background = borderRingBg
+            elevation = 0f
+            isClickable = false
+            isFocusable = false
+        }
+        iconBox.addView(borderRingView)
+
+        // 1-3. 우하단 상태 인디케이터 점
         val statusDotBg = GradientDrawable().apply {
             shape = GradientDrawable.OVAL
-            setColor(Color.parseColor("#48C774"))
-            setStroke(1.dp(), Color.parseColor("#16181A"))
+            setColor(if (isSleeping) Color.parseColor("#B197FC") else Color.parseColor("#48C774"))
+            setStroke((1.5f * dp).toInt(), Color.WHITE)
         }
         collapsedStatusDotDrawable = statusDotBg
 
@@ -147,6 +225,9 @@ object LongformDiagnosticHud {
                 bottomMargin = 1.dp()
             }
             background = statusDotBg
+            elevation = 0f
+            isClickable = false
+            isFocusable = false
         }
         iconBox.addView(statusDot)
         collapsedView = iconBox
@@ -178,12 +259,15 @@ object LongformDiagnosticHud {
                 rightMargin = 6.dp()
             }
             scaleType = ImageView.ScaleType.FIT_CENTER
-            if (appIconDrawable != null) {
+            if (isSleeping) {
+                setImageResource(R.drawable.itv_motion_sleep)
+            } else if (appIconDrawable != null) {
                 setImageDrawable(appIconDrawable)
             } else {
                 setImageResource(R.drawable.itv_puppy_face)
             }
         }
+        miniIconImageView = miniIcon
 
         modeText = TextView(appCtx).apply {
             textSize = 12f
@@ -437,35 +521,44 @@ object LongformDiagnosticHud {
         val guardReason = WritingGuard.blockReason()
         val isWritingBlocked = guardReason != null && !guardReason.startsWith("ITV 내부")
 
-        // 먼저 현재 상태의 대표 색상(개입 가능=초록, 전환 대기=노랑, 개입 불가=빨강) 계산 -> 작은 아이콘 테두리/점에도 반영
-        val statusColor = when {
-            fgPkg == JevSettings.INSTAGRAM || ig.isInInstagram -> when {
-                ig.mode == InstagramScreenMode.DM || isWritingBlocked -> Color.parseColor("#FF6B6B")
-                ig.mode == InstagramScreenMode.REELS ||
-                    ig.mode == InstagramScreenMode.COMMENTS ||
-                    ig.mode == InstagramScreenMode.STORY -> Color.parseColor("#FFD166")
-                else -> Color.parseColor("#48C774")
-            }
-            fgPkg == JevSettings.YOUTUBE || (yt.mode != YoutubeWatchMode.BACKGROUND && yt.mode != YoutubeWatchMode.UNKNOWN) -> {
-                val isWatching = yt.mode == YoutubeWatchMode.PORTRAIT_WATCH || yt.mode == YoutubeWatchMode.LANDSCAPE_FULLSCREEN
-                when {
-                    isWritingBlocked -> Color.parseColor("#FF6B6B")
-                    yt.isEndscreenDetected -> Color.parseColor("#48C774")
-                    isWatching || yt.mode == YoutubeWatchMode.SHORTS || yt.mode == YoutubeWatchMode.SHORTS_COMMENTS ->
-                        Color.parseColor("#FFD166")
+        // 먼저 현재 상태의 대표 색상(개입 가능=초록, 전환 대기=노랑, 개입 불가=빨강, 수면=보라) 계산 -> 작은 아이콘 테두리/점에도 반영
+        val statusColor = if (isSleeping) {
+            Color.parseColor("#B197FC")
+        } else {
+            when {
+                fgPkg == JevSettings.INSTAGRAM || ig.isInInstagram -> when {
+                    ig.mode == InstagramScreenMode.DM || isWritingBlocked -> Color.parseColor("#FF6B6B")
+                    ig.mode == InstagramScreenMode.REELS ||
+                        ig.mode == InstagramScreenMode.COMMENTS ||
+                        ig.mode == InstagramScreenMode.STORY -> Color.parseColor("#FFD166")
                     else -> Color.parseColor("#48C774")
                 }
-            }
-            else -> when (gen.eligibility) {
-                InterventionEligibility.ELIGIBLE -> Color.parseColor("#48C774")
-                InterventionEligibility.WAIT_FOR_TRANSITION -> Color.parseColor("#FFD166")
-                InterventionEligibility.BLOCKED -> Color.parseColor("#FF6B6B")
+                fgPkg == JevSettings.YOUTUBE || (yt.mode != YoutubeWatchMode.BACKGROUND && yt.mode != YoutubeWatchMode.UNKNOWN) -> {
+                    val isWatching = yt.mode == YoutubeWatchMode.PORTRAIT_WATCH || yt.mode == YoutubeWatchMode.LANDSCAPE_FULLSCREEN
+                    when {
+                        isWritingBlocked -> Color.parseColor("#FF6B6B")
+                        yt.isEndscreenDetected -> Color.parseColor("#48C774")
+                        isWatching || yt.mode == YoutubeWatchMode.SHORTS || yt.mode == YoutubeWatchMode.SHORTS_COMMENTS ->
+                            Color.parseColor("#FFD166")
+                        else -> Color.parseColor("#48C774")
+                    }
+                }
+                else -> when (gen.eligibility) {
+                    InterventionEligibility.ELIGIBLE -> Color.parseColor("#48C774")
+                    InterventionEligibility.WAIT_FOR_TRANSITION -> Color.parseColor("#FFD166")
+                    InterventionEligibility.BLOCKED -> Color.parseColor("#FF6B6B")
+                }
             }
         }
 
         val dp = appCtx.resources.displayMetrics.density
-        collapsedBorderDrawable?.setStroke((2f * dp).toInt(), statusColor)
+        collapsedBorderDrawable?.setStroke((2.5f * dp).toInt(), statusColor)
         collapsedStatusDotDrawable?.setColor(statusColor)
+
+        if (isSleeping) {
+            collapsedIconImageView?.setImageResource(R.drawable.itv_motion_sleep)
+            miniIconImageView?.setImageResource(R.drawable.itv_motion_sleep)
+        }
 
         // 아이콘으로 접혀 있는 상태라면 텍스트 뷰 렌더링 생략 (배터리 절약)
         if (!isExpanded) return
@@ -694,6 +787,10 @@ object LongformDiagnosticHud {
         collapsedView = null
         collapsedBorderDrawable = null
         collapsedStatusDotDrawable = null
+        collapsedIconImageView = null
+        miniIconImageView = null
+        defaultAppIconDrawable = null
+        isSleeping = false
         expandedView = null
         layoutParams = null
         windowManager = null

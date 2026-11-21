@@ -4,7 +4,14 @@ import com.example.itv.domain.goals.HomeGoalRow
 
 import com.example.itv.presentation.usage.UsageRecordsContent
 import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
+import android.widget.Toast
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.example.itv.MainActivity
 import com.example.itv.presentation.auth.AccountSettingsScreen
 import com.example.itv.presentation.coaching.CoachingSettingsScreen
@@ -121,6 +128,65 @@ fun ItvMainScreen(
                                 style = MaterialTheme.typography.labelMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = if (isDark) Color(0xFFFFD54F) else ItvGreen
+                            )
+                        }
+                    }
+
+                    // 홈 화면 중앙: 실시간 플로팅 HUD 키기 버튼 (야간모드 및 설정 버튼과 동일한 64dp 크기)
+                    var isHudShowing by remember {
+                        mutableStateOf(com.example.itv.presentation.coaching.LongformDiagnosticHud.isShowing)
+                    }
+                    val lifecycleOwner = LocalLifecycleOwner.current
+                    DisposableEffect(lifecycleOwner) {
+                        val observer = LifecycleEventObserver { _, event ->
+                            if (event == Lifecycle.Event.ON_RESUME) {
+                                isHudShowing = com.example.itv.presentation.coaching.LongformDiagnosticHud.isShowing
+                            }
+                        }
+                        lifecycleOwner.lifecycle.addObserver(observer)
+                        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+                    }
+
+                    Surface(
+                        onClick = {
+                            if (isHudShowing) {
+                                com.example.itv.presentation.coaching.LongformDiagnosticHud.hide()
+                                isHudShowing = false
+                            } else {
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(context)) {
+                                    Toast.makeText(context, "다른 앱 위에 표시 권한을 허용해주세요.", Toast.LENGTH_SHORT).show()
+                                    val intent = Intent(
+                                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                        Uri.parse("package:${context.packageName}")
+                                    )
+                                    context.startActivity(intent)
+                                } else {
+                                    val success = com.example.itv.presentation.coaching.LongformDiagnosticHud.show(context)
+                                    if (success) {
+                                        isHudShowing = true
+                                        Toast.makeText(context, "실시간 플로팅 HUD가 활성화되었습니다.", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            }
+                        },
+                        modifier = Modifier.size(64.dp),
+                        shape = RoundedCornerShape(18.dp),
+                        color = if (isHudShowing) ItvGreen.copy(alpha = 0.15f) else ItvMint,
+                        contentColor = if (isHudShowing) ItvGreen else MaterialTheme.colorScheme.onSurfaceVariant,
+                        border = BorderStroke(if (isHudShowing) 1.5.dp else 1.dp, if (isHudShowing) ItvGreen else ItvLine)
+                    ) {
+                        Column(
+                            Modifier.fillMaxSize(),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            PuppyFaceMascot(Modifier.size(28.dp))
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                if (isHudShowing) "HUD ON" else "HUD",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isHudShowing) ItvGreen else MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }

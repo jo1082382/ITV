@@ -6,9 +6,17 @@ import com.example.itv.domain.coaching.*
 internal class TestMissionController(private val journal: CoachingJournal,
     private val history: MissionHistory, private val scheduler: MissionScheduler) {
     val state = TestRestMission()
-    fun begin(id: String, now: Long, isJev: Boolean = false, requireFacedown: Boolean = false, isStrong: Boolean = false) {
+    fun begin(
+        id: String,
+        now: Long,
+        isJev: Boolean = false,
+        requireFacedown: Boolean = false,
+        isStrong: Boolean = false,
+        continuousUsedMs: Long = 0L,
+        customRestMs: Long? = null
+    ) {
         val startMs = TestCoachingPolicy.missionStartMs(isJev)
-        val restMs = TestCoachingPolicy.restMs(isJev)
+        val restMs = customRestMs ?: TestCoachingPolicy.calculateRestMs(isJev, continuousUsedMs)
         journal.structured(id,"MISSION_REQUESTED")
         state.begin(id, now, startMs, restMs, requireFacedown, isStrong); history.begin(id)
         scheduler.cancelStartTimeout(); scheduler.scheduleStartTimeout(startMs)
@@ -30,6 +38,16 @@ internal class TestMissionController(private val journal: CoachingJournal,
         history.finish(id, "failed")
         journal.add(id, "미션 실패 · 쉬기 선택 후 ${startSec}초 안에 화면 꺼짐 미관측")
         scheduler.cancelStartTimeout(); state.failStart()
+    }
+    fun failResume() {
+        val id = state.id ?: return
+        if (state.pending) return
+        val remSec = (state.remainingRestMs + 999L) / 1000L
+        journal.structured(id, "RESUME_NOT_OBSERVED")
+        history.finish(id, "failed")
+        journal.add(id, "미션 실패 · 10초 내 화면 꺼짐 미관측 (남은 휴식: ${remSec}초)")
+        scheduler.cancelStartTimeout()
+        state.clear()
     }
     fun screenOff(now: Long) {
         if (state.id == null || state.pending || state.offAt != null) return
@@ -53,8 +71,10 @@ internal class TestMissionController(private val journal: CoachingJournal,
                 journal.add(id, "휴식 미션 완료 · $successDesc")
             }
             com.example.itv.domain.coaching.TestMissionWake.INCOMPLETE -> {
+                val accSec = state.accumulatedRestMs / 1000L
+                val remSec = (state.remainingRestMs + 999L) / 1000L
                 val reason = if (state.requireFacedown && !isFacedownObserved) "스마트폰 엎어두기 미유지" else "${duration / 1000}초 후 화면 켜짐"
-                journal.add(id, "휴식 미완료 · $reason / 다시 ${restSec}초 필요")
+                journal.add(id, "휴식 일시정지 · $reason (${accSec}초 인정 / 남은 시간 ${remSec}초)")
             }
             com.example.itv.domain.coaching.TestMissionWake.NONE -> Unit
         }

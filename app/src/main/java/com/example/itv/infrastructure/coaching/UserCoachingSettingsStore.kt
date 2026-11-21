@@ -42,11 +42,14 @@ class UserCoachingSettingsStore(context: Context) {
             CoachingTone.valueOf(toneStr ?: CoachingTone.SOFT.name)
         }.getOrDefault(CoachingTone.SOFT)
 
+        val bedtimeCareEnabled = prefs.getBoolean(KEY_BEDTIME_CARE_ENABLED, true)
+
         return UserCoachingSettings(
             interventionType = interventionType,
             coachingIntensity = coachingIntensity,
             characterIntensity = characterIntensity,
-            tone = tone
+            tone = tone,
+            bedtimeCareEnabled = bedtimeCareEnabled
         )
     }
 
@@ -72,12 +75,18 @@ class UserCoachingSettingsStore(context: Context) {
         _settings.value = _settings.value.copy(tone = tone)
     }
 
+    fun updateBedtimeCareEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_BEDTIME_CARE_ENABLED, enabled).apply()
+        _settings.value = _settings.value.copy(bedtimeCareEnabled = enabled)
+    }
+
     companion object {
         private const val PREFS_NAME = "user_coaching_settings_prefs"
         private const val KEY_INTERVENTION_TYPE = "key_intervention_type"
         private const val KEY_COACHING_INTENSITY = "key_coaching_intensity"
         private const val KEY_CHARACTER_INTENSITY = "key_character_intensity"
         private const val KEY_TONE = "key_tone"
+        private const val KEY_BEDTIME_CARE_ENABLED = "key_bedtime_care_enabled"
 
         @Volatile
         private var instance: UserCoachingSettingsStore? = null

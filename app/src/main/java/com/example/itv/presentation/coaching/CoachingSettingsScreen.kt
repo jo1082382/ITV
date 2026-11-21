@@ -138,8 +138,11 @@ fun CoachingSettingsScreen(
 
             HorizontalDivider(color = ItvLine.copy(alpha = 0.6f))
 
-            // 6. 야간 3분기 케어 & 캐릭터 미리보기
-            NightCarePreviewSection()
+            // 6. 취침 개입 (취침 3분기 케어 On/Off)
+            BedtimeCareSection(
+                enabled = settings.bedtimeCareEnabled,
+                onToggle = { store.updateBedtimeCareEnabled(it) }
+            )
 
             Spacer(modifier = Modifier.height(16.dp))
         }
@@ -147,8 +150,61 @@ fun CoachingSettingsScreen(
 }
 
 @Composable
-private fun NightCarePreviewSection() {
+private fun BedtimeCareSection(
+    enabled: Boolean,
+    onToggle: (Boolean) -> Unit
+) {
     val context = LocalContext.current
+    var showHelpDialog by remember { mutableStateOf(false) }
+
+    if (showHelpDialog) {
+        AlertDialog(
+            onDismissRequest = { showHelpDialog = false },
+            title = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("🌙", fontSize = 20.sp)
+                    Text("취침 개입 안내", fontWeight = FontWeight.Bold, color = ItvGreen)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        "어두운 암실이나 야간 취침 시간대에 스마트폰 또는 숏폼을 시청할 때, 수면을 방해하지 않고 자연스럽게 잠자리에 들 수 있도록 돕는 3단계 수면 케어입니다.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        border = BorderStroke(1.dp, ItvLine)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text("🌙 3대 취침 케어 구성", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelLarge, color = ItvGreen)
+                            Text("1. 마음 비우기 노트: 잠들기 전 잡념이나 할 일을 메모하여 도파민 및 뇌 각성 완화", style = MaterialTheme.typography.bodySmall)
+                            Text("2. 화면 흑백 전환: 화려한 색채 자극을 줄여 눈 피로 완화 및 빠른 취침 유도", style = MaterialTheme.typography.bodySmall)
+                            Text("3. 수면 ASMR: 편안한 빗소리·백색소음으로 뇌파 안정", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    Text(
+                        "※ 스위치를 끄면 야간 시간대에도 취침 3분기 케어 대신 일반 휴식 코칭 미션이 제공됩니다.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showHelpDialog = false }) {
+                    Text("확인", fontWeight = FontWeight.Bold, color = ItvGreen)
+                }
+            }
+        )
+    }
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
@@ -157,25 +213,46 @@ private fun NightCarePreviewSection() {
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Row(
+                modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Text("🌙", fontSize = 18.sp)
-                Text(
-                    text = "야간 수면 케어 & 캐릭터 미리보기",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = ItvGreen
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("🌙", fontSize = 18.sp)
+                    Text(
+                        text = "취침 개입",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = ItvGreen
+                    )
+                    Surface(
+                        onClick = { showHelpDialog = true },
+                        shape = CircleShape,
+                        color = ItvMint,
+                        border = BorderStroke(1.dp, ItvLine),
+                        modifier = Modifier.size(24.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text("?", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = ItvGreen)
+                        }
+                    }
+                }
+                Switch(
+                    checked = enabled,
+                    onCheckedChange = onToggle,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color.White,
+                        checkedTrackColor = ItvGreen
+                    )
                 )
             }
-            Text(
-                text = "어두운 암실에서 숏폼 진입 시 발동되는 3대 수면 케어(마음 비우기 노트, 흑백 모드, ASMR)와 강아지 개입 모션을 미리 테스트해볼 수 있습니다.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)

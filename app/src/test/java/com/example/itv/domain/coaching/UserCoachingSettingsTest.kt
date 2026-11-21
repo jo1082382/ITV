@@ -13,6 +13,7 @@ class UserCoachingSettingsTest {
         assertEquals(CoachingIntensity.NORMAL, settings.coachingIntensity)
         assertEquals(CharacterIntensity.NORMAL, settings.characterIntensity)
         assertEquals(CoachingTone.SOFT, settings.tone)
+        assertEquals(true, settings.bedtimeCareEnabled)
     }
 
     @Test

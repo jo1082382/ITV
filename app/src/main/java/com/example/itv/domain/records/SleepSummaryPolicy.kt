@@ -25,17 +25,41 @@ internal object SleepSummaryPolicy {
     )
 
     /**
-     * 사용자가 직접 확인(수면 시간 선택 또는 직접 입력)한 유효 수면 기록들을 모아
-     * 평소 추정 취침 시각(시작 시각 평균, 종료 시각 평균, 평균 수면 길이)을 계산합니다.
+     * 사용자가 직접 확인(수면 시간 선택 또는 직접 입력)한 유효 수면 기록 또는
+     * 비사용 기간이 길어 취침 추정 시각 후보가 하나뿐인 날의 기록을 자동으로 모아
+     * 평소 추정 취침 시각(시작 시각 평균, 종료 시각 평균, 총 평균 수면 길이)을 계산합니다.
      */
     fun estimateBedtimeWindow(
         confirmations: Map<String, SleepConfirmation>,
+        candidates: List<NightSegment> = emptyList(),
         zone: ZoneId = ZoneId.systemDefault()
     ): EstimatedBedtimeWindow? {
-        val validConfirmations = confirmations.values.filter {
-            it.choice == "SLEEP" && it.startMs != null && it.endMs != null && it.startMs < it.endMs
+        val allDates = (confirmations.keys + candidates.map { it.wakeDate.toString() }).distinct()
+
+        val validSegments = mutableListOf<Pair<Long, Long>>() // startMs to endMs
+
+        for (dateStr in allDates) {
+            val conf = confirmations[dateStr]
+            if (conf != null) {
+                // 사용자가 직접 확인한 날
+                if (conf.choice == "SLEEP" && conf.startMs != null && conf.endMs != null && conf.startMs < conf.endMs) {
+                    validSegments.add(conf.startMs to conf.endMs)
+                }
+                // conf.choice == "NOT_SLEEP"인 경우 수면 아님으로 명시했으므로 제외
+            } else {
+                // 사용자가 아직 선택하지 않은 날: 비사용 기간이 길어 취침 추정 시각 후보가 하나뿐인 경우는 자동으로 반영
+                val date = try { LocalDate.parse(dateStr) } catch (_: Exception) { null }
+                if (date != null) {
+                    val dayCandidates = candidates.filter { it.wakeDate == date && it.end != null && it.start < it.end }
+                    if (dayCandidates.size == 1) {
+                        val single = dayCandidates.first()
+                        validSegments.add(single.start to single.end!!)
+                    }
+                }
+            }
         }
-        if (validConfirmations.isEmpty()) return null
+
+        if (validSegments.isEmpty()) return null
 
         fun circularAverageMinute(epochList: List<Long>): Pair<Int, Int> {
             var sumSin = 0.0
@@ -53,12 +77,12 @@ internal object SleepSummaryPolicy {
             return (avgMinuteOfDay / 60).toInt() to (avgMinuteOfDay % 60).toInt()
         }
 
-        val (startH, startM) = circularAverageMinute(validConfirmations.map { it.startMs!! })
-        val (endH, endM) = circularAverageMinute(validConfirmations.map { it.endMs!! })
-        val avgDuration = validConfirmations.map { (it.endMs!! - it.startMs!!) / 60000L }.average().toLong()
+        val (startH, startM) = circularAverageMinute(validSegments.map { it.first })
+        val (endH, endM) = circularAverageMinute(validSegments.map { it.second })
+        val avgDuration = validSegments.map { (it.second - it.first) / 60000L }.average().toLong()
 
         return EstimatedBedtimeWindow(
-            validCount = validConfirmations.size,
+            validCount = validSegments.size,
             avgStartHour = startH,
             avgStartMinute = startM,
             avgEndHour = endH,

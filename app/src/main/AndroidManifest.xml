@@ -39,7 +39,11 @@
             android:name=".presentation.usage.UsageReportActivity"
             android:exported="false" />
 
-        <activity android:name=".presentation.character.CompanionPreviewActivity" android:exported="false" />
+        <activity
+            android:name=".presentation.character.CompanionPreviewActivity"
+            android:exported="false"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true" />
 
         <activity
             android:name=".MainActivity"

@@ -289,5 +289,60 @@ class CoachingIntegrationTest {
         assertTrue("롱폼 종료/전환 대기 플래그(waitingTransition)가 활성화되어야 함", coordinator.waitingTransition)
         assertTrue(statuses.last().contains("롱폼 영상 종료/전환을 기다리는 중"))
     }
+
+    @Test fun missionAccumulatesRestAcrossPrematureWakeAndCompletesWhenTotalMet() {
+        val journal = Journal()
+        val outcomes = mutableListOf<String>()
+        val mission = TestMissionController(journal, object : MissionHistory {
+            override fun begin(id: String) {}
+            override fun finish(id: String, result: String) { outcomes.add(result) }
+        }, object : MissionScheduler {
+            override fun cancelStartTimeout() {}
+            override fun scheduleStartTimeout(delayMs: Long) {}
+        })
+        // 15초(15,000ms) 목표 휴식 미션 시작
+        mission.begin("accum-id", 0L, isJev = false, customRestMs = 15_000L)
+        assertEquals(15_000L, mission.state.requiredRestMs)
+
+        // 1초에 화면 끄기 -> 7초에 의도치 않게 화면 켜짐 (6초 휴식 인정)
+        mission.screenOff(1000L)
+        val wake1 = mission.screenOn(7000L)
+        assertEquals(com.example.itv.domain.coaching.TestMissionWake.INCOMPLETE, wake1)
+        assertEquals(6000L, mission.state.accumulatedRestMs)
+        assertEquals(9000L, mission.state.remainingRestMs)
+        assertTrue(outcomes.isEmpty()) // 아직 실패나 성공 아님
+
+        // 10초에 다시 화면 끄고 휴식 이어하기 -> 19초에 화면 켜짐 (9초 추가 휴식 -> 총 15초 달성)
+        mission.screenOff(10_000L)
+        val wake2 = mission.screenOn(19_000L)
+        assertEquals(com.example.itv.domain.coaching.TestMissionWake.SUCCESS, wake2)
+        assertEquals(15_000L, mission.state.accumulatedRestMs)
+        assertEquals(0L, mission.state.remainingRestMs)
+        assertEquals(listOf("success"), outcomes)
+        assertTrue(mission.state.pending)
+    }
+
+    @Test fun missionFailsWhenResumeTimeoutOccurs() {
+        val journal = Journal()
+        val outcomes = mutableListOf<String>()
+        val mission = TestMissionController(journal, object : MissionHistory {
+            override fun begin(id: String) {}
+            override fun finish(id: String, result: String) { outcomes.add(result) }
+        }, object : MissionScheduler {
+            override fun cancelStartTimeout() {}
+            override fun scheduleStartTimeout(delayMs: Long) {}
+        })
+        mission.begin("fail-resume-id", 0L, isJev = false, customRestMs = 15_000L)
+        mission.screenOff(1000L)
+        val wake = mission.screenOn(6000L) // 5초 휴식 후 켜짐
+        assertEquals(com.example.itv.domain.coaching.TestMissionWake.INCOMPLETE, wake)
+        assertEquals(5000L, mission.state.accumulatedRestMs)
+
+        // 10초 동안 화면 끄기 미수행으로 재개 타임아웃 발생
+        mission.failResume()
+        assertEquals(listOf("failed"), outcomes)
+        assertNull(mission.state.id)
+        assertEquals(0L, mission.state.accumulatedRestMs)
+    }
 }
 

@@ -32,6 +32,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.LocalDate
 import java.time.LocalTime
+import java.time.ZoneId
 
 enum class BedtimePhase {
     ACTIVE_HOURS,   // 평소 취침 시간과 먼 일상 활동 시간대
@@ -264,7 +265,14 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
                 val dates = (0L..30L).map { today.minusDays(it).toString() }
                 val confirmationStore = com.example.itv.infrastructure.records.RoomSleepConfirmationStore(db, "demo-guest")
                 val confirmations = dates.mapNotNull { d -> confirmationStore.read(d)?.let { d to it } }.toMap()
-                val window = com.example.itv.domain.records.SleepSummaryPolicy.estimateBedtimeWindow(confirmations)
+                val nightReport = try {
+                    com.example.itv.composition.queryNightReport(appContext, 30)
+                } catch (_: Exception) { null }
+                val window = com.example.itv.domain.records.SleepSummaryPolicy.estimateBedtimeWindow(
+                    confirmations = confirmations,
+                    candidates = nightReport?.candidates.orEmpty(),
+                    zone = nightReport?.zone ?: ZoneId.systemDefault()
+                )
 
                 var h: Int? = null
                 var m: Int? = null
@@ -273,7 +281,7 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
                 if (window != null) {
                     h = window.avgStartHour
                     m = window.avgStartMinute
-                    src = "수면 확인 기록 (${window.validCount}일 평균)"
+                    src = "수면 추정/확인 기록 (${window.validCount}일 평균)"
                 } else {
                     val goal = db.dao().goal("demo-guest", "BEDTIME")
                     val goalDetail = goal?.goalId?.let { db.dao().bedtimeGoal(it) }
@@ -393,58 +401,91 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         isSensorsRegistered = false
     }
 
+    var onFacedownDetectedWhileScreenOn: (() -> Unit)? = null
+
     fun currentPosture(): com.example.itv.domain.coaching.UserPosture = _snapshot.value.posture
+
+    private var facedownOnscreenStartTime = 0L
+    private var facedownTickerJob: Job? = null
 
     fun isFacedown(): Boolean {
         val gz = currentGz ?: _snapshot.value.gravityZ ?: return false
         val gy = currentGy ?: 0f
         val gx = currentGx ?: 0f
 
-        val isNear = _snapshot.value.isNear
+        val prox = currentProximity ?: _snapshot.value.proximityDistanceCm
+        val maxRange = proximitySensor?.maximumRange ?: 5f
+        val hasProximitySensor = proximitySensor != null
+        val isNear = if (hasProximitySensor && prox != null) (prox < maxRange || prox == 0f) else _snapshot.value.isNear
         val lux = currentLux ?: _snapshot.value.lux
         val screenInteractive = powerManager?.isInteractive ?: isScreenOn
-        val isPitchBlack = lux != null && lux <= 2.5f
 
+        // 울퉁불퉁한 바닥(침대, 소파, 카펫)이나 두꺼운 케이스(카드 수납, 링, 카툭튀, 돌출 턱)로 인해
+        // 완전 밀착되지 않아 빛이 새어 들어오거나 기울어져 있어도 화면이 아래를 향해 엎어져 있다면 안정적으로 감지
         // 1. 화면이 꺼져 있는 경우 (휴식 미션 실행 중):
-        // 화면이 바닥 방향(Z축 음수)을 향하고 있는지 확인.
-        // 울퉁불퉁한 바닥(침대, 소파, 카펫)이나 두꺼운 케이스(카드 수납, 링, 카툭튀)로 인해 기울어져 있어도
-        // 화면이 아래를 향해 엎어져 있다면 안정적으로 감지 (gz <= -3.8f 허용)
         if (!screenInteractive) {
-            // (a) 물리적 각도: Z축이 아래를 확실히 향함 (기울기 최대 약 67도까지 허용)
-            val isAngleFacedown = gz <= -3.8f && abs(gy) < 9.0f && abs(gx) < 9.0f
-            // (b) 센서 보조: 근접 센서 감지 또는 조도 차단 상태에서 화면이 아래를 향함 (gz <= -2.2f)
-            val isSensorAssisted = (isNear || isPitchBlack) && gz <= -2.2f
-            return isAngleFacedown || isSensorAssisted
+            val isAngleFacedown = gz <= -2.5f && abs(gy) < 9.5f && abs(gx) < 9.5f
+            val isRestingOrDark = isNear || isCurrentlyStationary || (lux != null && lux <= 35f)
+            return isAngleFacedown && isRestingOrDark
         }
 
-        // 2. 화면이 켜져 있는 경우: 근접 센서가 가려졌거나 조도가 차단된 상태에서 엎어진 각도
-        if (isNear && (isPitchBlack || gz < -4.0f)) return true
+        // 2. 화면이 켜져 있는 경우 (바닥에 엎어두면 자동 화면 끄기용):
+        // 누워서 폰을 위로 든 채로 볼 때(천장을 향해 누워서 폰을 위로 든 상태)는 손 떨림(isCurrentlyStationary == false) 및
+        // 허공(isNear == false) 상태이므로 화면이 꺼지지 않음!
+        val isAngleFacedown = gz <= -3.0f && abs(gy) < 9.0f && abs(gx) < 9.0f
 
-        // 3. 조도가 차단되고 책상/바닥에 엎어둔 경우
-        if (isPitchBlack && gz <= -4.0f && abs(gy) < 8.5f) return true
+        // (1) 근접 센서 감지: 화면 밀착 감지 (화면 반사광 최대 80 lux까지 허용)
+        val nearFacedown = isNear && isAngleFacedown && (lux == null || lux <= 80f)
 
-        return false
+        // (2) 케이스 돌출 턱, 카툭튀, 울퉁불퉁한 침구류(이불/매트리스) 또는 가상 근접 센서로 인해 근접 센서(isNear)가 반응하지 못한 경우:
+        // 손을 떼고 바닥/침대에 거치된 정지 상태(isCurrentlyStationary)와 하향 각도(gz <= -4.8f), 차광 상태를 결합
+        val stationaryFacedown = isCurrentlyStationary && gz <= -4.8f && abs(gy) < 8.5f && abs(gx) < 8.5f && (lux == null || lux <= 60f)
+
+        // (3) 완전 수평에 가깝게 바닥에 엎어둔 경우 (각도가 수평 -6.5 이하이면서 주변 조도가 차단된 상태)
+        val flatFacedown = gz <= -6.5f && abs(gy) < 6.0f && abs(gx) < 6.0f && (lux == null || lux <= 40f)
+
+        return nearFacedown || stationaryFacedown || flatFacedown
     }
 
     fun startFacedownMonitoring() {
         facedownMonitoring = true
         facedownObserved = false
         facedownAccumulatedMs = 0L
+        facedownOnscreenStartTime = 0L
         lastFacedownSampleAt = android.os.SystemClock.elapsedRealtime()
         lastSampleWasFacedown = !(powerManager?.isInteractive ?: isScreenOn) && isFacedown()
         startSensors()
+        facedownTickerJob?.cancel()
+        facedownTickerJob = scope.launch {
+            while (isActive && facedownMonitoring) {
+                checkFacedownProgress(android.os.SystemClock.elapsedRealtime())
+                delay(80L)
+            }
+        }
     }
 
     fun onMissionScreenOff() {
         facedownMonitoring = true
         facedownObserved = false
         facedownAccumulatedMs = 0L
+        facedownOnscreenStartTime = 0L
         lastFacedownSampleAt = android.os.SystemClock.elapsedRealtime()
         lastSampleWasFacedown = isFacedown()
         startSensors()
+        facedownTickerJob?.cancel()
+        facedownTickerJob = scope.launch {
+            while (isActive && facedownMonitoring) {
+                checkFacedownProgress(android.os.SystemClock.elapsedRealtime())
+                delay(80L)
+            }
+        }
     }
 
     fun stopFacedownMonitoring(): Boolean {
+        facedownTickerJob?.cancel()
+        facedownTickerJob = null
+        onFacedownDetectedWhileScreenOn = null
+        facedownOnscreenStartTime = 0L
         val now = android.os.SystemClock.elapsedRealtime()
         if (facedownMonitoring && lastSampleWasFacedown && isFacedown() && lastFacedownSampleAt > 0L) {
             val dt = (now - lastFacedownSampleAt).coerceIn(0L, 5000L)
@@ -461,15 +502,51 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         return wasFacedown
     }
 
+    private fun checkFacedownProgress(now: Long) {
+        if (!facedownMonitoring) return
+        val screenOff = !(powerManager?.isInteractive ?: isScreenOn)
+        if (!screenOff) {
+            if (isFacedown()) {
+                if (facedownOnscreenStartTime == 0L) {
+                    facedownOnscreenStartTime = now
+                } else if (now - facedownOnscreenStartTime >= 300L) {
+                    onFacedownDetectedWhileScreenOn?.invoke()
+                    facedownOnscreenStartTime = 0L
+                }
+            } else {
+                facedownOnscreenStartTime = 0L
+            }
+        } else {
+            facedownOnscreenStartTime = 0L
+            val currentlyFacedown = isFacedown()
+            if (currentlyFacedown) {
+                val dt = if (lastFacedownSampleAt > 0L && lastSampleWasFacedown) {
+                    (now - lastFacedownSampleAt).coerceIn(0L, 5000L)
+                } else {
+                    60L
+                }
+                facedownAccumulatedMs += dt
+                if (facedownAccumulatedMs >= 3_000L) {
+                    facedownObserved = true
+                }
+            }
+            lastSampleWasFacedown = currentlyFacedown
+            lastFacedownSampleAt = now
+        }
+    }
+
     override fun onSensorChanged(event: SensorEvent?) {
         val isContinuous = continuousPostureClients > 0
+        val now = android.os.SystemClock.elapsedRealtime()
         when (event?.sensor?.type) {
             Sensor.TYPE_LIGHT -> {
                 currentLux = event.values.firstOrNull()
+                checkFacedownProgress(now)
                 update(force = isContinuous, isSampling = true, triggerReason = if (isContinuous) "실시간 조도 갱신" else _snapshot.value.lastTriggerReason)
             }
             Sensor.TYPE_PROXIMITY -> {
                 currentProximity = event.values.firstOrNull()
+                checkFacedownProgress(now)
                 update(force = isContinuous, isSampling = true, triggerReason = if (isContinuous) "실시간 근접 갱신" else _snapshot.value.lastTriggerReason)
             }
             Sensor.TYPE_GRAVITY, Sensor.TYPE_ACCELEROMETER -> {
@@ -482,24 +559,7 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
                 if (gx != null && gy != null && gz != null) {
                     trackMotion(gx, gy, gz)
                 }
-                if (facedownMonitoring) {
-                    val now = android.os.SystemClock.elapsedRealtime()
-                    val screenOff = !(powerManager?.isInteractive ?: isScreenOn)
-                    val currentlyFacedown = screenOff && isFacedown()
-                    if (currentlyFacedown) {
-                        val dt = if (lastFacedownSampleAt > 0L && lastSampleWasFacedown) {
-                            (now - lastFacedownSampleAt).coerceIn(0L, 5000L)
-                        } else {
-                            60L
-                        }
-                        facedownAccumulatedMs += dt
-                        if (facedownAccumulatedMs >= 3_000L) {
-                            facedownObserved = true
-                        }
-                    }
-                    lastSampleWasFacedown = currentlyFacedown
-                    lastFacedownSampleAt = now
-                }
+                checkFacedownProgress(now)
                 update(force = isContinuous, isSampling = true, triggerReason = if (isContinuous) "실시간 자세 감지" else _snapshot.value.lastTriggerReason)
             }
         }

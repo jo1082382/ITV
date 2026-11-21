@@ -77,7 +77,7 @@ private fun JevTestScreen(vm: JevTestViewModel,onBack: ()->Unit,modifier: Modifi
         Text("Jev 공동 테스트",Modifier.padding(horizontal=20.dp),style=MaterialTheme.typography.headlineSmall,
             fontWeight=FontWeight.Bold,color=ItvGreen)
         PrimaryScrollableTabRow(selectedTabIndex=page,edgePadding=12.dp) {
-            listOf("연결","판단 설정","개입 기록","실시간 측정 테스트","파지 각도·목 부담 감지","유튜브 롱폼 감지").forEachIndexed { i,title ->
+            listOf("연결","판단 설정","개입 기록","실시간 측정 테스트","파지 각도·목 부담 감지").forEachIndexed { i,title ->
                 Tab(selected=page==i,onClick={page=i},text={Text(title)})
             }
         }
@@ -93,8 +93,7 @@ private fun JevTestScreen(vm: JevTestViewModel,onBack: ()->Unit,modifier: Modifi
                     1 -> SettingsPage(vm,s,busy)
                     2 -> InterventionHistoryPage()
                     3 -> ObservationTestPage(vm,busy)
-                    4 -> PostureTestPage(busy)
-                    else -> LongformObservationPage()
+                    else -> PostureTestPage(busy)
                 }
             }
         }
@@ -721,10 +720,11 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
                     label = "소프트 맥락 (배터리·네트워크)",
                     value = "$chargingText · $wifiText"
                 )
+                val bedtimeCareEnabled = com.example.itv.infrastructure.coaching.UserCoachingSettingsStore.getInstance(context).loadSettings().bedtimeCareEnabled
                 CompactCheckRow(
                     label = "숏폼 진입 시 동작",
-                    value = if (isCandidate) "취침 3분기 케어(마음비우기/흑백모드/ASMR) 화면 발동" else "일반 숏폼 피로도/과열 개입 모델 적용",
-                    highlight = isCandidate
+                    value = if (isCandidate && bedtimeCareEnabled) "취침 3분기 케어(마음비우기/흑백모드/ASMR) 화면 발동" else if (isCandidate) "취침 후보 시간대이나 취침 개입 설정 OFF (일반 모델 적용)" else "일반 숏폼 피로도/과열 개입 모델 적용",
+                    highlight = isCandidate && bedtimeCareEnabled
                 )
             }
 
@@ -1381,6 +1381,35 @@ private fun LongformObservationPage() {
             )
         ) {
             Text(if (hudShowing) "실시간 플로팅 HUD 끄기" else "통합 실시간 플로팅 HUD 켜기", fontWeight = FontWeight.Bold)
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Button(
+                onClick = {
+                    com.example.itv.presentation.sleep.NightGentleAlertController.showGentleBanner(context, isTestMode = true)
+                },
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.buttonColors(containerColor = androidx.compose.ui.graphics.Color(0xFF4F46E5))
+            ) {
+                Text("🌙 비침해 배너(30초)", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+            Button(
+                onClick = {
+                    val hud = com.example.itv.presentation.coaching.LongformDiagnosticHud
+                    if (!hud.isShowing) {
+                        hud.show(context)
+                        hudShowing = true
+                    }
+                    hud.setSleepingState(!hud.isSleeping)
+                },
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.buttonColors(containerColor = androidx.compose.ui.graphics.Color(0xFF7C3AED))
+            ) {
+                Text("💤 HUD 수면 토글", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
         }
 
         Surface(

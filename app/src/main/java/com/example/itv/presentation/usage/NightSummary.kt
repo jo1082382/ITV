@@ -63,8 +63,12 @@ internal fun NightSummary(report: NightReport?, error: String?, days: Int) {
         containerColor = RecordContentGreen, contentColor = cardContentColor)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("수면 길이 · 사용자 확인 우선", style = MaterialTheme.typography.titleLarge)
-            val bedtimeEstimate = remember(confirmations, report?.zone) {
-                SleepSummaryPolicy.estimateBedtimeWindow(confirmations, report?.zone ?: ZoneId.systemDefault())
+            val bedtimeEstimate = remember(confirmations, report?.candidates, report?.zone) {
+                SleepSummaryPolicy.estimateBedtimeWindow(
+                    confirmations = confirmations,
+                    candidates = report?.candidates.orEmpty(),
+                    zone = report?.zone ?: ZoneId.systemDefault()
+                )
             }
             if (bedtimeEstimate != null) {
                 Surface(
@@ -77,7 +81,7 @@ internal fun NightSummary(report: NightReport?, error: String?, days: Int) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text("평소 추정 취침 시각", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = if (isDark) Color(0xFF85E3B3) else Color(0xFF1B4332))
                             Spacer(Modifier.weight(1f))
-                            Text("확인된 기록 ${bedtimeEstimate.validCount}일", style = MaterialTheme.typography.labelSmall, color = if (isDark) Color(0xFFA5C4B5) else Color(0xFF52796F))
+                            Text("반영된 기록 ${bedtimeEstimate.validCount}일", style = MaterialTheme.typography.labelSmall, color = if (isDark) Color(0xFFA5C4B5) else Color(0xFF52796F))
                         }
                         Text(
                             text = "평균 취침 %02d:%02d ~ 기상 %02d:%02d (평균 %d시간 %d분)".format(
@@ -90,7 +94,7 @@ internal fun NightSummary(report: NightReport?, error: String?, days: Int) {
                             color = if (isDark) Color(0xFF5ED38C) else Color(0xFF2D6A4F)
                         )
                         Text(
-                            text = "사용자가 직접 선택하거나 수정한 유효 수면 기록의 평균입니다. 평소 잠드는 시간 파악 및 누워서 시청하는 구간 추정에 활용됩니다.",
+                            text = "직접 선택한 기록 및 후보가 하나뿐인 비사용 구간이 자동 반영된 평균입니다. 평소 잠드는 시간 파악 및 야간 취침 개입에 활용됩니다.",
                             style = MaterialTheme.typography.bodySmall,
                             color = if (isDark) Color(0xFFA5C4B5) else Color(0xFF52796F)
                         )
@@ -131,6 +135,28 @@ internal fun NightSummary(report: NightReport?, error: String?, days: Int) {
                 else -> {
                     if (days != 1) {
                     Text("오늘 제외 최근 ${days}일 · 유효 기록 ${rows.size}개 · 막대를 누르면 시계 표시", style = MaterialTheme.typography.bodySmall)
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val legendDirectColor = if (isDark) Color(0xFF5C7CFA) else Color(0xFF3B5BDB)
+                        val legendAutoColor = if (isDark) Color(0xFF34D399) else Color(0xFF059669)
+                        val legendUnselectedColor = if (isDark) Color(0xFF64748B) else Color(0xFF94A3B8)
+
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Box(Modifier.size(10.dp).background(legendDirectColor, RoundedCornerShape(2.dp)))
+                            Text("직접 선택", style = MaterialTheme.typography.labelSmall)
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Box(Modifier.size(10.dp).background(legendAutoColor, RoundedCornerShape(2.dp)))
+                            Text("단일 자동반영", style = MaterialTheme.typography.labelSmall)
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Box(Modifier.size(10.dp).background(legendUnselectedColor, RoundedCornerShape(2.dp)))
+                            Text("미선택(후보 다수)", style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
                     Row(Modifier.fillMaxWidth()) {
                         Column(Modifier.width(40.dp)) {
                             Box(Modifier.height(200.dp)) {
@@ -144,18 +170,27 @@ internal fun NightSummary(report: NightReport?, error: String?, days: Int) {
                             horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             rows.forEach { row ->
                                 val shownMinutes = SleepSummaryPolicy.minutes(row.wakeDate, row.minutes, confirmations) ?: row.minutes
+                                val conf = confirmations[row.wakeDate.toString()]
+                                val dayCandidates = report.candidates.filter { it.wakeDate == row.wakeDate && it.end != null }
+                                val barColor = when {
+                                    conf?.choice == "SLEEP" -> if (isDark) Color(0xFF5C7CFA) else Color(0xFF3B5BDB)
+                                    conf == null && dayCandidates.size == 1 -> if (isDark) Color(0xFF34D399) else Color(0xFF059669)
+                                    else -> if (isDark) Color(0xFF64748B) else Color(0xFF94A3B8)
+                                }
                                 Column(Modifier.clickable { selectedDateKey = row.wakeDate.toString() }, horizontalAlignment = Alignment.CenterHorizontally) {
-                                    Box(Modifier.width(54.dp).height(200.dp).background(Color.White),
+                                    val chartBoxBg = if (isDark) Color(0xFF1E2822) else Color.White
+                                    val gridColor = if (isDark) Color(0xFF2E3E34) else Color(0xFFE2E5EA)
+                                    Box(Modifier.width(54.dp).height(200.dp).background(chartBoxBg, RoundedCornerShape(4.dp)),
                                         contentAlignment = Alignment.BottomCenter) {
                                         Canvas(Modifier.fillMaxSize()) {
                                             for(tick in 0..5) {
                                                 val y = size.height * tick / 5f
-                                                drawLine(Color(0xFFE2E5EA), Offset(0f,y), Offset(size.width,y))
+                                                drawLine(gridColor, Offset(0f,y), Offset(size.width,y))
                                             }
                                         }
                                         Box(Modifier.width(22.dp)
                                             .height((shownMinutes / 60.0).coerceIn(0.0,10.0).toFloat().times(20).dp)
-                                            .background(Color(0xFF4263EB)))
+                                            .background(barColor, RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp)))
                                     }
                                     Text("${shownMinutes.roundToLong() / 60}시간 ${shownMinutes.roundToLong() % 60}분",
                                         style = MaterialTheme.typography.labelSmall)

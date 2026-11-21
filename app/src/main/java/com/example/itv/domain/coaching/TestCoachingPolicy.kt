@@ -26,6 +26,28 @@ internal object TestCoachingPolicy {
     fun missionStartMs(isJev: Boolean): Long = if (isJev) JEV_MISSION_START_MS else MISSION_START_MS
     fun restMs(isJev: Boolean): Long = if (isJev) JEV_REST_MS else REST_MS
     fun naturalRestMs(isJev: Boolean): Long = if (isJev) RECOGNIZED_REST_MS else REST_MS
+
+    /**
+     * Calculates required rest duration scaled by session continuous usage.
+     * In test mode: 15s (<10m), 20s (10m~25m), 30s (>=25m).
+     * In normal/Jev mode: 30s (<15m), 180s (15m~30m), 300s (>=30m).
+     */
+    fun calculateRestMs(isJev: Boolean, continuousUsedMs: Long = 0L): Long {
+        return if (!isJev) {
+            when {
+                continuousUsedMs >= 1500_000L -> 30_000L // 25분 이상 사용 시 30초
+                continuousUsedMs >= 600_000L -> 20_000L  // 10분 이상 사용 시 20초
+                else -> REST_MS                          // 15초
+            }
+        } else {
+            when {
+                continuousUsedMs >= 1800_000L -> 300_000L // 30분 이상 장기 사용 시 5분 휴식
+                continuousUsedMs >= 900_000L -> 180_000L  // 15분 이상 중기 사용 시 3분 휴식
+                continuousUsedMs >= 300_000L -> 120_000L  // 5분 이상 사용 시 2분 휴식
+                else -> JEV_REST_MS                       // 기본 30초 휴식 (JEV_REST_MS)
+            }
+        }
+    }
 }
 internal enum class TestMissionWake { NONE, INCOMPLETE, SUCCESS }
 internal class TestRestMission {
@@ -33,11 +55,15 @@ internal class TestRestMission {
     var startDeadline = 0L
     var startWindowMs = TestCoachingPolicy.MISSION_START_MS
     var requiredRestMs = TestCoachingPolicy.REST_MS
+    var accumulatedRestMs = 0L
     var started = false
     var offAt: Long? = null
     var pending = false
     var requireFacedown = false
     var isStrong = false
+
+    val remainingRestMs: Long
+        get() = (requiredRestMs - accumulatedRestMs).coerceAtLeast(0L)
 
     fun begin(
         value: String,
@@ -50,12 +76,13 @@ internal class TestRestMission {
         id = value; offAt = null; pending = false; started = false
         startWindowMs = startMs
         requiredRestMs = restMs
+        accumulatedRestMs = 0L
         startDeadline = now + startMs
         this.requireFacedown = requireFacedown
         this.isStrong = isStrong
     }
     fun isLate(now: Long) = id != null && !started && !pending && now > startDeadline
-    fun failStart() { id = null; offAt = null; startDeadline = 0L; requireFacedown = false; isStrong = false }
+    fun failStart() { id = null; offAt = null; startDeadline = 0L; accumulatedRestMs = 0L; requireFacedown = false; isStrong = false }
     fun screenOff(now: Long): Boolean {
         if (id == null || pending || offAt != null) return false
         val first = !started
@@ -66,12 +93,19 @@ internal class TestRestMission {
         val start = offAt ?: return TestMissionWake.NONE to 0L
         offAt = null
         if (id == null) return TestMissionWake.NONE to 0L
-        val duration = now - start
+        val sessionDuration = (now - start).coerceAtLeast(0L)
         val facedownOk = !requireFacedown || isFacedownObserved
-        return if (duration >= requiredRestMs && facedownOk) {
-            pending = true; TestMissionWake.SUCCESS to duration
-        } else TestMissionWake.INCOMPLETE to duration
+        if (facedownOk) {
+            accumulatedRestMs += sessionDuration
+        }
+        val totalRest = accumulatedRestMs
+        return if (totalRest >= requiredRestMs) {
+            pending = true; TestMissionWake.SUCCESS to totalRest
+        } else {
+            // 아직 목표 휴식 시간이 남은 경우: 실패로 리셋하지 않고 지금까지 쉰 시간을 인정하고 유지
+            TestMissionWake.INCOMPLETE to totalRest
+        }
     }
-    fun displayed() { pending = false; id = null; requireFacedown = false; isStrong = false }
-    fun clear() { id = null; pending = false; offAt = null; requireFacedown = false; isStrong = false }
+    fun displayed() { pending = false; id = null; accumulatedRestMs = 0L; requireFacedown = false; isStrong = false }
+    fun clear() { id = null; pending = false; offAt = null; accumulatedRestMs = 0L; requireFacedown = false; isStrong = false }
 }

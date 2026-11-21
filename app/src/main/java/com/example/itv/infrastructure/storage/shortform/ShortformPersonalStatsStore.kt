@@ -84,6 +84,10 @@ internal object ShortformPersonalStatsStore {
         val phoneCurrentSessionMs: Long = 0L,
         val phoneCurrentWeightedSessionMs: Long = 0L,
         val phoneCurrentShortformRatio: Double? = null,
+        val phoneTodayAvgSessionMs: Long = 0L,
+        val phoneTodayAvgWeightedSessionMs: Long = 0L,
+        val phoneTodayShortformRatio: Double? = null,
+        val phoneTodaySessionsCount: Int = 0,
         val phoneAvgSessionMs: Long = 0L,
         val phoneAvgWeightedSessionMs: Long = 0L,
         val phoneMaxSessionMs: Long = 0L,
@@ -1031,6 +1035,27 @@ internal object ShortformPersonalStatsStore {
         val phoneCurrentWeightedSessionMs = latestTodayPhone?.weightedDurationMs ?: 0L
         val phoneCurrentShortformRatio = latestTodayPhone?.shortformRatio
 
+        val phoneTodayMs = maxOf(phoneDailyMap[todayDate] ?: 0L, totalPhoneTodayMs)
+        val phoneTodayAvgSessionMs = if (todayPhoneSessions.isNotEmpty()) {
+            todayPhoneSessions.map { it.durationMs }.average().toLong()
+        } else {
+            phoneCurrentSessionMs
+        }
+        val phoneTodayAvgWeightedSessionMs = if (todayPhoneSessions.isNotEmpty()) {
+            todayPhoneSessions.map { it.weightedDurationMs }.average().toLong()
+        } else {
+            phoneCurrentWeightedSessionMs
+        }
+        val todayShortformTotalMs = combinedDaily[todayDate]?.durationMs ?: 0L
+        val phoneTodayShortformRatio = when {
+            phoneTodayMs > 0L && todayShortformTotalMs > 0L ->
+                (todayShortformTotalMs.toDouble() / phoneTodayMs.toDouble()).coerceIn(0.0, 1.0)
+            todayPhoneSessions.isNotEmpty() && todayPhoneSessions.sumOf { it.durationMs } > 0L ->
+                (todayPhoneSessions.sumOf { it.shortformMs }.toDouble() / todayPhoneSessions.sumOf { it.durationMs }.toDouble()).coerceIn(0.0, 1.0)
+            else -> phoneCurrentShortformRatio
+        }
+        val phoneTodaySessionsCount = todayPhoneSessions.size.coerceAtLeast(if (phoneTodayMs > 0L) 1 else 0)
+
         fun buildMetrics(
             filter: TargetFilter,
             dailyMap: Map<LocalDate, DailyAgg>,
@@ -1274,6 +1299,10 @@ internal object ShortformPersonalStatsStore {
                 phoneCurrentSessionMs = phoneCurrentSessionMs,
                 phoneCurrentWeightedSessionMs = phoneCurrentWeightedSessionMs,
                 phoneCurrentShortformRatio = phoneCurrentShortformRatio,
+                phoneTodayAvgSessionMs = phoneTodayAvgSessionMs,
+                phoneTodayAvgWeightedSessionMs = phoneTodayAvgWeightedSessionMs,
+                phoneTodayShortformRatio = phoneTodayShortformRatio,
+                phoneTodaySessionsCount = phoneTodaySessionsCount,
                 phoneAvgSessionMs = phoneAvg30dSessionMs,
                 phoneAvgWeightedSessionMs = phoneAvg30dWeightedSessionMs,
                 phoneMaxSessionMs = phoneMax30dSessionMs,
@@ -1362,7 +1391,6 @@ internal object ShortformPersonalStatsStore {
         val phoneDailyAggMap = phoneDailyMap.mapValues { (d, ms) ->
             DailyAgg(d, ms, swipes = 0L, observed = ms > 0L)
         }
-        val phoneTodayMs = maxOf(phoneDailyMap[todayDate] ?: 0L, totalPhoneTodayMs)
         val rawPhoneDays7 = phoneDailyAggMap.values.filter { !it.date.isBefore(start7d) && !it.date.isAfter(todayDate) }
         val phoneDays7 = rawPhoneDays7.filter { it.durationMs >= MIN_VALID_SESSION_MS }.ifEmpty { rawPhoneDays7.filter { it.durationMs > 0L } }
         val phoneObservedDays7d = phoneDays7.size.coerceAtLeast(1)
@@ -1388,6 +1416,15 @@ internal object ShortformPersonalStatsStore {
             phoneAvg7dSessionMs.toDouble() / phoneAvg30dSessionMs.toDouble()
         } else null
 
+        val combinedMetrics = buildMetrics(
+            filter = TargetFilter.COMBINED,
+            dailyMap = combinedDaily,
+            matchingSessions = snapshotSessions,
+            activeSession = combinedActive,
+            parentAppMs = igParentTodayMs + ytParentTodayMs,
+            parentAppPeriodTotalMs = igParentPeriodTotalMs + ytParentPeriodTotalMs
+        )
+
         val phoneTotalMetrics = PersonalizedTargetMetrics(
             filter = TargetFilter.PHONE_TOTAL,
             todayDurationMs = phoneTodayMs,
@@ -1406,7 +1443,7 @@ internal object ShortformPersonalStatsStore {
             avgSessionMs = phoneEffectiveAvgSessionMs,
             maxSessionMs = phoneEffectiveMaxSessionMs,
             totalRecordedSessions = phoneSessionCount30d,
-            todaySessionCount = todayPhoneSessions.size.coerceAtLeast(if (phoneTodayMs > 0L) 1 else 0),
+            todaySessionCount = phoneTodaySessionsCount,
             avg7dSessionMs = if (phoneAvg7dSessionMs > 0L) phoneAvg7dSessionMs else phoneAvg7dDailyMs,
             max7dSessionMs = phoneMax7dSessionMs,
             sessionCount7d = phoneSessionCount7d,
@@ -1420,6 +1457,10 @@ internal object ShortformPersonalStatsStore {
             phoneCurrentSessionMs = phoneCurrentSessionMs,
             phoneCurrentWeightedSessionMs = phoneCurrentWeightedSessionMs,
             phoneCurrentShortformRatio = phoneCurrentShortformRatio,
+            phoneTodayAvgSessionMs = phoneTodayAvgSessionMs,
+            phoneTodayAvgWeightedSessionMs = phoneTodayAvgWeightedSessionMs,
+            phoneTodayShortformRatio = phoneTodayShortformRatio,
+            phoneTodaySessionsCount = phoneTodaySessionsCount,
             phoneAvgSessionMs = phoneAvg30dSessionMs,
             phoneAvgWeightedSessionMs = phoneAvg30dWeightedSessionMs,
             phoneMaxSessionMs = phoneMax30dSessionMs,
@@ -1449,20 +1490,33 @@ internal object ShortformPersonalStatsStore {
             parentAppTodayMs = phoneTodayMs,
             shortformShareOfAppRatio = null,
             totalPhoneTodayMs = phoneTodayMs,
-            shortformShareOfPhoneRatio = phoneCurrentShortformRatio,
+            shortformShareOfPhoneRatio = phoneTodayShortformRatio ?: phoneCurrentShortformRatio,
             periodShareOfAppRatio = null,
-            periodShareOfPhoneRatio = phoneAvg30dShortformRatio
+            periodShareOfPhoneRatio = phoneAvg30dShortformRatio,
+            workdayAvgDailyMs = combinedMetrics.workdayAvgDailyMs,
+            workdayAvgSessionMs = combinedMetrics.workdayAvgSessionMs,
+            restdayAvgDailyMs = combinedMetrics.restdayAvgDailyMs,
+            restdayAvgSessionMs = combinedMetrics.restdayAvgSessionMs,
+            daySplitThresholdMs = combinedMetrics.daySplitThresholdMs,
+            isBimodalConfident = combinedMetrics.isBimodalConfident,
+            bimodalRatio = combinedMetrics.bimodalRatio,
+            estimatedWorkdayCount = combinedMetrics.estimatedWorkdayCount,
+            estimatedRestdayCount = combinedMetrics.estimatedRestdayCount,
+            phoneWorkdayAvgDailyMs = phoneClusterResult.workdayAvgDailyMs,
+            phoneRestdayAvgDailyMs = phoneClusterResult.restdayAvgDailyMs,
+            phoneSplitThresholdMs = phoneClusterResult.splitThresholdMs,
+            isPhoneBimodalConfident = phoneClusterResult.isConfident,
+            phoneBimodalRatio = phoneClusterResult.clusterRatio,
+            phoneEstimatedWorkdayCount = phoneClusterResult.workdayDays.size,
+            phoneEstimatedRestdayCount = phoneClusterResult.restdayDays.size,
+            todayEstimatedDayTypeByPhone = if (phoneTodayMs > 0L) phoneClusterResult.classify(phoneTodayMs) else null,
+            hybridEstimatedDayType = combinedMetrics.hybridEstimatedDayType,
+            hybridDayTypeReason = combinedMetrics.hybridDayTypeReason,
+            effectiveSessionMsForToday = combinedMetrics.effectiveSessionMsForToday
         )
 
         return PersonalizedSummary(
-            combined = buildMetrics(
-                filter = TargetFilter.COMBINED,
-                dailyMap = combinedDaily,
-                matchingSessions = snapshotSessions,
-                activeSession = combinedActive,
-                parentAppMs = igParentTodayMs + ytParentTodayMs,
-                parentAppPeriodTotalMs = igParentPeriodTotalMs + ytParentPeriodTotalMs
-            ),
+            combined = combinedMetrics,
             instagram = igMetrics,
             youtube = ytMetrics,
             phoneTotal = phoneTotalMetrics

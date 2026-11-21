@@ -186,6 +186,7 @@ class BedtimeCareController private constructor(private val context: Context) {
     fun dismissCurrentDialog() {
         currentAnimator?.cancel()
         currentAnimator = null
+        com.example.itv.infrastructure.media.MediaPauseController.release(context)
         currentDialogView?.let { v ->
             val parent = v.parent
             if (parent is ViewGroup) {
@@ -225,6 +226,7 @@ class BedtimeCareController private constructor(private val context: Context) {
         onChoiceDone: (() -> Unit)? = null
     ) {
         dismissCurrentDialog()
+        com.example.itv.infrastructure.media.MediaPauseController.pause(context)
 
         val root = FrameLayout(context).apply {
             setBackgroundColor(Color.TRANSPARENT)
