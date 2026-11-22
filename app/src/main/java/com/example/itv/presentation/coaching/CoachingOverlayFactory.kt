@@ -61,16 +61,18 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
     }
     fun detachPreview(root: View) { removeControls(root); wm.removeView(root) }
 
-    private fun arrive(s: Session, route: GoldenTravel, ms: Long, durationMs: Long, fromTurn: Boolean) {
+    private fun arrive(s: Session, route: GoldenTravel, ms: Long, durationMs: Long) {
         val walkMs = durationMs - route.turn.durationMs
         if (ms < walkMs) {
             val u = (ms.toFloat() / walkMs).coerceIn(0f, 1f)
             s.dogParams.x = route.walkX(u)
-            s.dog.poseAt(route.walk, route.walkPhase(u, fromTurn))
+            s.dogParams.y = route.walkY(u)
+            s.dog.poseAt(route.walk, route.walkPhase(u))
         } else {
             val u = ((ms - walkMs).toFloat() / route.turn.durationMs).coerceIn(0f, 1f)
             s.dogParams.x = route.turnX(u)
-            s.dog.poseAt(route.turn, u)
+            s.dogParams.y = route.turnY(u)
+            s.dog.poseAt(route.turn, GoldenTravel.turnPhase(u))
         }
     }
 
@@ -288,9 +290,9 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
             setImageResource(R.drawable.itv_motion_front)
             contentDescription = "화면 모서리로 걸어나와 선 강아지. 강아지를 터치하면 미션이 진행됩니다."
         }
-        val startX = width - dogSize / 5
-        val route = GoldenTravel(startX, s.homeX, dogSize)
-        s.dogParams = params(dogSize, dogSize, startX, s.homeY, true)
+        val route = GoldenTravel(s.homeX, s.homeY, dogSize, left = true, cycles = 4)
+        s.dog.alpha = 0f
+        s.dogParams = params(dogSize, dogSize, route.walkX(0f), route.walkY(0f), true)
         s.dogParams.flags = s.dogParams.flags or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
         add(s.dog, s.dogParams)
 
@@ -323,7 +325,9 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
             interpolator = android.view.animation.LinearInterpolator()
             addUpdateListener {
                 if (s.stopped) return@addUpdateListener
-                arrive(s, route, (it.animatedFraction * duration).toLong(), duration, false)
+                val ms = (it.animatedFraction * duration).toLong()
+                s.dog.alpha = GoldenTravel.smooth(ms / 260f)
+                arrive(s, route, ms, duration)
                 updateDogWindow(s)
                 if (it.animatedFraction >= 1f && !s.ready) {
                     s.ready = true
@@ -599,10 +603,14 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
         val dogSize = minOf(dp(112), width / 3, height / 3).coerceAtLeast(1)
         val houseW = minOf(dp(160), width / 2, height / 2).coerceAtLeast(1)
         val houseH = houseW * 360 / 420
-        val hx = (width - houseW) / 2
+        val right = kotlin.random.Random.nextBoolean()
+        // With the house on the entrance side, seven authored strides fit the
+        // existing 7.4s intervention. The fence stays on the opposite side.
+        val nearCenter = (dogSize / 2 - dogSize / 3 + GoldenTravel.entryRun(7, dogSize))
+            .coerceIn(houseW / 2, width / 2)
+        val hx = (if (right) width - nearCenter else nearCenter) - houseW / 2
         val hy = height / 5
         s.house = Rect(hx, hy, hx + houseW, hy + houseH)
-        val right = kotlin.random.Random.nextBoolean()
         val cageSize = minOf(dp(164), width / 2, height / 3)
         val cageX = if (right) dp(14) else width - cageSize - dp(14)
         s.cage = Rect(cageX, height * 2 / 3, cageX + cageSize, height * 2 / 3 + cageSize)
@@ -653,13 +661,12 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
             setImageResource(R.drawable.itv_motion_front)
             contentDescription = "강아지. 길게 눌러 집으로 옮기면 쉬기, 화면 가장자리는 나중에, 닫기 구역은 닫기."
         }
-        s.homeX = width / 2 - dogSize / 2
+        s.homeX = s.house.centerX() - dogSize / 2
         s.homeY = hy + houseH - dogSize / 3
         val outside = if (right) width - dogSize / 6 else -dogSize * 5 / 6
-        val threshold = if (right) width - dogSize * 2 / 3 else -dogSize / 3
-        val profileStart = GoldenTravel.turningOutX(threshold, dogSize, right, 1f)
-        val route = GoldenTravel(profileStart, s.homeX, dogSize)
-        s.dogParams = params(dogSize, dogSize, outside, s.homeY, true)
+        val route = GoldenTravel(s.homeX, s.homeY, dogSize, right, cycles = 7)
+        val threshold = route.launchX(1f)
+        s.dogParams = params(dogSize, dogSize, outside, route.launchY(1f), true)
         s.dogParams.flags = s.dogParams.flags or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
         add(s.dog, s.dogParams)
 
@@ -680,10 +687,11 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
                     s.fence?.visibility = View.VISIBLE
                     if (ms < startWalking) {
                         val u = 1f - (ms - peekMs).toFloat() / route.turn.durationMs
-                        s.dogParams.x = GoldenTravel.turningOutX(threshold, dogSize, right, 1f - u)
-                        s.dog.poseAt(route.turn, u)
+                        s.dogParams.x = route.launchX(u)
+                        s.dogParams.y = route.launchY(u)
+                        s.dog.poseAt(route.turn, GoldenTravel.turnPhase(u))
                     } else {
-                        arrive(s, route, ms - startWalking, duration - startWalking, true)
+                        arrive(s, route, ms - startWalking, duration - startWalking)
                     }
                 }
 
@@ -738,9 +746,9 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
         val endX = if (left) -side else width
         val turn = if (left) GoldenMotion.TURN_LEFT else GoldenMotion.TURN_RIGHT
         val walk = if (left) GoldenMotion.SIDE_LEFT else GoldenMotion.SIDE_RIGHT
-        val profileStart = GoldenTravel.turningOutX(startX, side, left, 1f)
-        val strides = kotlin.math.abs(endX - profileStart) / (side * GoldenTravel.STRIDE)
-        val walkMs = (strides * 430f).toLong().coerceAtLeast(1L)
+        val profileStart = GoldenTravel.sideTurnX(startX, side, left, 0f)
+        val strides = kotlin.math.abs(endX - profileStart) / (side * GoldenTravel.SIDE_STRIDE)
+        val walkMs = (strides * walk.durationMs).toLong().coerceAtLeast(1L)
         val waveMs = GoldenMotion.WAVE.durationMs
         val turnMs = turn.durationMs
         val total = waveMs + turnMs + walkMs
@@ -755,14 +763,16 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
                     ms < waveMs -> s.dog.poseAt(GoldenMotion.WAVE, ms.toFloat() / waveMs)
                     ms < waveMs + turnMs -> {
                         val u = (ms - waveMs).toFloat() / turnMs
-                        s.dogParams.x = GoldenTravel.turningOutX(startX, side, left, u)
-                        s.dog.poseAt(turn, 1f - u)
+                        s.dogParams.x = GoldenTravel.sideTurnX(startX, side, left, 1f - u)
+                        s.dog.poseAt(turn, GoldenTravel.turnPhase(1f - u))
                     }
                     else -> {
                         val u = ((ms - waveMs - turnMs).toFloat() / walkMs).coerceIn(0f, 1f)
-                        val phase = GoldenTravel.TURN_PHASE + strides * u
-                        s.dog.poseAt(walk, phase % 1f)
-                        s.dogParams.x = (profileStart + (endX - profileStart) * u).toInt()
+                        val steps = kotlin.math.floor(strides * u * GoldenTravel.WALK_FRAMES).toInt()
+                        val cycles = steps.toFloat() / GoldenTravel.WALK_FRAMES
+                        s.dog.poseAt(walk, (GoldenTravel.SIDE_PHASE + cycles) % 1f)
+                        val distance = (side * GoldenTravel.SIDE_STRIDE * cycles).toInt()
+                        s.dogParams.x = profileStart + if (left) -distance else distance
                     }
                 }
                 updateDogWindow(s)

@@ -21,7 +21,8 @@ internal enum class GoldenMotion(val durationMs: Long, val repeat: Boolean = fal
     IDLE(2150, true), PEEK(950), PEEK_LEFT(950), APPROACH(670, true), JUMP(1080),
     LIFT(340), LOWER(360), DROWSY(530), LIE(990), SLEEP(2250, true), WAKE(940),
     SAD(450), REFUSE(900), FIRM(510), WAVE(850), GIVE(1120),
-    RECEIVE(640), TURN_LEFT(860), TURN_RIGHT(860), SIDE_LEFT(670, true), SIDE_RIGHT(670, true)
+    RECEIVE(640), TURN_LEFT(860), TURN_RIGHT(860), SIDE_LEFT(670, true), SIDE_RIGHT(670, true),
+    ENTRY_LEFT(670, true), ENTRY_RIGHT(670, true), FACE_LEFT(980), FACE_RIGHT(980)
 }
 
 /** Off-screen time and time spent waiting for an atlas do not consume an authored one-shot. */
