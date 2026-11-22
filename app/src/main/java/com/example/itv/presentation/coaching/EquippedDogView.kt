@@ -129,6 +129,9 @@ class EquippedDogView @JvmOverloads constructor(
     }
 
     private var pose: GoldenMotion? = null
+    private var pendingProgress = 0f
+    private var loading = false
+    private var dressed = false
     private var sprite: GoldenFrameDrawable? = null
     private var active: GoldenMotion? = null
     private var next: GoldenMotion? = null
@@ -145,6 +148,7 @@ class EquippedDogView @JvmOverloads constructor(
                 next?.let { play(it) }
                 return
             }
+            if (loading) return // the decoder callback resumes the clock
             val count = sprite?.strip?.anchors?.size ?: return
             val steps = if (motion.repeat) count else count - 1
             val boundary = ((time * steps / motion.durationMs + 1) * motion.durationMs + steps - 1) / steps
@@ -166,24 +170,53 @@ class EquippedDogView @JvmOverloads constructor(
         tick.run()
     }
 
+    internal fun playAfter(motion: GoldenMotion, preceding: GoldenMotion) {
+        if (active == preceding) next = motion else play(motion)
+    }
+
     internal fun poseAt(motion: GoldenMotion, progress: Float) {
         stopPlayback()
         showPose(motion, progress)
     }
 
     private fun showPose(motion: GoldenMotion, progress: Float) {
-        if (motion != pose) {
-            pose = motion
-            sprite = GoldenFrameDrawable(GoldenStrip.load(resources.assets, motion))
+        pendingProgress = progress
+        if (motion == pose) {
+            if (!loading) setFrame(motion, progress)
+            return
+        }
+        pose = motion
+        loading = true
+        var requested = false
+        GoldenStrip.request(resources.assets, motion) { strip ->
+            if (motion != pose) return@request
+            loading = false
+            if (strip == null) {
+                stopPlayback()
+                return@request
+            }
+            sprite = GoldenFrameDrawable(strip)
             currentSpriteRes = 0
             baseDog.setImageDrawable(sprite)
-            requestLayout()
+            setFrame(motion, pendingProgress)
+            if (dressed) requestLayout()
+            if (requested && active == motion) {
+                removeCallbacks(tick)
+                tick.run()
+            }
         }
-        val d = checkNotNull(sprite)
+        requested = true
+    }
+
+    private fun setFrame(motion: GoldenMotion, progress: Float) {
+        val d = sprite ?: return
         val size = d.strip.anchors.size
         val steps = if (motion.repeat) size else size - 1
         val index = (progress.coerceIn(0f, 1f) * steps + .0001f).toInt().coerceIn(0, size - 1)
-        if (d.index != index) { d.index = index; requestLayout() }
+        if (d.index != index) {
+            d.index = index
+            if (dressed) requestLayout()
+        }
     }
 
     private fun stopPlayback() {
@@ -194,12 +227,14 @@ class EquippedDogView @JvmOverloads constructor(
 
     override fun onDetachedFromWindow() {
         stopPlayback()
+        if (loading) { pose = null; loading = false }
         super.onDetachedFromWindow()
     }
 
     fun setImageResource(@DrawableRes resId: Int) {
         stopPlayback()
         pose = null
+        loading = false
         sprite = null
         baseDog.setImageResource(resId)
         if (currentSpriteRes != resId) {
@@ -211,6 +246,7 @@ class EquippedDogView @JvmOverloads constructor(
     fun setImageDrawable(drawable: Drawable?) {
         stopPlayback()
         pose = null
+        loading = false
         sprite = null
         currentSpriteRes = 0
         baseDog.setImageDrawable(drawable)
@@ -222,6 +258,7 @@ class EquippedDogView @JvmOverloads constructor(
     }
 
     fun setEquipment(equipped: Map<EquipSlot, EquipItem?>) {
+        dressed = equipped.values.any { it != null }
         updateLayer(clothesLayer, equipped[EquipSlot.CLOTHES]?.iconRes)
         updateLayer(shoesLayer, equipped[EquipSlot.SHOES]?.iconRes)
         updateLayer(noseLayer, equipped[EquipSlot.NOSE_MOUTH]?.iconRes)

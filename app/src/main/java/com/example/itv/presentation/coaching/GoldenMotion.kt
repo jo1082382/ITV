@@ -10,12 +10,16 @@ import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.drawable.Drawable
 import android.util.LruCache
+import android.os.Handler
+import android.os.Looper
+import java.util.concurrent.Executors
 import java.io.DataInputStream
 
 internal enum class GoldenMotion(val durationMs: Long, val repeat: Boolean = false) {
-    IDLE(2150, true), PEEK(950), APPROACH(670, true), JUMP(1080),
+    IDLE(2150, true), PEEK(950), PEEK_LEFT(950), APPROACH(670, true), JUMP(1080),
     LIFT(340), LOWER(360), DROWSY(530), LIE(990), SLEEP(2250, true), WAKE(940),
-    SAD(450), REFUSE(900), FIRM(510), WAVE(850), GIVE(1120)
+    SAD(450), REFUSE(900), FIRM(510), WAVE(850), GIVE(1120),
+    RECEIVE(640), TURN_LEFT(860), TURN_RIGHT(860), SIDE_LEFT(670, true), SIDE_RIGHT(670, true)
 }
 
 internal class GoldenStrip(val bitmap: Bitmap, val anchors: List<EquippedDogView.FrameLandmark>) {
@@ -24,8 +28,29 @@ internal class GoldenStrip(val bitmap: Bitmap, val anchors: List<EquippedDogView
             override fun sizeOf(key: GoldenMotion, value: GoldenStrip) = value.bitmap.allocationByteCount
         }
 
-        fun load(assets: AssetManager, motion: GoldenMotion): GoldenStrip {
-            cache.get(motion)?.let { return it }
+        private val decoder = Executors.newSingleThreadExecutor()
+        private val main = Handler(Looper.getMainLooper())
+        private val pending = mutableMapOf<GoldenMotion, MutableList<(GoldenStrip?) -> Unit>>()
+
+        // All cache and waiter mutations are on the main thread. The expensive
+        // WebP decode, metadata read and texture preparation run on the worker.
+        fun request(assets: AssetManager, motion: GoldenMotion, ready: (GoldenStrip?) -> Unit) {
+            cache.get(motion)?.let { ready(it); return }
+            pending[motion]?.let { it.add(ready); return }
+            pending[motion] = mutableListOf(ready)
+            decoder.execute {
+                val strip = try { decode(assets, motion) } catch (e: Exception) {
+                    android.util.Log.e("GoldenMotion", "Unable to decode ${motion.name}", e)
+                    null
+                }
+                main.post {
+                    if (strip != null) cache.put(motion, strip)
+                    pending.remove(motion)?.forEach { it(strip) }
+                }
+            }
+        }
+
+        private fun decode(assets: AssetManager, motion: GoldenMotion): GoldenStrip {
             val stem = "golden/" + motion.name.lowercase(java.util.Locale.ROOT)
             val bytes = assets.open("$stem.anchors").use { it.readBytes() }
             val anchors = DataInputStream(bytes.inputStream()).use { input ->
@@ -38,7 +63,8 @@ internal class GoldenStrip(val bitmap: Bitmap, val anchors: List<EquippedDogView
                 }
             }
             val bitmap = assets.open("$stem.webp").use { requireNotNull(BitmapFactory.decodeStream(it)) }
-            return GoldenStrip(bitmap, anchors).also { cache.put(motion, it) }
+            bitmap.prepareToDraw()
+            return GoldenStrip(bitmap, anchors)
         }
     }
 }
