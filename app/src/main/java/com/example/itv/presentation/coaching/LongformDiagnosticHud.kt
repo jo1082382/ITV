@@ -84,30 +84,15 @@ object LongformDiagnosticHud {
      */
     fun setSleepingState(sleeping: Boolean) {
         isSleeping = sleeping
-        val icon = collapsedIconImageView
-        val mini = miniIconImageView
-        val statusDot = collapsedStatusDotDrawable
-        val border = collapsedBorderDrawable
-        val density = rootContainer?.resources?.displayMetrics?.density ?: 2f
-        if (sleeping) {
-            icon?.setImageResource(R.drawable.itv_motion_sleep)
-            mini?.setImageResource(R.drawable.itv_motion_sleep)
-            val sleepColor = Color.parseColor("#B197FC")
-            statusDot?.setColor(sleepColor)
-            border?.setStroke((2.5f * density).toInt(), sleepColor)
-            if (isExpanded) {
-                modeText?.text = "🌙 취침 권장 시간 초과 (휴식 대기)"
-                modeText?.setTextColor(sleepColor)
-            }
-        } else {
-            if (defaultAppIconDrawable != null) {
-                icon?.setImageDrawable(defaultAppIconDrawable)
-                mini?.setImageDrawable(defaultAppIconDrawable)
-            } else {
-                icon?.setImageResource(R.drawable.itv_puppy_face)
-                mini?.setImageResource(R.drawable.itv_puppy_face)
+        for (icon in listOfNotNull(collapsedIconImageView, miniIconImageView)) {
+            val appIcon = defaultAppIconDrawable
+            when {
+                sleeping -> icon.setImageResource(R.drawable.itv_puppy_sleep_face)
+                appIcon != null -> icon.setImageDrawable(appIcon.constantState?.newDrawable() ?: appIcon)
+                else -> icon.setImageResource(R.drawable.itv_puppy_face)
             }
         }
+        rootContainer?.let { renderHud(it.context) }
     }
 
     private fun formatDurationSec(sec: Long): String =
@@ -181,7 +166,7 @@ object LongformDiagnosticHud {
             clipToOutline = true
             scaleType = ImageView.ScaleType.FIT_CENTER
             if (isSleeping) {
-                setImageResource(R.drawable.itv_motion_sleep)
+                setImageResource(R.drawable.itv_puppy_sleep_face)
             } else if (appIconDrawable != null) {
                 setImageDrawable(appIconDrawable)
             } else {
@@ -260,7 +245,7 @@ object LongformDiagnosticHud {
             }
             scaleType = ImageView.ScaleType.FIT_CENTER
             if (isSleeping) {
-                setImageResource(R.drawable.itv_motion_sleep)
+                setImageResource(R.drawable.itv_puppy_sleep_face)
             } else if (appIconDrawable != null) {
                 setImageDrawable(appIconDrawable)
             } else {
@@ -555,11 +540,6 @@ object LongformDiagnosticHud {
         collapsedBorderDrawable?.setStroke((2.5f * dp).toInt(), statusColor)
         collapsedStatusDotDrawable?.setColor(statusColor)
 
-        if (isSleeping) {
-            collapsedIconImageView?.setImageResource(R.drawable.itv_motion_sleep)
-            miniIconImageView?.setImageResource(R.drawable.itv_motion_sleep)
-        }
-
         // 아이콘으로 접혀 있는 상태라면 텍스트 뷰 렌더링 생략 (배터리 절약)
         if (!isExpanded) return
 
@@ -770,6 +750,10 @@ object LongformDiagnosticHud {
 
                 eventText?.text = latestAny ?: "최근 이벤트: 아직 없음"
             }
+        }
+        if (isSleeping) {
+            modeText?.text = "🌙 취침 권장 시간 초과 (휴식 대기)"
+            modeText?.setTextColor(statusColor)
         }
     }
 

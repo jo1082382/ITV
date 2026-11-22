@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Bundle
@@ -16,6 +17,7 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.ScrollView
 import com.example.itv.domain.coaching.CharacterIntensity
 import com.example.itv.domain.coaching.InterventionReasonResolver
 import com.example.itv.domain.coaching.RestMissionCatalog
@@ -41,6 +43,8 @@ class CompanionPreviewActivity : Activity() {
 
     private var current: View? = null
     private var selected = false
+    private var trackerAcquired = false
+    private var facedownListener: (() -> Unit)? = null
     private var activeRecommendation: RestRecommendation? = null
 
     private var missionActive = false
@@ -107,11 +111,36 @@ class CompanionPreviewActivity : Activity() {
 
         tracker = LightAndBrightnessTracker.getInstance(this)
 
-        val column = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+        val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        val screenDp = resources.configuration.screenWidthDp
+        val panelWidth = if (landscape) (screenDp * .38f).toInt().coerceIn(176, 340) else screenDp
+        val stackedButtons = panelWidth / resources.configuration.fontScale < 285
+        val root = LinearLayout(this).apply {
+            orientation = if (landscape) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
             fitsSystemWindows = true
             setBackgroundColor(Color.rgb(245, 247, 248))
         }
+        // Keep the scene visible in short windows and allow every control to
+        // remain reachable when the system font or diagnostic text grows.
+        val panel = object : ScrollView(this) {
+            override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                val available = MeasureSpec.getSize(heightMeasureSpec)
+                val heightSpec = if (landscape) heightMeasureSpec else
+                    MeasureSpec.makeMeasureSpec((available * .40f).toInt(), MeasureSpec.AT_MOST)
+                super.onMeasure(widthMeasureSpec, heightSpec)
+            }
+        }
+        val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        panel.addView(column)
+        root.addView(panel, LinearLayout.LayoutParams(
+            if (landscape) dp(panelWidth) else LinearLayout.LayoutParams.MATCH_PARENT,
+            if (landscape) LinearLayout.LayoutParams.MATCH_PARENT else LinearLayout.LayoutParams.WRAP_CONTENT
+        ))
+        fun buttonParams() = if (stackedButtons) {
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        } else {
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }.apply { setMargins(dp(2), 0, dp(2), 0) }
 
         // 1. Real-time sensor status header
         val header = LinearLayout(this).apply {
@@ -143,11 +172,10 @@ class CompanionPreviewActivity : Activity() {
             text = "※ 폰 각도(Pitch)나 조도를 바꾼 뒤 아래 버튼을 누르면 사유와 미션이 동적으로 바뀝니다."
         }
         header.addView(guideText)
-        column.addView(header)
 
         // 2. Action buttons bar
         val bar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
+            orientation = if (stackedButtons) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
             setPadding(dp(6), dp(4), dp(6), dp(4))
             setBackgroundColor(Color.rgb(238, 242, 246))
         }
@@ -162,9 +190,7 @@ class CompanionPreviewActivity : Activity() {
                 }
                 setOnClickListener { action() }
             }
-            bar.addView(btn, LinearLayout.LayoutParams(0, dp(42), 1f).apply {
-                setMargins(dp(2), 0, dp(2), 0)
-            })
+            bar.addView(btn, buttonParams())
         }
 
         button("일반 개입", isPrimary = true) { show("offer_normal") }
@@ -176,7 +202,7 @@ class CompanionPreviewActivity : Activity() {
 
         // 야간 케어 전용 제어 바 (3분기, 흑백, 흑백 취소)
         val nightBar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
+            orientation = if (stackedButtons) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
             setPadding(dp(6), dp(3), dp(6), dp(3))
             setBackgroundColor(Color.parseColor("#1E293B"))
         }
@@ -189,9 +215,7 @@ class CompanionPreviewActivity : Activity() {
                 setPadding(dp(2), dp(2), dp(2), dp(2))
                 setOnClickListener { action() }
             }
-            nightBar.addView(btn, LinearLayout.LayoutParams(0, dp(40), 1f).apply {
-                setMargins(dp(2), 0, dp(2), 0)
-            })
+            nightBar.addView(btn, buttonParams())
         }
         nightButton("🌙 야간 3분기", Color.parseColor("#334155")) { show("night_care") }
         nightButton("🖤 흑백", Color.parseColor("#475569")) {
@@ -204,7 +228,7 @@ class CompanionPreviewActivity : Activity() {
 
         // 야간 비침해 배너 알림 및 실시간 HUD 수면 모드 미리보기 제어 바
         val gentleBar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
+            orientation = if (stackedButtons) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
             setPadding(dp(6), dp(3), dp(6), dp(3))
             setBackgroundColor(Color.parseColor("#0F172A"))
         }
@@ -217,9 +241,7 @@ class CompanionPreviewActivity : Activity() {
                 setPadding(dp(2), dp(2), dp(2), dp(2))
                 setOnClickListener { action() }
             }
-            gentleBar.addView(btn, LinearLayout.LayoutParams(0, dp(40), 1f).apply {
-                setMargins(dp(2), 0, dp(2), 0)
-            })
+            gentleBar.addView(btn, buttonParams())
         }
         gentleButton("🔔 비침해 배너(30초)", Color.parseColor("#4338CA")) {
             val success = com.example.itv.presentation.sleep.NightGentleAlertController.showGentleBanner(this, isTestMode = true)
@@ -256,6 +278,7 @@ class CompanionPreviewActivity : Activity() {
             hud.setSleepingState(!hud.isSleeping)
         }
         column.addView(gentleBar)
+        if (landscape || stackedButtons) column.addView(header) else column.addView(header, 0)
 
         // 3. Companion display host area
         host = FrameLayout(this).apply {
@@ -263,8 +286,9 @@ class CompanionPreviewActivity : Activity() {
             clipChildren = false
             clipToPadding = false
         }
-        column.addView(host, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
-        setContentView(column)
+        root.addView(host, if (landscape) LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+            else LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        setContentView(root)
 
         factory = CoachingOverlayFactory(this, host)
         host.post {
@@ -274,7 +298,10 @@ class CompanionPreviewActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        tracker.start()
+        if (!trackerAcquired) {
+            tracker.start()
+            trackerAcquired = true
+        }
         tracker.startContinuousPostureListening()
         handler.removeCallbacks(sensorUpdater)
         handler.post(sensorUpdater)
@@ -289,7 +316,7 @@ class CompanionPreviewActivity : Activity() {
         val sessionDuration = (now - missionOffAt).coerceAtLeast(0L)
         missionOffAt = 0L
         val needFacedown = activeRecommendation?.isFacedownRequired == true
-        val facedownOk = if (needFacedown) tracker.stopFacedownMonitoring() else true
+        val facedownOk = if (needFacedown) stopPreviewFacedown() else true
 
         if (facedownOk) {
             missionAccumulatedRestMs += sessionDuration
@@ -348,15 +375,7 @@ class CompanionPreviewActivity : Activity() {
             }
 
             if (lastIntensity == CharacterIntensity.STRONG || rec.isFacedownRequired) {
-                tracker.onFacedownDetectedWhileScreenOn = {
-                    handler.post {
-                        val locked = com.example.itv.infrastructure.observation.accessibility.WritingGuardService.lockScreen()
-                        if (!locked) {
-                            android.widget.Toast.makeText(applicationContext, "엎어둠 감지! 전원 버튼을 눌러 화면을 꺼주세요.", android.widget.Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                }
-                tracker.startFacedownMonitoring()
+                monitorFacedown { lockForRest() }
             }
 
             missionResumeTimeout?.let { handler.removeCallbacks(it) }
@@ -365,7 +384,7 @@ class CompanionPreviewActivity : Activity() {
                     missionActive = false
                     missionAccumulatedRestMs = 0L
                     factory.dismissMissionCountdownHud()
-                    tracker.stopFacedownMonitoring()
+                    stopPreviewFacedown()
                     statusText.text = "10초 내 화면을 다시 끄지 않아 미션 실패! 다시 도전해보세요."
                     show("retry")
                 }
@@ -390,7 +409,7 @@ class CompanionPreviewActivity : Activity() {
             }
         }
         if (!missionActive || activeRecommendation?.isFacedownRequired != true) {
-            tracker.stop()
+            releaseTracker()
         }
     }
 
@@ -428,21 +447,56 @@ class CompanionPreviewActivity : Activity() {
         statusText.setTextColor(color)
     }
 
+    private fun monitorFacedown(onDetected: () -> Unit) {
+        lateinit var listener: () -> Unit
+        listener = {
+            handler.post {
+                if (tracker.onFacedownDetectedWhileScreenOn === listener && !isFinishing && !isDestroyed &&
+                    (missionActive || hasWindowFocus())) {
+                    onDetected()
+                }
+            }
+            Unit
+        }
+        facedownListener = listener
+        tracker.onFacedownDetectedWhileScreenOn = listener
+        tracker.startFacedownMonitoring()
+    }
+
+    private fun stopPreviewFacedown(): Boolean {
+        val listener = facedownListener ?: return false
+        facedownListener = null
+        return tracker.onFacedownDetectedWhileScreenOn === listener && tracker.stopFacedownMonitoring()
+    }
+
+    private fun lockForRest() {
+        if (!com.example.itv.infrastructure.observation.accessibility.WritingGuardService.lockScreen()) {
+            android.widget.Toast.makeText(applicationContext, "엎어둠 감지! 전원 버튼을 눌러 화면을 꺼주세요.", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun releaseTracker() {
+        if (trackerAcquired) {
+            tracker.stop()
+            trackerAcquired = false
+        }
+    }
+
     private fun clear() {
         missionResumeTimeout?.let { handler.removeCallbacks(it) }
+        missionResumeTimeout = null
+        stopPreviewFacedown()
         factory.dismissMissionCountdownHud()
-        handler.removeCallbacks(sensorUpdater)
-        handler.post(sensorUpdater)
         current?.let { factory.detachPreview(it) }
         current = null
         selected = false
-        BedtimeCareController.getInstance(this).dismissCurrentDialog()
+        BedtimeCareController.getInstance(this).dismissPreviewDialog(host)
     }
 
     private fun show(mode: String) {
         if (!::factory.isInitialized || host.width == 0) return
         clear()
-        if (mode != "retry" && mode != "complete") {
+        if (mode != "retry") {
             missionActive = false
             missionAccumulatedRestMs = 0L
             missionOffAt = 0L
@@ -490,25 +544,19 @@ class CompanionPreviewActivity : Activity() {
         }
         current = scene.first
         factory.attachPreview(scene.first, scene.second)
-        if (intensity == CharacterIntensity.STRONG || rec.isFacedownRequired) {
-            tracker.onFacedownDetectedWhileScreenOn = {
-                handler.post {
-                    if (current != null && !missionActive) {
-                        missionActive = true
-                        missionAccumulatedRestMs = 0L
-                        missionOffAt = 0L
-                        current?.let { factory.detachPreview(it) }
-                        current = null
-                        selected = false
-                        statusText.text = "스마트폰을 바닥에 엎어두면 화면이 꺼지고 휴식이 시작돼요!"
-                    }
-                    val locked = com.example.itv.infrastructure.observation.accessibility.WritingGuardService.lockScreen()
-                    if (!locked) {
-                        android.widget.Toast.makeText(applicationContext, "엎어둠 감지! 전원 버튼을 눌러 화면을 꺼주세요.", android.widget.Toast.LENGTH_SHORT).show()
-                    }
+        if (mode != "complete" && (intensity == CharacterIntensity.STRONG || rec.isFacedownRequired)) {
+            monitorFacedown {
+                if (current === scene.first && !missionActive) {
+                    missionActive = true
+                    missionAccumulatedRestMs = 0L
+                    missionOffAt = 0L
+                    factory.detachPreview(scene.first)
+                    current = null
+                    selected = false
+                    statusText.text = "스마트폰을 바닥에 엎어두면 화면이 꺼지고 휴식이 시작돼요!"
                 }
+                lockForRest()
             }
-            tracker.startFacedownMonitoring()
         }
     }
 
@@ -522,10 +570,7 @@ class CompanionPreviewActivity : Activity() {
             val rec = activeRecommendation ?: RestMissionCatalog.pick(tracker.snapshot.value.posture, lastIntensity == CharacterIntensity.STRONG)
             activeRecommendation = rec
             if (rec.isFacedownRequired) {
-                tracker.onFacedownDetectedWhileScreenOn = {
-                    com.example.itv.infrastructure.observation.accessibility.WritingGuardService.lockScreen()
-                }
-                tracker.startFacedownMonitoring()
+                monitorFacedown { lockForRest() }
             }
             val restSec = missionRestDurationMs / 1000L
             factory.playReaction(root, "쉬기", 10L, 10L, restSec, rec) {
@@ -538,10 +583,7 @@ class CompanionPreviewActivity : Activity() {
                 current = null
                 selected = false
                 if (rec.isFacedownRequired) {
-                    tracker.onFacedownDetectedWhileScreenOn = {
-                        com.example.itv.infrastructure.observation.accessibility.WritingGuardService.lockScreen()
-                    }
-                    tracker.startFacedownMonitoring()
+                    monitorFacedown { lockForRest() }
                 }
                 statusText.text = if (rec.isFacedownRequired) {
                     "스마트폰을 바닥에 엎어두면 화면이 꺼지고 휴식이 시작돼요! (${restSec}초 목표)"
@@ -552,9 +594,9 @@ class CompanionPreviewActivity : Activity() {
             return
         }
 
-        handler.postDelayed({
-            if (!isFinishing) show("complete")
-        }, 1200L)
+        factory.playReaction(root, title) {
+            if (!isFinishing && current === root) show("complete")
+        }
     }
 
     override fun onDestroy() {
@@ -562,6 +604,7 @@ class CompanionPreviewActivity : Activity() {
         missionResumeTimeout?.let { handler.removeCallbacks(it) }
         factory.dismissMissionCountdownHud()
         clear()
+        releaseTracker()
         try { unregisterReceiver(screenReceiver) } catch (_: Exception) {}
         handler.removeCallbacksAndMessages(null)
     }

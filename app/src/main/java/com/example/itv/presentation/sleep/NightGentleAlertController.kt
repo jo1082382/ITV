@@ -96,7 +96,7 @@ object NightGentleAlertController {
                 rightMargin = 8.dp()
             }
             scaleType = ImageView.ScaleType.FIT_CENTER
-            setImageResource(R.drawable.itv_motion_sleep)
+            setImageResource(R.drawable.itv_puppy_sleep_face)
         }
         pillLayout.addView(sleepIcon)
 
