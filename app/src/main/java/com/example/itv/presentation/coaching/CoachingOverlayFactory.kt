@@ -78,10 +78,6 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
         R.drawable.itv_gallop_bone_00, R.drawable.itv_gallop_bone_01, R.drawable.itv_gallop_bone_02, R.drawable.itv_gallop_bone_03,
         R.drawable.itv_gallop_bone_04, R.drawable.itv_gallop_bone_05, R.drawable.itv_gallop_bone_06, R.drawable.itv_gallop_bone_07
     )
-    private val frontGallopFrames = intArrayOf(
-        R.drawable.itv_gallop_front_01, R.drawable.itv_gallop_front_02, R.drawable.itv_gallop_front_03,
-        R.drawable.itv_gallop_front_04, R.drawable.itv_gallop_front_05, R.drawable.itv_gallop_front_06
-    )
     private val sessions = mutableMapOf<View, Session>()
     private val handler = Handler(Looper.getMainLooper())
     private fun dp(v: Int) = (v * context.resources.displayMetrics.density).toInt()
@@ -96,7 +92,6 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
     ) {
         val windows = mutableListOf<View>()
         var animator: ValueAnimator? = null
-        var tailWagAnimator: ValueAnimator? = null
         var autoDismissRunnable: Runnable? = null
         var screenOffReceiver: BroadcastReceiver? = null
         var hold: Runnable? = null
@@ -109,9 +104,7 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
         var bubbleFollow: Runnable? = null
         var ready = false
         var retry = false
-        var hoveringPen = false
         var hoverZone = ""
-        var shake: ValueAnimator? = null
         var speechParams: WindowManager.LayoutParams? = null
         var reaction: Runnable? = null
         var reactionFinished: (() -> Unit)? = null
@@ -136,8 +129,6 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
             onInteraction?.invoke(false)
             countdownTimerRunnable?.let { handler.removeCallbacks(it) }
             countdownTimerRunnable = null
-            tailWagAnimator?.cancel()
-            tailWagAnimator = null
             autoDismissRunnable?.let { handler.removeCallbacks(it) }
             autoDismissRunnable = null
             screenOffReceiver?.let {
@@ -145,7 +136,6 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
                 screenOffReceiver = null
             }
             bubbleFollow?.let { handler.removeCallbacks(it) }
-            shake?.cancel()
             reaction?.let { handler.removeCallbacks(it) }
             reactionFinished = null
             onReady = null
@@ -327,11 +317,11 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
                 s.dog.scaleX = -1f
                 if (s.dog.tag != sprite) { s.dog.setImageResource(sprite); s.dog.tag = sprite }
                 try { wm.updateViewLayout(s.dog, s.dogParams) } catch (_: Exception) {}
-                if (f >= 0.99f) {
+                if (it.currentPlayTime >= duration) {
                     s.ready = true
                     s.dog.scaleX = 1f
                     s.dog.rotation = 0f
-                    s.dog.setImageResource(R.drawable.itv_motion_turn)
+                    startWaiting(s)
                     s.speech.visibility = View.VISIBLE
                     s.onReady?.invoke()
                     s.onReady = null
@@ -354,21 +344,11 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
         s.autoDismissRunnable = Runnable {
             if (!s.committed && !s.stopped) {
                 s.committed = true
-                ValueAnimator.ofFloat(0f, 1f).apply {
-                    duration = 500
-                    addUpdateListener { anim ->
-                        if (!s.stopped) {
-                            val f = anim.animatedValue as Float
-                            s.dogParams.x = (s.homeX + (width - s.homeX) * f).toInt()
-                            try { wm.updateViewLayout(s.dog, s.dogParams) } catch (_: Exception) {}
-                        }
-                    }
-                    start()
-                }
+                playDeparture(s, width, 1140L)
                 handler.postDelayed({
                     s.choice?.invoke("나중에", "다음에 다시 찾아올게!")
                     s.cleanup()
-                }, 550L)
+                }, 1170L)
             }
         }
         handler.postDelayed(s.autoDismissRunnable!!, 6000L)
@@ -485,17 +465,18 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
 
             // 화면 아래쪽에서 팔을 벌린 채 위로 통통 튀어오르는 모션 (520ms, Overshoot)
             s.animator = ValueAnimator.ofFloat(0f, 1f).apply {
-                duration = 520L
+                duration = 780L
                 interpolator = android.view.animation.OvershootInterpolator(1.35f)
                 addUpdateListener {
                     if (s.stopped) return@addUpdateListener
                     val f = it.animatedValue as Float
+                    s.dog.poseAt(GoldenMotion.JUMP, it.currentPlayTime / 780f)
                     s.dogParams.y = (startY - (startY - s.homeY) * f).toInt()
                     try { wm.updateViewLayout(s.dog, s.dogParams) } catch (_: Exception) {}
-                    if (f >= 0.99f) {
+                    if (it.currentPlayTime >= duration) {
                         s.ready = true
                         s.speech.visibility = View.VISIBLE
-                        startTailWagging(s)
+                        startWaiting(s)
 
                         // 터치 시 화면을 끄지 않고 안내 토스트 표시 (엎어두어야 화면이 꺼짐)
                         val guideAction = View.OnClickListener {
@@ -557,24 +538,15 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
                     s.dog.scaleY = 1f
                     s.dog.rotation = 0f
 
-                    val sprite = if (f >= 0.92f) {
-                        R.drawable.itv_gallop_front_00
-                    } else {
-                        frontGallopFrames[((it.currentPlayTime / 70L) % frontGallopFrames.size).toInt()]
-                    }
-                    if (s.dog.tag != sprite) { s.dog.setImageResource(sprite); s.dog.tag = sprite }
-
-                    val hop = if (f in 0.90f..0.99f) {
-                        val hopF = (f - 0.90f) / 0.09f
-                        (kotlin.math.sin(hopF * Math.PI) * dp(10)).toFloat()
-                    } else 0f
-                    s.dogParams.y = (startY + (s.homeY - startY) * f - hop).toInt()
+                    val ms = it.currentPlayTime
+                    if (ms < 1100L) s.dog.poseAt(GoldenMotion.APPROACH, (ms % 670L) / 670f)
+                    else s.dog.poseAt(GoldenMotion.JUMP, (ms - 1100L) / 700f)
+                    s.dogParams.y = (startY + (s.homeY - startY) * f).toInt()
 
                     try { wm.updateViewLayout(s.dog, s.dogParams) } catch (_: Exception) {}
-                    if (f >= 0.99f) {
+                    if (it.currentPlayTime >= duration) {
                         s.ready = true
-                        s.dog.setImageResource(R.drawable.itv_gallop_front_00)
-                        startTailWagging(s)
+                        startWaiting(s)
                         s.speech.visibility = View.VISIBLE
                         s.dog.setOnClickListener {
                             if (!s.committed && !s.stopped) {
@@ -693,10 +665,10 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
                     val peek = raw / (5000f / 7400f)
                     s.dog.pivotX = if (right) dogSize.toFloat() else 0f
                     s.dog.pivotY = dogSize * 0.85f
-                    s.dog.rotation = (if (right) -1f else 1f) * (8f + 24f * peek)
+                    s.dog.rotation = (if (right) -1f else 1f) * (3f + 5f * peek)
                     s.dogParams.x = if (right) width - (dogSize * (0.1f + 0.8f * peek)).toInt() else (-dogSize * (0.9f - 0.8f * peek)).toInt()
                     s.dogParams.y = sy
-                    s.dog.setImageResource(R.drawable.itv_motion_front)
+                    s.dog.poseAt(GoldenMotion.PEEK, (peek * 1.4f).coerceAtMost(1f))
                 } else {
                     s.dog.rotation = 0f
                     s.dog.pivotX = dogSize / 2f
@@ -729,7 +701,7 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
                         try { wm.updateViewLayout(s.speech, sp) } catch (_: Exception) {}
                     }
                     // 멈춰서 꼬리 흔드는 모션 시작! (드래그 전까지)
-                    startTailWagging(s)
+                    if (firstReady) startWaiting(s)
                 }
             }
             start()
@@ -758,30 +730,41 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
                 (s.speech.background as? com.example.itv.presentation.character.PuppyBubbleDrawable)?.pointToward((s.dogParams.x + s.dogParams.width / 2 - sp.x).toFloat() / sp.width, false)
                 wm.updateViewLayout(s.speech, sp)
             }
-            startTailWagging(s)
+            startWaiting(s)
         }
 
         installDrag(s, width, height, dogSize)
         startBubbleFollow(s, width, height)
     }
 
-    private fun startTailWagging(s: Session) {
-        if (s.stopped || s.committed) return
-        s.tailWagAnimator?.cancel()
-        // 몸 전체가 크게 돌지 않고 꼬리/엉덩이 쪽만 살랑이도록 피벗을 우측 꼬리 쪽에 집중하고 각도를 미세화
-        s.dog.pivotX = s.dogParams.width * 0.72f
-        s.dog.pivotY = s.dogParams.height * 0.75f
-        s.tailWagAnimator = ValueAnimator.ofFloat(-1.8f, 1.8f).apply {
-            duration = 260
-            repeatMode = ValueAnimator.REVERSE
-            repeatCount = ValueAnimator.INFINITE
-            addUpdateListener { anim ->
-                if (!s.stopped && !s.committed) {
-                    s.dog.rotation = anim.animatedValue as Float
+    private fun playDeparture(s: Session, targetX: Int, durationMs: Long) {
+        val startX = s.dogParams.x
+        val waveMs = durationMs / 2
+        s.animator?.cancel()
+        s.animator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = durationMs
+            interpolator = android.view.animation.LinearInterpolator()
+            addUpdateListener {
+                if (s.stopped) return@addUpdateListener
+                val ms = it.currentPlayTime
+                if (ms < waveMs) {
+                    s.dog.poseAt(GoldenMotion.WAVE, ms.toFloat() / waveMs)
+                } else {
+                    val walkMs = ms - waveMs
+                    s.dog.scaleX = if (targetX < startX) -1f else 1f
+                    s.dog.setImageResource(runFrames[((walkMs % 670L) * runFrames.size / 670L).toInt()])
+                    s.dogParams.x = startX + ((targetX - startX) * walkMs / (durationMs - waveMs)).toInt()
+                    try { wm.updateViewLayout(s.dog, s.dogParams) } catch (_: Exception) {}
                 }
             }
             start()
         }
+    }
+
+    private fun startWaiting(s: Session) {
+        if (s.stopped || s.committed) return
+        s.dog.play(if (s.retry) GoldenMotion.FIRM else GoldenMotion.IDLE)
+
     }
 
     private fun attachWelcomeControls(s: Session, width: Int, height: Int, add: (View, WindowManager.LayoutParams) -> Unit) {
@@ -847,7 +830,7 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
         val claimRewardAction = View.OnClickListener {
             if (s.ready && !s.rewardClaimed && !s.stopped) {
                 s.rewardClaimed = true
-                s.dog.setImageResource(R.drawable.itv_motion_front)
+                s.dog.play(GoldenMotion.GIVE)
                 val isStrong = s.completionRecommendation?.isFacedownRequired == true
                 val result = com.example.itv.infrastructure.reward.UserRewardStore.grantMissionReward(context, isStrong)
                 s.speech.text = if (result.didLevelUp) {
@@ -966,14 +949,13 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
             if (s.committed || s.stopped || !s.ready) return@setOnTouchListener true
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    s.tailWagAnimator?.cancel()
-                    s.tailWagAnimator = null
                     s.dog.rotation = 0f
                     s.onInteraction?.invoke(true)
                     downX = event.rawX; downY = event.rawY; startX = s.dogParams.x; startY = s.dogParams.y; dragging = false
                     s.hold = Runnable {
                         if (!s.stopped && !s.committed) {
                             dragging = true
+                            s.dog.play(GoldenMotion.LIFT)
                             s.onInteraction?.invoke(true)
                             startBubbleFollow(s, width, height)
                             startY -= dp(50)
@@ -999,55 +981,22 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
                         val zone = if (over) "pen" else if (home) "home" else if (edge) "edge" else "none"
                         if (zone != s.hoverZone) {
                             s.hoverZone = zone
-                            if (zone == "home") {
-                                s.shake?.cancel(); s.dog.rotation = 0f
-                                com.example.itv.presentation.character.CompanionHover.sleepy(s.dog)
-                                s.speech.text = CoachingSpeechCatalog.pickSpeech(SpeechSituation.HOVER_HOME, s.tone)
-                            } else if (zone == "edge") {
-                                s.shake?.cancel(); s.dog.rotation = 0f; s.dog.setImageResource(R.drawable.itv_motion_sad)
-                                s.speech.text = CoachingSpeechCatalog.pickSpeech(SpeechSituation.HOVER_EDGE, s.tone)
-                            } else if (zone == "none") {
-                                s.dog.setImageResource(if (s.retry) R.drawable.itv_motion_angry else R.drawable.itv_motion_turn)
-                                s.speech.text = if (s.retry) {
-                                    CoachingSpeechCatalog.pickSpeech(SpeechSituation.RETRY_INCOMPLETE, s.tone)
-                                } else {
-                                    CoachingSpeechCatalog.pickSpeech(SpeechSituation.HOVER_NORMAL, s.tone)
-                                }
+                            val (pose, speech) = when (zone) {
+                                "home" -> GoldenMotion.DROWSY to SpeechSituation.HOVER_HOME
+                                "edge" -> GoldenMotion.SAD to SpeechSituation.HOVER_EDGE
+                                "pen" -> GoldenMotion.REFUSE to SpeechSituation.HOVER_CAGE
+                                else -> if (s.retry) GoldenMotion.FIRM to SpeechSituation.RETRY_INCOMPLETE
+                                        else GoldenMotion.LIFT to SpeechSituation.HOVER_NORMAL
                             }
-                        }
-                        if (over != s.hoveringPen) {
-                            s.hoveringPen = over; s.shake?.cancel(); s.dog.rotation = 0f
-                            if (over) {
-                                s.dog.setImageResource(R.drawable.itv_motion_sad)
-                                s.speech.text = CoachingSpeechCatalog.pickSpeech(SpeechSituation.HOVER_CAGE, s.tone)
-                                s.shake = ValueAnimator.ofFloat(-6f, 6f, -6f, 6f, 0f).apply {
-                                    duration = 1000; repeatCount = 2
-                                    addUpdateListener { if (!s.stopped) s.dog.rotation = it.animatedValue as Float }
-                                    start()
-                                }
-                            } else {
-                                if (s.hoverZone == "home") {
-                                    com.example.itv.presentation.character.CompanionHover.sleepy(s.dog)
-                                    s.speech.text = CoachingSpeechCatalog.pickSpeech(SpeechSituation.HOVER_HOME, s.tone)
-                                } else if (s.hoverZone == "edge") {
-                                    s.dog.setImageResource(R.drawable.itv_motion_sad)
-                                    s.speech.text = CoachingSpeechCatalog.pickSpeech(SpeechSituation.HOVER_EDGE, s.tone)
-                                } else {
-                                    s.dog.setImageResource(if (s.retry) R.drawable.itv_motion_angry else R.drawable.itv_motion_turn)
-                                    s.speech.text = if (s.retry) {
-                                        CoachingSpeechCatalog.pickSpeech(SpeechSituation.RETRY_INCOMPLETE, s.tone)
-                                    } else {
-                                        CoachingSpeechCatalog.pickSpeech(SpeechSituation.HOVER_NORMAL, s.tone)
-                                    }
-                                }
-                            }
+                            s.dog.play(pose)
+                            s.speech.text = CoachingSpeechCatalog.pickSpeech(speech, s.tone)
                         }
                         try { wm.updateViewLayout(s.dog, s.dogParams) } catch (_: Exception) {}
                     }
                 }
                 MotionEvent.ACTION_UP -> {
                     s.hold?.let { handler.removeCallbacks(it) }
-                    s.shake?.cancel(); s.dog.rotation = 0f; s.hoveringPen = false
+                    s.dog.rotation = 0f; s.hoverZone = ""
                     s.onInteraction?.invoke(false)
                     if (dragging) {
                         val cx = s.dogParams.x + size / 2; val cy = s.dogParams.y + size / 2; val edge = dp(48)
@@ -1073,20 +1022,22 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
                             s.dogParams.x = s.homeX; s.dogParams.y = s.homeY
                             try { wm.updateViewLayout(s.dog, s.dogParams) } catch (_: Exception) {}
                             s.speech.text = "목표 영역에 놓아 주세요."
-                            startTailWagging(s)
+                            s.dog.play(GoldenMotion.LOWER, if (s.retry) GoldenMotion.FIRM else GoldenMotion.IDLE)
                         }
                     } else {
-                        startTailWagging(s)
+                        startWaiting(s)
                     }
                     dragging = false
                 }
                 MotionEvent.ACTION_CANCEL -> {
                     s.hold?.let { handler.removeCallbacks(it) }
+                    val wasDragging = dragging
                     dragging = false
+                    s.hoverZone = ""
                     s.onInteraction?.invoke(false)
                     s.dogParams.x = s.homeX; s.dogParams.y = s.homeY
                     try { wm.updateViewLayout(s.dog, s.dogParams) } catch (_: Exception) {}
-                    startTailWagging(s)
+                    if (wasDragging) s.dog.play(GoldenMotion.LOWER, GoldenMotion.IDLE) else startWaiting(s)
                 }
             }
             true
@@ -1105,9 +1056,6 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
         val s = sessions[root]
         if (s == null || s.stopped) { finished(); return }
         s.committed = true
-        s.tailWagAnimator?.cancel()
-        s.tailWagAnimator = null
-        s.shake?.cancel()
         s.dog.rotation = 0f
         s.animator?.cancel()
         s.hold?.let { handler.removeCallbacks(it) }
@@ -1152,12 +1100,7 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
                     try { wm.updateViewLayout(s.dog, s.dogParams) } catch (_: Exception) {}
                 }
 
-                s.animator = ValueAnimator.ofFloat(1f, 1.035f, 1f, 1.035f, 1f).apply {
-                    duration = 2700
-                    repeatCount = ValueAnimator.INFINITE
-                    addUpdateListener { if (!s.stopped) { s.dog.scaleY = it.animatedValue as Float } }
-                    start()
-                }
+                s.dog.play(GoldenMotion.LIE, GoldenMotion.SLEEP)
 
                 val rec = recommendation ?: s.recommendation ?: com.example.itv.domain.coaching.RestMissionCatalog.pick(com.example.itv.domain.coaching.UserPosture.UNKNOWN, false)
                 val cardWidth = minOf(dp(320), screenWidth - dp(32))
@@ -1327,7 +1270,7 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
                 }
             }
             "나중에" -> {
-                s.dog.setImageResource(R.drawable.itv_motion_wave)
+                playDeparture(s, s.dogParams.x + (if (s.dogParams.x < context.resources.displayMetrics.widthPixels / 2) -1 else 1) * context.resources.displayMetrics.widthPixels, 1490L)
                 val timeStr = if (reminderSeconds % 60L == 0L) "${reminderSeconds / 60L}분" else "${reminderSeconds}초"
                 s.speech.text = CoachingSpeechCatalog.pickSpeech(SpeechSituation.REACT_LATER, s.tone, timeText = timeStr)
             }
@@ -1336,7 +1279,7 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
                     s.dogParams.x = s.cage.centerX() - s.dogParams.width / 2
                     s.dogParams.y = s.cage.bottom - s.dogParams.height - dp(8)
                 }
-                s.dog.setImageResource(R.drawable.itv_motion_sad)
+                s.dog.play(GoldenMotion.SAD)
                 s.speech.text = CoachingSpeechCatalog.pickSpeech(SpeechSituation.REACT_DISMISS, s.tone)
                 val fenceView = s.fence
                 val fenceLayout = s.fenceParams

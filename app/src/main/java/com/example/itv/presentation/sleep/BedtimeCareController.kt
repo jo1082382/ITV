@@ -1,5 +1,6 @@
 package com.example.itv.presentation.sleep
 
+import com.example.itv.presentation.coaching.GoldenMotion
 import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Canvas
@@ -34,15 +35,6 @@ import com.example.itv.infrastructure.sleep.AsmrType
 import com.example.itv.infrastructure.sleep.BedtimeMemoStore
 import com.example.itv.infrastructure.sleep.GrayscaleOverlayController
 import com.example.itv.presentation.coaching.EquippedDogView
-
-private val frontGallopFrames = intArrayOf(
-    R.drawable.itv_gallop_front_01,
-    R.drawable.itv_gallop_front_02,
-    R.drawable.itv_gallop_front_03,
-    R.drawable.itv_gallop_front_04,
-    R.drawable.itv_gallop_front_05,
-    R.drawable.itv_gallop_front_06
-)
 
 /**
  * 큰 말풍선 전용 커스텀 드로어블:
@@ -259,7 +251,7 @@ class BedtimeCareController private constructor(private val context: Context) {
 
         // 3. 조심스럽게 다가올 강아지 뷰 (EquippedDogView: 코디 아이템 및 프레임 지원)
         val dogView = EquippedDogView(context).apply {
-            setImageResource(frontGallopFrames[0])
+            setImageResource(R.drawable.itv_gallop_front_01)
             isClickable = false
             isFocusable = true
         }
@@ -463,14 +455,13 @@ class BedtimeCareController private constructor(private val context: Context) {
                     dogView.translationY = startY + (endY - startY) * f
 
                     if (f < 0.96f) {
-                        val frame = frontGallopFrames[((anim.currentPlayTime / 130L) % frontGallopFrames.size).toInt()]
-                        dogView.setImageResource(frame)
+                        dogView.poseAt(GoldenMotion.APPROACH, (anim.currentPlayTime % 1020L) / 1020f)
                     } else if (!arrived) {
                         arrived = true
                         dogView.scaleX = 1f
                         dogView.scaleY = 1f
                         // 바닥에 조용히 눕기
-                        dogView.setImageResource(R.drawable.itv_motion_sleep)
+                        dogView.play(GoldenMotion.LIE, GoldenMotion.SLEEP)
                         spotlightView.animate().alpha(0.35f).setDuration(600).start()
                         dogHint.visibility = View.VISIBLE
                         dogHint.animate().alpha(1f).setDuration(600).start()
@@ -482,16 +473,11 @@ class BedtimeCareController private constructor(private val context: Context) {
 
             // 바닥에 누운 강아지 터치 이벤트
             dogView.setOnClickListener {
-                if (!arrived) return@setOnClickListener
+                if (!arrived || !dogView.isClickable) return@setOnClickListener
                 dogView.isClickable = false
                 dogHint.animate().alpha(0f).setDuration(200).withEndAction { dogHint.visibility = View.GONE }.start()
 
-                // 캐릭터는 계속 평화롭게 수면 상태 유지 (itv_motion_sleep)
-                // 터치 시 편안하게 숨을 고르는 부드러운 반응만 연출
-                dogView.setImageResource(R.drawable.itv_motion_sleep)
-                dogView.animate().scaleX(1.04f).scaleY(1.04f).setDuration(300).withEndAction {
-                    dogView.animate().scaleX(1f).scaleY(1f).setDuration(300).start()
-                }.start()
+                dogView.play(GoldenMotion.WAKE, GoldenMotion.IDLE)
 
                 // 큰 말풍선 창 팝업 등장 (말풍선 밖으로 벗어나지 않도록 완벽 패딩)
                 bubbleCard.visibility = View.VISIBLE

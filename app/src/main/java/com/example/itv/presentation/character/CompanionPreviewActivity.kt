@@ -552,9 +552,9 @@ class CompanionPreviewActivity : Activity() {
             return
         }
 
-        handler.postDelayed({
-            if (!isFinishing) show("complete")
-        }, 1200L)
+        factory.playReaction(root, title) {
+            if (!isFinishing && current === root) show("complete")
+        }
     }
 
     override fun onDestroy() {
