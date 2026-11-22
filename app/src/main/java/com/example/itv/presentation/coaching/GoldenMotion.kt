@@ -12,7 +12,9 @@ import android.graphics.drawable.Drawable
 import android.util.LruCache
 import android.os.Handler
 import android.os.Looper
-import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import java.io.DataInputStream
 
 internal enum class GoldenMotion(val durationMs: Long, val repeat: Boolean = false) {
@@ -22,31 +24,66 @@ internal enum class GoldenMotion(val durationMs: Long, val repeat: Boolean = fal
     RECEIVE(640), TURN_LEFT(860), TURN_RIGHT(860), SIDE_LEFT(670, true), SIDE_RIGHT(670, true)
 }
 
+/** Off-screen time and time spent waiting for an atlas do not consume an authored one-shot. */
+internal class GoldenPlaybackClock {
+    private var accumulated = 0L
+    private var runningSince: Long? = null
+    val running get() = runningSince != null
+
+    fun seek(offset: Long) {
+        accumulated = offset
+        runningSince = null
+    }
+
+    fun elapsed(now: Long) = accumulated + (runningSince?.let { now - it } ?: 0L)
+    fun resume(now: Long) { if (!running) runningSince = now }
+
+    fun pause(now: Long) {
+        accumulated = elapsed(now)
+        runningSince = null
+    }
+}
+
 internal class GoldenStrip(val bitmap: Bitmap, val anchors: List<EquippedDogView.FrameLandmark>) {
     companion object {
         private val cache = object : LruCache<GoldenMotion, GoldenStrip>(28 * 1024 * 1024) {
             override fun sizeOf(key: GoldenMotion, value: GoldenStrip) = value.bitmap.allocationByteCount
         }
 
-        private val decoder = Executors.newSingleThreadExecutor()
+        private val decoder = ThreadPoolExecutor(1, 1, 0L, TimeUnit.SECONDS, LinkedBlockingQueue())
         private val main = Handler(Looper.getMainLooper())
-        private val pending = mutableMapOf<GoldenMotion, MutableList<(GoldenStrip?) -> Unit>>()
+        private val pending = mutableMapOf<GoldenMotion, Load>()
 
-        // All cache and waiter mutations are on the main thread. The expensive
-        // WebP decode, metadata read and texture preparation run on the worker.
-        fun request(assets: AssetManager, motion: GoldenMotion, ready: (GoldenStrip?) -> Unit) {
-            cache.get(motion)?.let { ready(it); return }
-            pending[motion]?.let { it.add(ready); return }
-            pending[motion] = mutableListOf(ready)
-            decoder.execute {
-                val strip = try { decode(assets, motion) } catch (e: Exception) {
-                    android.util.Log.e("GoldenMotion", "Unable to decode ${motion.name}", e)
-                    null
+        private class Load {
+            val listeners = mutableListOf<(GoldenStrip?) -> Unit>()
+            lateinit var work: Runnable
+        }
+
+        // Main-thread callers can unsubscribe on input changes or detach. Discard an
+        // unstarted decode if no view still needs it; another view may share the job.
+        fun request(assets: AssetManager, motion: GoldenMotion, ready: (GoldenStrip?) -> Unit): Runnable? {
+            cache.get(motion)?.let { ready(it); return null }
+            val load = pending.getOrPut(motion) {
+                Load().also { job ->
+                    job.work = Runnable {
+                        val strip = try { decode(assets, motion) } catch (e: Exception) {
+                            android.util.Log.e("GoldenMotion", "Unable to decode ${motion.name}", e)
+                            null
+                        }
+                        main.post {
+                            if (strip != null) cache.put(motion, strip)
+                            pending.remove(motion)
+                            job.listeners.toList().forEach { it(strip) }
+                            job.listeners.clear()
+                        }
+                    }
+                    decoder.execute(job.work)
                 }
-                main.post {
-                    if (strip != null) cache.put(motion, strip)
-                    pending.remove(motion)?.forEach { it(strip) }
-                }
+            }
+            load.listeners.add(ready)
+            return Runnable {
+                load.listeners.remove(ready)
+                if (load.listeners.isEmpty() && decoder.remove(load.work)) pending.remove(motion)
             }
         }
 

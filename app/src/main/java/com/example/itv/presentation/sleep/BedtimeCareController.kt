@@ -175,6 +175,10 @@ class BedtimeCareController private constructor(private val context: Context) {
         }
     }
 
+    fun dismissPreviewDialog(host: ViewGroup) {
+        if (currentDialogView?.parent === host) dismissCurrentDialog()
+    }
+
     fun dismissCurrentDialog() {
         currentAnimator?.cancel()
         currentAnimator = null
@@ -410,30 +414,44 @@ class BedtimeCareController private constructor(private val context: Context) {
             val w = root.width.takeIf { it > 0 } ?: context.resources.displayMetrics.widthPixels
             val h = root.height.takeIf { it > 0 } ?: context.resources.displayMetrics.heightPixels
 
-            val targetDogSize = dp(120)
-            val startY = dp(40)
-            val endY = h - targetDogSize - dp(45)
+            val columns = w > h
+            val actorCenter = if (columns) w / 4 else w / 2
+            val targetDogSize = minOf(dp(120), w / 2, h / 2).coerceAtLeast(1)
+            val endY = (h - targetDogSize - minOf(dp(45), h / 8)).coerceAtLeast(0)
+            val startY = minOf(dp(40), endY / 3)
 
             dogView.layoutParams = FrameLayout.LayoutParams(targetDogSize, targetDogSize)
-            dogView.translationX = (w - targetDogSize) / 2f
+            dogView.translationX = actorCenter - targetDogSize / 2f
             dogView.translationY = startY.toFloat()
             dogView.scaleX = 0.5f
             dogView.scaleY = 0.5f
 
             spotlightView.layoutParams = FrameLayout.LayoutParams(dp(220), dp(130))
-            spotlightView.translationX = (w - dp(220)) / 2f
+            spotlightView.translationX = actorCenter - dp(220) / 2f
             spotlightView.translationY = (endY - dp(5)).toFloat()
 
             dogHint.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
             val hintW = dogHint.measuredWidth
             dogHint.layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT)
-            dogHint.translationX = (w - hintW) / 2f
+            dogHint.translationX = actorCenter - hintW / 2f
             dogHint.translationY = (endY - dp(32)).toFloat()
 
-            val bubbleW = minOf(dp(330), w - dp(32))
-            bubbleCard.layoutParams = FrameLayout.LayoutParams(bubbleW, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
-                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-                bottomMargin = (h - endY) + dp(4)
+            val bubbleW = minOf(dp(330), (if (columns) w / 2 else w) - dp(16)).coerceAtLeast(1)
+            val inset = minOf(dp(8), h / 8)
+            val maxBubbleH = (if (columns) h - 2 * inset else endY - 2 * inset).coerceAtLeast(1)
+            bubbleCard.measure(
+                View.MeasureSpec.makeMeasureSpec(bubbleW, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(maxBubbleH, View.MeasureSpec.AT_MOST)
+            )
+            // A fixed upper bound lets the inner ScrollView keep all choices reachable.
+            bubbleCard.layoutParams = FrameLayout.LayoutParams(bubbleW, bubbleCard.measuredHeight).apply {
+                if (columns) {
+                    gravity = Gravity.CENTER_VERTICAL or Gravity.LEFT
+                    leftMargin = w * 3 / 4 - bubbleW / 2
+                } else {
+                    gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                    bottomMargin = h - endY + inset
+                }
             }
 
             var arrived = false
@@ -657,6 +675,7 @@ class BedtimeCareController private constructor(private val context: Context) {
 
         // Wait 2.2s for user to read comfort message, then lock screen
         root.postDelayed({
+            if (currentDialogView !== root || !root.isAttachedToWindow) return@postDelayed
             dismissCurrentDialog()
             onComplete?.invoke()
             val locked = WritingGuardService.lockScreen()

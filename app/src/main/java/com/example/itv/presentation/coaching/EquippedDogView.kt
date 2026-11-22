@@ -2,6 +2,7 @@ package com.example.itv.presentation.coaching
 
 import android.content.Context
 import android.graphics.drawable.Drawable
+import android.os.SystemClock
 import android.util.AttributeSet
 import android.view.View
 import android.widget.FrameLayout
@@ -130,25 +131,26 @@ class EquippedDogView @JvmOverloads constructor(
 
     private var pose: GoldenMotion? = null
     private var pendingProgress = 0f
-    private var loading = false
+    private var cancelLoad: Runnable? = null
     private var dressed = false
     private var sprite: GoldenFrameDrawable? = null
     private var active: GoldenMotion? = null
     private var next: GoldenMotion? = null
-    private var started = 0L
+    private val clock = GoldenPlaybackClock()
 
     private val tick = object : Runnable {
         override fun run() {
             val motion = active ?: return
-            val elapsed = android.os.SystemClock.uptimeMillis() - started
+            if (!clock.running) return
+            val elapsed = clock.elapsed(SystemClock.uptimeMillis())
             val time = if (motion.repeat) elapsed % motion.durationMs else elapsed.coerceAtMost(motion.durationMs)
-            showPose(motion, time.toFloat() / motion.durationMs)
+            setFrame(motion, time.toFloat() / motion.durationMs)
             if (!motion.repeat && elapsed >= motion.durationMs) {
-                active = null
-                next?.let { play(it) }
+                val following = next
+                stopPlayback()
+                following?.let { play(it) }
                 return
             }
-            if (loading) return // the decoder callback resumes the clock
             val count = sprite?.strip?.anchors?.size ?: return
             val steps = if (motion.repeat) count else count - 1
             val boundary = ((time * steps / motion.durationMs + 1) * motion.durationMs + steps - 1) / steps
@@ -156,18 +158,25 @@ class EquippedDogView @JvmOverloads constructor(
         }
     }
 
+    private fun resumePlayback() {
+        if (active == null || cancelLoad != null || sprite == null || clock.running) return
+        if (!isAttachedToWindow || !isShown || windowVisibility != View.VISIBLE) return
+        clock.resume(SystemClock.uptimeMillis())
+        post(tick)
+    }
+
     internal fun play(motion: GoldenMotion, then: GoldenMotion? = null) {
         if (active == motion && next == then) return
         val offset = if (motion == GoldenMotion.WAKE && active == GoldenMotion.LIE) {
-            val elapsed = android.os.SystemClock.uptimeMillis() - started
-            val remaining = 1f - (elapsed.toFloat() / GoldenMotion.LIE.durationMs).coerceIn(0f, 1f)
+            val remaining = 1f - (clock.elapsed(SystemClock.uptimeMillis()).toFloat() / GoldenMotion.LIE.durationMs).coerceIn(0f, 1f)
             (remaining * motion.durationMs).toLong()
         } else 0L
         stopPlayback()
         active = motion
         next = then
-        started = android.os.SystemClock.uptimeMillis() - offset
-        tick.run()
+        clock.seek(offset)
+        showPose(motion, offset.toFloat() / motion.durationMs)
+        resumePlayback()
     }
 
     internal fun playAfter(motion: GoldenMotion, preceding: GoldenMotion) {
@@ -182,30 +191,27 @@ class EquippedDogView @JvmOverloads constructor(
     private fun showPose(motion: GoldenMotion, progress: Float) {
         pendingProgress = progress
         if (motion == pose) {
-            if (!loading) setFrame(motion, progress)
+            if (cancelLoad == null) setFrame(motion, progress)
             return
         }
+        cancelLoad?.run()
+        cancelLoad = null
         pose = motion
-        loading = true
-        var requested = false
-        GoldenStrip.request(resources.assets, motion) { strip ->
-            if (motion != pose) return@request
-            loading = false
+        cancelLoad = GoldenStrip.request(resources.assets, motion) { strip ->
+            if (pose != motion) return@request
+            cancelLoad = null
             if (strip == null) {
+                pose = null
                 stopPlayback()
-                return@request
-            }
-            sprite = GoldenFrameDrawable(strip)
-            currentSpriteRes = 0
-            baseDog.setImageDrawable(sprite)
-            setFrame(motion, pendingProgress)
-            if (dressed) requestLayout()
-            if (requested && active == motion) {
-                removeCallbacks(tick)
-                tick.run()
+            } else {
+                sprite = GoldenFrameDrawable(strip)
+                currentSpriteRes = 0
+                baseDog.setImageDrawable(sprite)
+                setFrame(motion, pendingProgress)
+                if (dressed) requestLayout()
+                resumePlayback()
             }
         }
-        requested = true
     }
 
     private fun setFrame(motion: GoldenMotion, progress: Float) {
@@ -220,21 +226,49 @@ class EquippedDogView @JvmOverloads constructor(
     }
 
     private fun stopPlayback() {
+        clock.seek(0L)
         if (active != null) removeCallbacks(tick)
         active = null
         next = null
     }
 
+    override fun onVisibilityAggregated(isVisible: Boolean) {
+        super.onVisibilityAggregated(isVisible)
+        if (active == null) return
+        if (isVisible) resumePlayback() else {
+            clock.pause(SystemClock.uptimeMillis())
+            removeCallbacks(tick)
+        }
+    }
+
     override fun onDetachedFromWindow() {
-        stopPlayback()
-        if (loading) { pose = null; loading = false }
+        clock.pause(SystemClock.uptimeMillis())
+        removeCallbacks(tick)
+        // Preserve a frame already decoded. Re-request an interrupted load if
+        // the same view is reattached (e.g. a window layer-order change).
+        if (cancelLoad != null) {
+            cancelLoad?.run()
+            cancelLoad = null
+            sprite = null
+        }
         super.onDetachedFromWindow()
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        val pending = pose
+        if (pending != null && sprite == null && cancelLoad == null) {
+            pose = null
+            showPose(pending, pendingProgress)
+        }
+        resumePlayback()
     }
 
     fun setImageResource(@DrawableRes resId: Int) {
         stopPlayback()
         pose = null
-        loading = false
+        cancelLoad?.run()
+        cancelLoad = null
         sprite = null
         baseDog.setImageResource(resId)
         if (currentSpriteRes != resId) {
@@ -246,7 +280,8 @@ class EquippedDogView @JvmOverloads constructor(
     fun setImageDrawable(drawable: Drawable?) {
         stopPlayback()
         pose = null
-        loading = false
+        cancelLoad?.run()
+        cancelLoad = null
         sprite = null
         currentSpriteRes = 0
         baseDog.setImageDrawable(drawable)
@@ -284,14 +319,18 @@ class EquippedDogView @JvmOverloads constructor(
         if (w <= 0 || h <= 0) return
 
         val landmark = sprite?.let { it.strip.anchors[it.index] } ?: FRAME_LANDMARKS[currentSpriteRes] ?: DEFAULT_LANDMARK
-        val scale = w.toFloat() / 400f
+        val side = minOf(w, h)
+        val scale = side.toFloat() / 400f
+        // FIT_CENTER letterboxes a square sprite inside a rectangular host.
+        val insetX = (w - side) * .5f
+        val insetY = (h - side) * .5f
 
         // 1. 모자 (머리 정수리에 푹 눌러쓴 실제 모자 크기와 핏 + 고개 회전각 동기화)
         if (hatLayer.visibility == View.VISIBLE) {
             val hatBoxSize = 180f * scale
             val cx = landmark.headTopX * scale
             val cy = (landmark.headTopY + 45f) * scale
-            layoutCenter(hatLayer, cx, cy, hatBoxSize, hatBoxSize)
+            layoutCenter(hatLayer, insetX + cx, insetY + cy, hatBoxSize, hatBoxSize)
             hatLayer.rotation = landmark.eyeAngle
         }
 
@@ -300,7 +339,7 @@ class EquippedDogView @JvmOverloads constructor(
             val glassesBoxSize = (landmark.eyeSpan / 0.37f) * scale
             val cx = landmark.eyeCenterX * scale
             val cy = landmark.eyeCenterY * scale - (glassesBoxSize * 0.17f)
-            layoutCenter(glassesLayer, cx, cy, glassesBoxSize, glassesBoxSize)
+            layoutCenter(glassesLayer, insetX + cx, insetY + cy, glassesBoxSize, glassesBoxSize)
             glassesLayer.rotation = landmark.eyeAngle
         }
 
@@ -309,7 +348,7 @@ class EquippedDogView @JvmOverloads constructor(
             val noseBoxSize = 75f * scale
             val cx = landmark.noseX * scale
             val cy = (landmark.noseY + 4f) * scale
-            layoutCenter(noseLayer, cx, cy, noseBoxSize, noseBoxSize)
+            layoutCenter(noseLayer, insetX + cx, insetY + cy, noseBoxSize, noseBoxSize)
             noseLayer.rotation = landmark.eyeAngle
         }
 
@@ -318,7 +357,7 @@ class EquippedDogView @JvmOverloads constructor(
             val clothesBoxSize = 240f * scale
             val cx = landmark.chestX * scale
             val cy = (landmark.chestY - 5f) * scale
-            layoutCenter(clothesLayer, cx, cy, clothesBoxSize, clothesBoxSize)
+            layoutCenter(clothesLayer, insetX + cx, insetY + cy, clothesBoxSize, clothesBoxSize)
             clothesLayer.rotation = landmark.eyeAngle * 0.4f
         }
 
@@ -327,7 +366,7 @@ class EquippedDogView @JvmOverloads constructor(
             val shoesBoxSize = 180f * scale
             val cx = landmark.feetX * scale
             val cy = (landmark.feetY - 18f) * scale
-            layoutCenter(shoesLayer, cx, cy, shoesBoxSize, shoesBoxSize)
+            layoutCenter(shoesLayer, insetX + cx, insetY + cy, shoesBoxSize, shoesBoxSize)
             shoesLayer.rotation = landmark.feetAngle
         }
     }
