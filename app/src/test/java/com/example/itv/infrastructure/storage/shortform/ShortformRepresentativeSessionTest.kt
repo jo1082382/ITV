@@ -74,4 +74,27 @@ class ShortformRepresentativeSessionTest {
         val repMs = ShortformPersonalStatsStore.calculateRepresentativeSessionMs(emptyList(), fallbackMs = 180_000L)
         assertEquals(180_000L, repMs)
     }
+
+    @Test
+    fun phoneRepresentativeSessionsExcludeQuickChecksUnderTwoMinutes() {
+        val phoneDurations = listOf(
+            15_000L,   // 15s glance (excluded)
+            45_000L,   // 45s kakao quick reply (excluded)
+            90_000L,   // 1.5m quick memo/document check (excluded)
+            300_000L,  // 5m reading
+            600_000L,  // 10m browsing
+            1_200_000L // 20m video
+        )
+        // With minDurationMs = 120_000L (2 min):
+        // Eligible: 5m (300k), 10m (600k), 20m (1200k)
+        // Median: 10m (600,000)
+        // Max: 20m (1,200,000)
+        // Result: (600k + 1200k) / 2 = 900_000L (15m)
+        val repPhoneMs = ShortformPersonalStatsStore.calculateRepresentativeSessionLengths(
+            phoneDurations,
+            fallbackMs = 0L,
+            minDurationMs = 120_000L
+        )
+        assertEquals(900_000L, repPhoneMs)
+    }
 }

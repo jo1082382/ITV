@@ -23,6 +23,7 @@ internal object ShortformPersonalStatsStore {
     const val PKG_YOUTUBE = "com.google.android.youtube"
     private const val MIN_VALID_SESSION_MS = 5_000L
     private const val MIN_REPRESENTATIVE_SESSION_MS = 60_000L
+    private const val MIN_PHONE_REPRESENTATIVE_SESSION_MS = 120_000L // 2분 미만 퀵체크(카톡 단답, 메모/알림 확인) 필터링
     private const val SESSION_GRACE_MS = 15_000L
     private const val MAX_STORED_SESSIONS = 300
 
@@ -362,14 +363,16 @@ internal object ShortformPersonalStatsStore {
         if (parsedPhoneSessions.isNotEmpty()) {
             val phone30d = parsedPhoneSessions.filter { !it.date.isBefore(start30d) && !it.date.isAfter(todayDate) }
             val phone7d = parsedPhoneSessions.filter { !it.date.isBefore(start7d) && !it.date.isAfter(todayDate) }
+            val repPhone30d = phone30d.filter { it.durationMs >= MIN_PHONE_REPRESENTATIVE_SESSION_MS }.ifEmpty { phone30d }
+            val repPhone7d = phone7d.filter { it.durationMs >= MIN_PHONE_REPRESENTATIVE_SESSION_MS }.ifEmpty { phone7d }
             if (phone30d.isNotEmpty()) {
-                cachedPhone30dWeightedAvgSessionMs = calculateRepresentativeSessionLengths(phone30d.map { it.weightedDurationMs }, fallbackMs = 180_000L)
-                cachedPhone30dRawAvgSessionMs = calculateRepresentativeSessionLengths(phone30d.map { it.durationMs }, fallbackMs = 300_000L)
-                cachedPhoneAvgShortformRatio = phone30d.map { it.shortformRatio }.average()
+                cachedPhone30dWeightedAvgSessionMs = calculateRepresentativeSessionLengths(repPhone30d.map { it.weightedDurationMs }, fallbackMs = 180_000L, minDurationMs = MIN_PHONE_REPRESENTATIVE_SESSION_MS)
+                cachedPhone30dRawAvgSessionMs = calculateRepresentativeSessionLengths(repPhone30d.map { it.durationMs }, fallbackMs = 300_000L, minDurationMs = MIN_PHONE_REPRESENTATIVE_SESSION_MS)
+                cachedPhoneAvgShortformRatio = repPhone30d.map { it.shortformRatio }.average()
             }
             if (phone7d.isNotEmpty()) {
-                cachedPhone7dWeightedAvgSessionMs = calculateRepresentativeSessionLengths(phone7d.map { it.weightedDurationMs }, fallbackMs = cachedPhone30dWeightedAvgSessionMs)
-                cachedPhone7dRawAvgSessionMs = calculateRepresentativeSessionLengths(phone7d.map { it.durationMs }, fallbackMs = cachedPhone30dRawAvgSessionMs)
+                cachedPhone7dWeightedAvgSessionMs = calculateRepresentativeSessionLengths(repPhone7d.map { it.weightedDurationMs }, fallbackMs = cachedPhone30dWeightedAvgSessionMs, minDurationMs = MIN_PHONE_REPRESENTATIVE_SESSION_MS)
+                cachedPhone7dRawAvgSessionMs = calculateRepresentativeSessionLengths(repPhone7d.map { it.durationMs }, fallbackMs = cachedPhone30dRawAvgSessionMs, minDurationMs = MIN_PHONE_REPRESENTATIVE_SESSION_MS)
             }
         }
     }
@@ -554,9 +557,10 @@ internal object ShortformPersonalStatsStore {
             val parsed = parsePhoneSessions(events)
             if (parsed.isNotEmpty()) {
                 val p30 = parsed.filter { !it.date.isBefore(LocalDate.now().minusDays(29)) && !it.date.isAfter(LocalDate.now()) }
+                val repP30 = p30.filter { it.durationMs >= MIN_PHONE_REPRESENTATIVE_SESSION_MS }.ifEmpty { p30 }
                 if (p30.isNotEmpty()) {
-                    cachedPhone30dRawAvgSessionMs = calculateRepresentativeSessionLengths(p30.map { it.durationMs }, fallbackMs = 0L)
-                    cachedPhone30dWeightedAvgSessionMs = calculateRepresentativeSessionLengths(p30.map { it.weightedDurationMs }, fallbackMs = 0L)
+                    cachedPhone30dRawAvgSessionMs = calculateRepresentativeSessionLengths(repP30.map { it.durationMs }, fallbackMs = 0L, minDurationMs = MIN_PHONE_REPRESENTATIVE_SESSION_MS)
+                    cachedPhone30dWeightedAvgSessionMs = calculateRepresentativeSessionLengths(repP30.map { it.weightedDurationMs }, fallbackMs = 0L, minDurationMs = MIN_PHONE_REPRESENTATIVE_SESSION_MS)
                 }
             }
         }
@@ -696,6 +700,12 @@ internal object ShortformPersonalStatsStore {
             // Fresh file or no existing file yet.
         }
         initialized = true
+    }
+
+    @Synchronized
+    fun getStoredSessionsSnapshot(context: Context): List<SessionRecord> {
+        ensureInitialized(context)
+        return sessions.toList()
     }
 
     @Synchronized
@@ -1009,18 +1019,20 @@ internal object ShortformPersonalStatsStore {
         val parsedPhoneSessions = parsePhoneSessions(phoneEvents)
         val phone30d = parsedPhoneSessions.filter { !it.date.isBefore(start30d) && !it.date.isAfter(todayDate) }
         val phone7d = parsedPhoneSessions.filter { !it.date.isBefore(start7d) && !it.date.isAfter(todayDate) }
+        val repPhone30d = phone30d.filter { it.durationMs >= MIN_PHONE_REPRESENTATIVE_SESSION_MS }.ifEmpty { phone30d }
+        val repPhone7d = phone7d.filter { it.durationMs >= MIN_PHONE_REPRESENTATIVE_SESSION_MS }.ifEmpty { phone7d }
 
-        val phoneAvg7dSessionMs = calculateRepresentativeSessionLengths(phone7d.map { it.durationMs }, fallbackMs = 0L)
-        val phoneAvg7dWeightedSessionMs = calculateRepresentativeSessionLengths(phone7d.map { it.weightedDurationMs }, fallbackMs = 0L)
+        val phoneAvg7dSessionMs = calculateRepresentativeSessionLengths(repPhone7d.map { it.durationMs }, fallbackMs = 0L, minDurationMs = MIN_PHONE_REPRESENTATIVE_SESSION_MS)
+        val phoneAvg7dWeightedSessionMs = calculateRepresentativeSessionLengths(repPhone7d.map { it.weightedDurationMs }, fallbackMs = 0L, minDurationMs = MIN_PHONE_REPRESENTATIVE_SESSION_MS)
         val phoneMax7dSessionMs = phone7d.maxOfOrNull { it.durationMs } ?: 0L
-        val phoneSessionCount7d = phone7d.size
-        val phoneAvg7dShortformRatio = if (phone7d.isNotEmpty()) phone7d.map { it.shortformRatio }.average() else null
+        val phoneSessionCount7d = repPhone7d.size
+        val phoneAvg7dShortformRatio = if (repPhone7d.isNotEmpty()) repPhone7d.map { it.shortformRatio }.average() else null
 
-        val phoneAvg30dSessionMs = calculateRepresentativeSessionLengths(phone30d.map { it.durationMs }, fallbackMs = 0L)
-        val phoneAvg30dWeightedSessionMs = calculateRepresentativeSessionLengths(phone30d.map { it.weightedDurationMs }, fallbackMs = 0L)
+        val phoneAvg30dSessionMs = calculateRepresentativeSessionLengths(repPhone30d.map { it.durationMs }, fallbackMs = 0L, minDurationMs = MIN_PHONE_REPRESENTATIVE_SESSION_MS)
+        val phoneAvg30dWeightedSessionMs = calculateRepresentativeSessionLengths(repPhone30d.map { it.weightedDurationMs }, fallbackMs = 0L, minDurationMs = MIN_PHONE_REPRESENTATIVE_SESSION_MS)
         val phoneMax30dSessionMs = phone30d.maxOfOrNull { it.durationMs } ?: 0L
-        val phoneSessionCount30d = phone30d.size
-        val phoneAvg30dShortformRatio = if (phone30d.isNotEmpty()) phone30d.map { it.shortformRatio }.average() else null
+        val phoneSessionCount30d = repPhone30d.size
+        val phoneAvg30dShortformRatio = if (repPhone30d.isNotEmpty()) repPhone30d.map { it.shortformRatio }.average() else null
 
         if (phoneAvg30dSessionMs > 0L) {
             cachedPhone30dRawAvgSessionMs = phoneAvg30dSessionMs
@@ -1030,19 +1042,20 @@ internal object ShortformPersonalStatsStore {
         }
 
         val todayPhoneSessions = parsedPhoneSessions.filter { it.date == todayDate }
+        val repTodayPhoneSessions = todayPhoneSessions.filter { it.durationMs >= MIN_PHONE_REPRESENTATIVE_SESSION_MS }.ifEmpty { todayPhoneSessions }
         val latestTodayPhone = todayPhoneSessions.maxByOrNull { it.endWallMs }
         val phoneCurrentSessionMs = latestTodayPhone?.durationMs ?: 0L
         val phoneCurrentWeightedSessionMs = latestTodayPhone?.weightedDurationMs ?: 0L
         val phoneCurrentShortformRatio = latestTodayPhone?.shortformRatio
 
         val phoneTodayMs = maxOf(phoneDailyMap[todayDate] ?: 0L, totalPhoneTodayMs)
-        val phoneTodayAvgSessionMs = if (todayPhoneSessions.isNotEmpty()) {
-            todayPhoneSessions.map { it.durationMs }.average().toLong()
+        val phoneTodayAvgSessionMs = if (repTodayPhoneSessions.isNotEmpty()) {
+            repTodayPhoneSessions.map { it.durationMs }.average().toLong()
         } else {
             phoneCurrentSessionMs
         }
-        val phoneTodayAvgWeightedSessionMs = if (todayPhoneSessions.isNotEmpty()) {
-            todayPhoneSessions.map { it.weightedDurationMs }.average().toLong()
+        val phoneTodayAvgWeightedSessionMs = if (repTodayPhoneSessions.isNotEmpty()) {
+            repTodayPhoneSessions.map { it.weightedDurationMs }.average().toLong()
         } else {
             phoneCurrentWeightedSessionMs
         }
@@ -1050,11 +1063,11 @@ internal object ShortformPersonalStatsStore {
         val phoneTodayShortformRatio = when {
             phoneTodayMs > 0L && todayShortformTotalMs > 0L ->
                 (todayShortformTotalMs.toDouble() / phoneTodayMs.toDouble()).coerceIn(0.0, 1.0)
-            todayPhoneSessions.isNotEmpty() && todayPhoneSessions.sumOf { it.durationMs } > 0L ->
-                (todayPhoneSessions.sumOf { it.shortformMs }.toDouble() / todayPhoneSessions.sumOf { it.durationMs }.toDouble()).coerceIn(0.0, 1.0)
+            repTodayPhoneSessions.isNotEmpty() && repTodayPhoneSessions.sumOf { it.durationMs } > 0L ->
+                (repTodayPhoneSessions.sumOf { it.shortformMs }.toDouble() / repTodayPhoneSessions.sumOf { it.durationMs }.toDouble()).coerceIn(0.0, 1.0)
             else -> phoneCurrentShortformRatio
         }
-        val phoneTodaySessionsCount = todayPhoneSessions.size.coerceAtLeast(if (phoneTodayMs > 0L) 1 else 0)
+        val phoneTodaySessionsCount = repTodayPhoneSessions.size.coerceAtLeast(if (phoneTodayMs > 0L) 1 else 0)
 
         fun buildMetrics(
             filter: TargetFilter,

@@ -26,6 +26,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
@@ -56,13 +57,30 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.Image
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onPlaced
+import com.example.itv.composition.queryNightReport
+import com.example.itv.composition.queryUsageReport
 import com.example.itv.domain.equip.EquipCatalog
 import com.example.itv.domain.equip.EquipItem
 import com.example.itv.domain.equip.EquipSlot
+import com.example.itv.domain.records.DailyHealthTier
 import com.example.itv.infrastructure.equip.UserEquipStore
 import com.example.itv.infrastructure.reward.UserRewardStore
+import com.example.itv.infrastructure.storage.CalendarHealthLoader
+import com.example.itv.infrastructure.storage.MonthlyUsageArchiveStore
+import com.example.itv.presentation.usage.DailyStampPrefs
+import com.example.itv.presentation.usage.DailyStampRitualOverlay
+import com.example.itv.presentation.usage.StampCharacterBitmapCache
+import com.example.itv.presentation.usage.StampRitualRequest
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.withContext
+import java.time.LocalDate
+import java.time.YearMonth
 
 private data class MainTab(val id: String, val label: String, val mark: String)
 private val tabs = listOf(
@@ -80,6 +98,7 @@ fun ItvMainScreen(
     modifier: Modifier = Modifier
 ) {
     val activeTab = selectedTab.takeIf { id -> tabs.any { it.id == id } } ?: "home"
+    val rootContext = LocalContext.current
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
     BackHandler(enabled = settingsOpen) { settingsOpen = false }
     var showAccountSettings by rememberSaveable { mutableStateOf(false) }
@@ -90,8 +109,146 @@ fun ItvMainScreen(
     BackHandler(enabled = !settingsOpen && !showAccountSettings && !showCoachingSettings && (activeTab != "home" || showCoaching)) {
         if (showCoaching) showCoaching = false else onSelectTab("home")
     }
+
+    // Full-screen "도장 쾅!" stamp ritual state & once-per-day morning auto-launch for yesterday
+    var activeStampRitual by remember { mutableStateOf<StampRitualRequest?>(null) }
+    var calendarFocusDate by remember { mutableStateOf<LocalDate?>(null) }
+    var calendarFocusVersion by remember { mutableIntStateOf(0) }
+    var stampRefreshVersion by remember { mutableIntStateOf(0) }
+    var calendarReloadVersion by remember { mutableIntStateOf(0) }
+    var resumeTick by remember { mutableIntStateOf(0) }
+    var morningCheckTick by remember { mutableIntStateOf(0) }
+    var checkingMorningRitual by remember { mutableStateOf(false) }
+
+    // Root coordinates + live calendar day cell coordinates stored via onPlaced (0 scroll callbacks!)
+    var overlayRootCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    val dayCellCoords = remember { mutableMapOf<LocalDate, LayoutCoordinates>() }
+    fun LayoutCoordinates?.liveBounds(): Rect? =
+        this?.takeIf { it.isAttached }?.boundsInRoot()?.takeUnless { it.isEmpty }
+
+    // Trigger morning stamp check on BOTH cold start and returning from background on a new day
+    val rootLifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(rootLifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                resumeTick++
+                morningCheckTick++
+            }
+        }
+        rootLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { rootLifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // If the user confirms sleep in another tab and returns to Home, re-check once without cancelling an active check
+    LaunchedEffect(activeTab) {
+        if (activeTab == "home" && resumeTick > 0 && !checkingMorningRitual && activeStampRitual == null) {
+            if (!DailyStampPrefs.hasAutoRitualShownForToday(rootContext, LocalDate.now())) {
+                morningCheckTick++
+            }
+        }
+    }
+
+    LaunchedEffect(morningCheckTick) {
+        if (morningCheckTick == 0) return@LaunchedEffect
+        if (activeStampRitual != null) return@LaunchedEffect
+
+        val today = LocalDate.now()
+        if (DailyStampPrefs.hasAutoRitualShownForToday(rootContext, today)) return@LaunchedEffect
+        val yesterday = today.minusDays(1)
+        if (DailyStampPrefs.isDateStamped(rootContext, yesterday)) {
+            DailyStampPrefs.markAutoRitualShownForToday(rootContext, today)
+            return@LaunchedEffect
+        }
+
+        checkingMorningRitual = true
+        try {
+            val selectedChar = DailyStampPrefs.getSelectedCharacter(rootContext)
+            val preloadJob = launch(Dispatchers.Default) {
+                StampCharacterBitmapCache.preload(rootContext, selectedChar)
+            }
+
+        val assessment = runCatching {
+            withContext(Dispatchers.IO) {
+                val todayRep = runCatching { rootContext.queryUsageReport(1, today) }.getOrNull()
+                val periodRep = runCatching { rootContext.queryUsageReport(7) }.getOrNull()
+                val nightRep = runCatching { queryNightReport(rootContext, 45) }.getOrNull()
+                runCatching {
+                    MonthlyUsageArchiveStore.syncDailySnapshot(
+                        context = rootContext,
+                        todayUsageReport = todayRep,
+                        periodUsageReport = periodRep,
+                        nightReport = nightRep
+                    )
+                }
+                val bundle = CalendarHealthLoader.loadMonth(
+                    context = rootContext,
+                    viewMonth = YearMonth.from(yesterday),
+                    todayReport = if (YearMonth.from(yesterday) == YearMonth.from(today)) todayRep else null,
+                    existingNightReport = nightRep
+                )
+                bundle.assessments[yesterday]
+            }
+        }.getOrNull()
+
+        if (assessment != null &&
+            assessment.tier != DailyHealthTier.NO_DATA &&
+            assessment.tier != DailyHealthTier.IN_PROGRESS
+        ) {
+            // Focus yesterday on the Home calendar so the cell zooms out straight from yesterday's slot
+            settingsOpen = false
+            showAccountSettings = false
+            showCoachingSettings = false
+            showCoaching = false
+            calendarFocusDate = yesterday
+            calendarFocusVersion++
+            calendarReloadVersion++
+            onSelectTab("home")
+
+            // Wait for yesterday's calendar cell to be laid out and attached on screen
+            var cellBounds: Rect? = null
+            var waitedMs = 0
+            while (waitedMs < 4500) {
+                val candidate = dayCellCoords[yesterday].liveBounds()
+                val root = overlayRootCoords.liveBounds()
+                if (candidate != null &&
+                    (root == null || (candidate.bottom > root.top && candidate.top < root.bottom))
+                ) {
+                    cellBounds = candidate
+                    break
+                }
+                delay(30)
+                waitedMs += 30
+            }
+            preloadJob.join()
+            // Brief visual beat so the user clearly sees yesterday's tile on the calendar right before it lifts out
+            delay(380)
+
+            if (activeStampRitual == null && !DailyStampPrefs.hasAutoRitualShownForToday(rootContext, today)) {
+                DailyStampPrefs.markAutoRitualShownForToday(rootContext, today)
+                val latestBounds = dayCellCoords[yesterday].liveBounds() ?: cellBounds
+                activeStampRitual = StampRitualRequest(
+                    date = yesterday,
+                    tier = assessment.tier,
+                    score = assessment.score,
+                    headline = assessment.headline,
+                    isMorningAuto = true,
+                    isTestPreview = false,
+                    character = selectedChar,
+                    sourceCellBounds = latestBounds
+                )
+            }
+        }
+        } finally {
+            checkingMorningRitual = false
+        }
+    }
+
     // Outer MainActivity Scaffold already handles system bar insets.
-    Box(modifier.fillMaxSize()) {
+    Box(
+        modifier
+            .fillMaxSize()
+            .onPlaced { overlayRootCoords = it }
+    ) {
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
@@ -257,7 +414,22 @@ fun ItvMainScreen(
     ) { padding ->
         // Each tab owns its scroll position; bottom navigation never scrolls away.
         when (activeTab) {
-            "home" -> CenteredHomePage(Modifier.padding(padding))
+            "home" -> Box(Modifier.fillMaxSize().padding(padding)) {
+                HomeScreen(
+                    initialSelectedDate = calendarFocusDate,
+                    focusRequestVersion = calendarFocusVersion,
+                    stampRefreshVersion = stampRefreshVersion,
+                    calendarReloadVersion = calendarReloadVersion,
+                    daySyncTick = resumeTick,
+                    activeRitualDate = activeStampRitual?.date,
+                    onDayCellPlaced = { date, coords -> dayCellCoords[date] = coords },
+                    onDayCellDisposed = { date -> dayCellCoords.remove(date) },
+                    onLaunchStampRitual = { ritual ->
+                        val resolvedBounds = ritual.sourceCellBounds ?: dayCellCoords[ritual.date].liveBounds()
+                        activeStampRitual = ritual.copy(sourceCellBounds = resolvedBounds)
+                    }
+                )
+            }
             "records" -> Box(Modifier.fillMaxSize().padding(padding)) { RecordsScreen() }
             "character" -> Box(Modifier.fillMaxSize().padding(padding)) { CharacterScreen() }
         }
@@ -308,6 +480,28 @@ fun ItvMainScreen(
                         android.widget.Toast.makeText(context, "Google 인증 오류: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
                     }
                 }
+            }
+        )
+    }
+
+    // Full-screen cinematic stamp ritual overlay (above Scaffold & bottom navigation bar)
+    activeStampRitual?.let { ritual ->
+        DailyStampRitualOverlay(
+            request = ritual,
+            overlayRootBounds = overlayRootCoords.liveBounds(),
+            resolveCellBounds = { date -> dayCellCoords[date].liveBounds() },
+            onStampCommitted = {
+                if (!ritual.isTestPreview) {
+                    DailyStampPrefs.markDateStamped(rootContext, ritual.date)
+                    stampRefreshVersion++
+                }
+            },
+            onFinished = {
+                if (!ritual.isTestPreview) {
+                    DailyStampPrefs.markDateStamped(rootContext, ritual.date)
+                    stampRefreshVersion++
+                }
+                activeStampRitual = null
             }
         )
     }
@@ -769,19 +963,6 @@ private fun RecordsTabIcon(color: Color) {
     }
 }
 
-// The home gets a finite viewport; scroll only when content is taller than it.
-@Composable
-private fun CenteredHomePage(modifier: Modifier = Modifier) {
-    BoxWithConstraints(modifier.fillMaxSize()) {
-        val viewportHeight = maxHeight
-        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
-            .heightIn(min = viewportHeight).padding(20.dp),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally) {
-            HomeScreen()
-        }
-    }
-}
 
 @Composable
 private fun HomeSettingsDrawer(

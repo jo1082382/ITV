@@ -63,6 +63,13 @@ internal fun NightSummary(report: NightReport?, error: String?, days: Int) {
         containerColor = RecordContentGreen, contentColor = cardContentColor)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("수면 길이 · 사용자 확인 우선", style = MaterialTheme.typography.titleLarge)
+            var showSleepRhythmHelp by remember { mutableStateOf(false) }
+            var showBedtimeEstimateHelp by remember { mutableStateOf(false) }
+            var showSleepClockHelp by remember { mutableStateOf(false) }
+            val nowZdt = remember(report?.now, report?.zone) {
+                Instant.ofEpochMilli(report?.now ?: System.currentTimeMillis())
+                    .atZone(report?.zone ?: ZoneId.systemDefault())
+            }
             val bedtimeEstimate = remember(confirmations, report?.candidates, report?.zone) {
                 SleepSummaryPolicy.estimateBedtimeWindow(
                     confirmations = confirmations,
@@ -70,6 +77,182 @@ internal fun NightSummary(report: NightReport?, error: String?, days: Int) {
                     zone = report?.zone ?: ZoneId.systemDefault()
                 )
             }
+            val weeklySleepProfile = remember(confirmations, report?.candidates, report?.zone) {
+                SleepSummaryPolicy.estimateWeeklySleepProfile(
+                    confirmations = confirmations,
+                    candidates = report?.candidates.orEmpty(),
+                    zone = report?.zone ?: ZoneId.systemDefault()
+                )
+            }
+            val adaptiveTarget = remember(weeklySleepProfile, nowZdt) {
+                SleepSummaryPolicy.getAdaptiveBedtimeTarget(
+                    weeklyProfile = weeklySleepProfile,
+                    now = nowZdt
+                )
+            }
+
+            // [Step 3] 요일별 수면 리듬 & 내일 취침 예측 카드
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = if (isDark) Color(0xFF202B22) else Color.White.copy(alpha = 0.90f),
+                border = androidx.compose.foundation.BorderStroke(1.dp, if (isDark) Color(0xFF3E5445) else Color(0xFFB7D5AE)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    // Header with ? Help icon
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("내 요일별 수면 리듬 & 취침 예측", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = if (isDark) Color(0xFF85E3B3) else Color(0xFF1B4332))
+                        Spacer(Modifier.weight(1f))
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = (if (isDark) Color(0xFF3E5445) else Color(0xFFD8EED2)),
+                            modifier = Modifier.clickable { showSleepRhythmHelp = true }
+                        ) {
+                            Text("?", modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp), fontWeight = FontWeight.Bold, color = if (isDark) Color(0xFF85E3B3) else Color(0xFF1B4332), style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
+
+                    // Adaptive Target Highlight Banner (오늘 밤 목표 & 내일 기상)
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (isDark) Color(0xFF28382C) else Color(0xFFE8F5E9),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, if (isDark) Color(0xFF4A6852) else Color(0xFFA5D6A7)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text("🌙 오늘 밤 권장 취침:", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = if (isDark) Color(0xFFE2EBE4) else Color(0xFF1B4332))
+                                Text(
+                                    "%02d:%02d".format(adaptiveTarget.targetHour, adaptiveTarget.targetMinute),
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = if (isDark) Color(0xFF5ED38C) else Color(0xFF2D6A4F)
+                                )
+                                Spacer(Modifier.weight(1f))
+                                Text(
+                                    "내일 예상 기상 %02d:%02d".format(adaptiveTarget.expectedWakeHour, adaptiveTarget.expectedWakeMinute),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (isDark) Color(0xFFA5C4B5) else Color(0xFF52796F)
+                                )
+                            }
+                            Text(
+                                "• ${adaptiveTarget.sourceDescription}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (isDark) Color(0xFFA5C4B5) else Color(0xFF52796F)
+                            )
+                        }
+                    }
+
+                    // 7-day Monday ~ Sunday Horizontal Chips
+                    Text("요일별 기상 시각 & 수면 패턴", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = if (isDark) Color(0xFFE2EBE4) else Color(0xFF243025))
+                    Row(
+                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        val daysOfWeek = listOf(
+                            DayOfWeek.MONDAY to "월",
+                            DayOfWeek.TUESDAY to "화",
+                            DayOfWeek.WEDNESDAY to "수",
+                            DayOfWeek.THURSDAY to "목",
+                            DayOfWeek.FRIDAY to "금",
+                            DayOfWeek.SATURDAY to "토",
+                            DayOfWeek.SUNDAY to "일"
+                        )
+                        daysOfWeek.forEach { (dow, dowName) ->
+                            val profile = weeklySleepProfile?.dayProfiles?.get(dow)
+                            val isTargetTomorrow = dow == adaptiveTarget.targetWakeDayOfWeek
+                            val chipBg = when {
+                                isTargetTomorrow -> if (isDark) Color(0xFF384E3F) else Color(0xFFC8E6C9)
+                                profile != null -> if (isDark) Color(0xFF253027) else Color(0xFFF1F8E9)
+                                else -> if (isDark) Color(0xFF1E2822) else Color(0xFFF5F5F5)
+                            }
+                            val chipBorder = when {
+                                isTargetTomorrow -> if (isDark) Color(0xFF5ED38C) else Color(0xFF2E7D32)
+                                profile != null -> if (isDark) Color(0xFF3E5445) else Color(0xFFC8DEC0)
+                                else -> if (isDark) Color(0xFF2C3930) else Color(0xFFE0E0E0)
+                            }
+
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = chipBg,
+                                border = androidx.compose.foundation.BorderStroke(if (isTargetTomorrow) 1.5.dp else 1.dp, chipBorder),
+                                modifier = Modifier.width(68.dp)
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(vertical = 6.dp, horizontal = 4.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                                        Text(dowName, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium, color = if (dow == DayOfWeek.SUNDAY) Color(0xFFE53935) else if (dow == DayOfWeek.SATURDAY) Color(0xFF1E88E5) else cardContentColor)
+                                        if (isTargetTomorrow) {
+                                            Text("내일", style = MaterialTheme.typography.labelSmall, fontSize = 9.sp, fontWeight = FontWeight.Bold, color = if (isDark) Color(0xFF5ED38C) else Color(0xFF2E7D32))
+                                        }
+                                    }
+                                    if (profile != null) {
+                                        Text(
+                                            "%02d:%02d".format(profile.avgWakeHour, profile.avgWakeMinute),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = if (isDark) Color(0xFF85E3B3) else Color(0xFF1B4332)
+                                        )
+                                        Text(
+                                            "기상",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontSize = 9.sp,
+                                            color = if (isDark) Color(0xFFA5C4B5) else Color(0xFF52796F)
+                                        )
+                                        Text(
+                                            "${profile.avgDurationMinutes / 60}h (${profile.validCount}일)",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontSize = 9.sp,
+                                            color = if (isDark) Color(0xFFA5C4B5) else Color(0xFF52796F)
+                                        )
+                                    } else {
+                                        Text(
+                                            "-",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isDark) Color(0xFF6B7E72) else Color(0xFF9E9E9E)
+                                        )
+                                        Text(
+                                            "미기록",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontSize = 9.sp,
+                                            color = if (isDark) Color(0xFF6B7E72) else Color(0xFF9E9E9E)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (showSleepRhythmHelp) {
+                AlertDialog(
+                    onDismissRequest = { showSleepRhythmHelp = false },
+                    title = {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("?", fontWeight = FontWeight.Bold, color = if (isDark) Color(0xFF85E3B3) else Color(0xFF1B4332))
+                            Text("수면 리듬 예측 안내", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        }
+                    },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("• 기상 시간 분석: 아침에 폰을 켜는 시각을 요일별로 파악합니다.", style = MaterialTheme.typography.bodyMedium)
+                            Text("• 맞춤 취침 추천: 내일 일어날 시간에 맞춰 건강 수면(7~8시간)을 역산해 오늘 밤 잘 시간을 알려줍니다.", style = MaterialTheme.typography.bodyMedium)
+                            Text("• 평일 출근/등교와 주말 휴식 리듬에 맞춰 자동으로 조절됩니다.", style = MaterialTheme.typography.bodyMedium)
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = { showSleepRhythmHelp = false }) {
+                            Text("확인", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                )
+            }
+
             if (bedtimeEstimate != null) {
                 Surface(
                     shape = RoundedCornerShape(12.dp),
@@ -77,9 +260,17 @@ internal fun NightSummary(report: NightReport?, error: String?, days: Int) {
                     border = androidx.compose.foundation.BorderStroke(1.dp, if (isDark) Color(0xFF3E5445) else Color(0xFFC8DEC0)),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("평소 추정 취침 시각", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = if (isDark) Color(0xFF85E3B3) else Color(0xFF1B4332))
+                            Text("평소 추정 취침 시각 (전체 평균)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = if (isDark) Color(0xFF85E3B3) else Color(0xFF1B4332))
+                            Spacer(Modifier.width(6.dp))
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = (if (isDark) Color(0xFF3E5445) else Color(0xFFD8EED2)),
+                                modifier = Modifier.clickable { showBedtimeEstimateHelp = true }
+                            ) {
+                                Text("?", modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp), fontWeight = FontWeight.Bold, color = if (isDark) Color(0xFF85E3B3) else Color(0xFF1B4332), style = MaterialTheme.typography.labelSmall)
+                            }
                             Spacer(Modifier.weight(1f))
                             Text("반영된 기록 ${bedtimeEstimate.validCount}일", style = MaterialTheme.typography.labelSmall, color = if (isDark) Color(0xFFA5C4B5) else Color(0xFF52796F))
                         }
@@ -93,13 +284,31 @@ internal fun NightSummary(report: NightReport?, error: String?, days: Int) {
                             fontWeight = FontWeight.Bold,
                             color = if (isDark) Color(0xFF5ED38C) else Color(0xFF2D6A4F)
                         )
-                        Text(
-                            text = "직접 선택한 기록 및 후보가 하나뿐인 비사용 구간이 자동 반영된 평균입니다. 평소 잠드는 시간 파악 및 야간 취침 개입에 활용됩니다.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (isDark) Color(0xFFA5C4B5) else Color(0xFF52796F)
-                        )
                     }
                 }
+            }
+
+            if (showBedtimeEstimateHelp) {
+                AlertDialog(
+                    onDismissRequest = { showBedtimeEstimateHelp = false },
+                    title = {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("?", fontWeight = FontWeight.Bold, color = if (isDark) Color(0xFF85E3B3) else Color(0xFF1B4332))
+                            Text("평소 취침 시각 안내", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        }
+                    },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("• 직접 확인한 수면 기록과 밤 사이 비사용 시간을 분석한 전체 평균 취침/기상 시각입니다.", style = MaterialTheme.typography.bodyMedium)
+                            Text("• 평소 잠드는 시간대를 기준으로 밤에 폰을 끄고 편안히 잘 수 있도록 야간 취침 개입에 활용됩니다.", style = MaterialTheme.typography.bodyMedium)
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = { showBedtimeEstimateHelp = false }) {
+                            Text("확인", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                )
             }
             if (days != 1) {
             val averageDays = if (days == 30) 30 else 7
@@ -229,8 +438,45 @@ internal fun NightSummary(report: NightReport?, error: String?, days: Int) {
                     }
                 }
             }
-            Text("화면 꺼짐부터 다음 1분 이상 사용 시작까지 3시간 이상인 완료 구간 기준 · 1분 미만 사용 후 화면을 끄면 같은 구간으로 연결(잠깐 사용한 시간 포함) · 잠금 해제 없는 화면 켜짐은 횟수 제외 · 실제 수면 측정 아님 · 날짜는 1분 이상 사용이 확인된 사용 시작일(비사용 종료일) 기준 · 자정·정오에 구간을 자르지 않음 · 10시간 초과 막대는 상단 제한",
-                style = MaterialTheme.typography.bodySmall)
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = if (isDark) Color(0xFF253027) else Color(0xFFE8F5E9),
+                border = androidx.compose.foundation.BorderStroke(1.dp, if (isDark) Color(0xFF3E5445) else Color(0xFFC8DEC0)),
+                modifier = Modifier.clickable { showSleepClockHelp = true }
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text("?", fontWeight = FontWeight.Bold, color = if (isDark) Color(0xFF85E3B3) else Color(0xFF1B4332), style = MaterialTheme.typography.labelSmall)
+                    Text("비사용 시계 및 수면 기록 안내", style = MaterialTheme.typography.labelSmall, color = if (isDark) Color(0xFFA5C4B5) else Color(0xFF52796F))
+                }
+            }
+
+            if (showSleepClockHelp) {
+                AlertDialog(
+                    onDismissRequest = { showSleepClockHelp = false },
+                    title = {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("?", fontWeight = FontWeight.Bold, color = if (isDark) Color(0xFF85E3B3) else Color(0xFF1B4332))
+                            Text("비사용 시계 및 수면 안내", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        }
+                    },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("• 3시간 이상 화면을 끄고 사용하지 않은 밤 시간대를 자동으로 수면 구간으로 감지합니다.", style = MaterialTheme.typography.bodyMedium)
+                            Text("• 감지된 시간이 실제 수면과 다를 경우 [수면 시간 선택]이나 [직접 입력]으로 수정할 수 있습니다.", style = MaterialTheme.typography.bodyMedium)
+                            Text("• 밤새 잠을 자지 않고 깨어 있었다면 [수면 없음]을 누르면 0시간으로 정확히 반영됩니다.", style = MaterialTheme.typography.bodyMedium)
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = { showSleepClockHelp = false }) {
+                            Text("확인", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                )
+            }
         }
     }
 }

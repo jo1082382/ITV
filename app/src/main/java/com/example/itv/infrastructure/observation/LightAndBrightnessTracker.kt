@@ -33,6 +33,7 @@ import kotlinx.coroutines.withContext
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
+import java.time.ZonedDateTime
 
 enum class BedtimePhase {
     ACTIVE_HOURS,   // 평소 취침 시간과 먼 일상 활동 시간대
@@ -280,16 +281,21 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
                     m = coachingSettings.customBedtimeMinute
                     src = "직접 지정한 평소 취침 시각"
                 } else {
-                    val window = com.example.itv.domain.records.SleepSummaryPolicy.estimateBedtimeWindow(
+                    val zone = nightReport?.zone ?: ZoneId.systemDefault()
+                    val weeklyProfile = com.example.itv.domain.records.SleepSummaryPolicy.estimateWeeklySleepProfile(
                         confirmations = confirmations,
                         candidates = nightReport?.candidates.orEmpty(),
-                        zone = nightReport?.zone ?: ZoneId.systemDefault()
+                        zone = zone
                     )
 
-                    if (window != null) {
-                        h = window.avgStartHour
-                        m = window.avgStartMinute
-                        src = "수면 추정/확인 기록 (${window.validCount}일 평균)"
+                    if (weeklyProfile != null) {
+                        val adaptiveTarget = com.example.itv.domain.records.SleepSummaryPolicy.getAdaptiveBedtimeTarget(
+                            weeklyProfile = weeklyProfile,
+                            now = ZonedDateTime.now(zone)
+                        )
+                        h = adaptiveTarget.targetHour
+                        m = adaptiveTarget.targetMinute
+                        src = adaptiveTarget.sourceDescription
                     } else {
                         val goal = db.dao().goal("demo-guest", "BEDTIME")
                         val goalDetail = goal?.goalId?.let { db.dao().bedtimeGoal(it) }

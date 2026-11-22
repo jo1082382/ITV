@@ -158,6 +158,22 @@ internal object MonthlyUsageArchiveStore {
     }
 
     /**
+     * Retrieves all archived daily records as a date-keyed map ("yyyy-MM-dd" to DailyArchiveRecord).
+     */
+    fun getAllDailyRecords(context: Context): Map<String, DailyArchiveRecord> {
+        ensureLoaded(context)
+        return cachedDailyRecords
+    }
+
+    /**
+     * Retrieves a single day's archive record ("yyyy-MM-dd"), or null if unavailable.
+     */
+    fun getDailyRecord(context: Context, date: String): DailyArchiveRecord? {
+        ensureLoaded(context)
+        return cachedDailyRecords[date]
+    }
+
+    /**
      * Synchronizes and archives daily data for long-term (up to 6 months) retention.
      * Integrates OS usage stats, Room shortform history, and bedtime observations.
      */

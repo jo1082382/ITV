@@ -99,17 +99,15 @@ class UsageReportActivity : ComponentActivity() {
 @Composable
 fun UsageRecordsContent(modifier: Modifier = Modifier) {
     val context = LocalContext.current
-    val goalFlow = remember(context) { com.example.itv.composition.goalService(ItvDatabase.get(context)).observeHomeGoals("demo-guest") }
-    val comparisonGoals by goalFlow.collectAsState(initial = emptyList())
-    var todayForComparison by remember { mutableStateOf<Report?>(null) }
     var shortformSummary by remember { mutableStateOf<ShortformPersonalStatsStore.PersonalizedSummary?>(null) }
     var nights by remember { mutableStateOf<NightReport?>(null) }
     var nightError by remember { mutableStateOf<String?>(null) }
     var days by rememberSaveable { mutableIntStateOf(1) }
+    var todayReport by remember { mutableStateOf<Report?>(null) }
+    var calendarOpen by rememberSaveable { mutableStateOf(false) }
     var summaryOpen by rememberSaveable { mutableStateOf(false) }
-    var shortformOpen by rememberSaveable { mutableStateOf(true) }
+    var shortformOpen by rememberSaveable { mutableStateOf(false) }
     var hourlyOpen by rememberSaveable { mutableStateOf(false) }
-    var goalsOpen by rememberSaveable { mutableStateOf(false) }
     var nightOpen by rememberSaveable { mutableStateOf(false) }
     var selected by rememberSaveable { mutableStateOf<Int?>(null) }
     var report by remember { mutableStateOf<Report?>(null) }
@@ -157,7 +155,7 @@ fun UsageRecordsContent(modifier: Modifier = Modifier) {
                 Triple(period, todayRep, sfSummary)
             }
             report = result.first
-            todayForComparison = result.second
+            todayReport = result.second
             if (result.third != null) shortformSummary = result.third
 
             withContext(Dispatchers.IO) {
@@ -174,7 +172,7 @@ fun UsageRecordsContent(modifier: Modifier = Modifier) {
             throw e
         } catch (e: Exception) {
             report = null
-            todayForComparison = null
+            todayReport = null
             shortformSummary = withContext(Dispatchers.IO) {
                 runCatching { ShortformPersonalStatsStore.loadSummary(context, null, null) }.getOrNull()
             }
@@ -190,7 +188,7 @@ fun UsageRecordsContent(modifier: Modifier = Modifier) {
         try {
             val loadedNights = withContext(Dispatchers.IO) { queryNightReport(context, 0) }
             nights = loadedNights
-            todayForComparison?.let { todayRep ->
+            todayReport?.let { todayRep ->
                 withContext(Dispatchers.IO) {
                     runCatching {
                         MonthlyUsageArchiveStore.syncDailySnapshot(
@@ -209,18 +207,16 @@ fun UsageRecordsContent(modifier: Modifier = Modifier) {
     // Keep drilldown state outside lazy items so off-screen disposal cannot reset it.
     val dailyDetailItems = report?.takeIf { days > 1 }?.let { rememberDailyUsageDrilldownItems(it) }
 
-    LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {item {
-
-        Text("기록", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-
-}
-item(key="ai_history_open") {
- Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.End) {
-  OutlinedButton(onClick={context.startActivity(Intent(context,AiHistoryActivity::class.java))}) {Text("AI",fontWeight=FontWeight.Bold)}
- }
-}
-item {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+    LazyColumn(
+        modifier = modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item(key = "records_header") {
+            Text("기록", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        }
+        item(key = "period_selector_chips") {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             listOf(1 to "오늘", 7 to "1주일", 30 to "1달").forEach { (n, title) ->
                 val periodColor = periodColor(n)
                 val isSelected = selectedPastMonth == null && days == n
@@ -344,6 +340,16 @@ if (selectedPastMonth != null) {
             }
         }
     }
+    item(key = "calendar_toggle") {
+        RecordSectionToggle("🗓️", "사용 기록 캘린더", periodColor(days), calendarOpen) { calendarOpen = !calendarOpen }
+    }
+    if (calendarOpen) {
+        item(key = "calendar_section") {
+            UsageCalendarSection(
+                todayTotalMs = report?.total?.let { (it * 60_000.0).toLong() } ?: 0L
+            )
+        }
+    }
     item(key = "summary_toggle") {
         RecordSectionToggle("🕒", "요약", periodColor(days), summaryOpen) { summaryOpen = !summaryOpen }
     }
@@ -409,14 +415,7 @@ if (selectedPastMonth != null) {
             }
         }
     }
-    item(key = "goals_toggle") {
-        RecordSectionToggle("🚩", "목표와 비교", periodColor(days), goalsOpen) { goalsOpen = !goalsOpen }
-    }
-    if (goalsOpen) {
-        item(key = "goal_comparison") {
-            GoalComparisonSection(comparisonGoals, report, todayForComparison)
-        }
-    }
+
     item(key = "night_toggle") {
         RecordSectionToggle("🛏️", "취침 추정", periodColor(days), nightOpen) { nightOpen = !nightOpen }
     }
