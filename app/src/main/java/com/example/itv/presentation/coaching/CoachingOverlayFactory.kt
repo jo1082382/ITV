@@ -49,9 +49,31 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
     fun detachPreview(root: View) { removeControls(root); wm.removeView(root) }
 
     private val runFrames = intArrayOf(
-        R.drawable.itv_gallop_away_00, R.drawable.itv_gallop_away_01, R.drawable.itv_gallop_away_02, R.drawable.itv_gallop_away_03,
-        R.drawable.itv_gallop_away_04, R.drawable.itv_gallop_away_05, R.drawable.itv_gallop_away_06, R.drawable.itv_gallop_away_07
+        R.drawable.itv_gallop_away_00, R.drawable.itv_walk_half_00,
+        R.drawable.itv_gallop_away_01, R.drawable.itv_walk_half_01,
+        R.drawable.itv_gallop_away_02, R.drawable.itv_walk_half_02,
+        R.drawable.itv_gallop_away_03, R.drawable.itv_walk_half_03,
+        R.drawable.itv_gallop_away_04, R.drawable.itv_walk_half_04,
+        R.drawable.itv_gallop_away_05, R.drawable.itv_walk_half_05,
+        R.drawable.itv_gallop_away_06, R.drawable.itv_walk_half_06,
+        R.drawable.itv_gallop_away_07, R.drawable.itv_walk_half_07
     )
+    private val lookFrames = intArrayOf(
+        R.drawable.itv_look_front_00, R.drawable.itv_look_front_01, R.drawable.itv_look_front_02, R.drawable.itv_look_front_03,
+        R.drawable.itv_look_front_04, R.drawable.itv_look_front_05, R.drawable.itv_look_front_06, R.drawable.itv_look_front_07,
+        R.drawable.itv_look_front_08, R.drawable.itv_look_front_09, R.drawable.itv_look_front_10, R.drawable.itv_look_front_11,
+        R.drawable.itv_look_front_12, R.drawable.itv_look_front_13
+    )
+    private fun arrivalFrame(elapsedMs: Long, durationMs: Long): Int {
+        val turnStart = durationMs - 860L
+        if (elapsedMs < turnStart) {
+            val phase = Math.floorMod(elapsedMs - turnStart + 1030L, 670L)
+            return runFrames[(phase * runFrames.size / 670L).toInt()]
+        }
+        val index = ((elapsedMs - turnStart) * (lookFrames.size - 1) / 860L).toInt()
+        return lookFrames[index.coerceIn(lookFrames.indices)]
+    }
+
     private val rewardFrames = intArrayOf(
         R.drawable.itv_gallop_bone_00, R.drawable.itv_gallop_bone_01, R.drawable.itv_gallop_bone_02, R.drawable.itv_gallop_bone_03,
         R.drawable.itv_gallop_bone_04, R.drawable.itv_gallop_bone_05, R.drawable.itv_gallop_bone_06, R.drawable.itv_gallop_bone_07
@@ -301,23 +323,15 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
                 if (s.stopped) return@addUpdateListener
                 val f = it.animatedValue as Float
                 s.dogParams.x = (startX + (s.homeX - startX) * f).toInt()
-                val frame = ((it.currentPlayTime / 100L) % runFrames.size).toInt()
-                if (f < 0.98f) {
-                    s.dog.scaleX = -1f
-                    s.dog.rotation = 0f
-                    val sprite = runFrames[frame]
-                    if (s.dog.tag != sprite) { s.dog.setImageResource(sprite); s.dog.tag = sprite }
-                } else {
-                    s.dog.scaleX = 1f
-                    s.dog.rotation = 0f
-                    s.dog.setImageResource(R.drawable.itv_motion_front)
-                }
+                val sprite = arrivalFrame(it.currentPlayTime, duration)
+                s.dog.scaleX = -1f
+                if (s.dog.tag != sprite) { s.dog.setImageResource(sprite); s.dog.tag = sprite }
                 try { wm.updateViewLayout(s.dog, s.dogParams) } catch (_: Exception) {}
                 if (f >= 0.99f) {
                     s.ready = true
                     s.dog.scaleX = 1f
                     s.dog.rotation = 0f
-                    s.dog.setImageResource(R.drawable.itv_motion_front)
+                    s.dog.setImageResource(R.drawable.itv_motion_turn)
                     s.speech.visibility = View.VISIBLE
                     s.onReady?.invoke()
                     s.onReady = null
@@ -692,8 +706,7 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
                     val runStart = if (right) width - dogSize * 7 / 10 else -dogSize * 3 / 10
                     s.dogParams.x = (runStart + (s.homeX - runStart) * f).toInt()
                     s.dogParams.y = (sy + (s.homeY - sy) * f).toInt()
-                    val frame = ((it.currentPlayTime / 110L) % runFrames.size).toInt()
-                    val sprite = if (f >= 0.99f) R.drawable.itv_motion_turn else runFrames[frame]
+                    val sprite = arrivalFrame((it.currentPlayTime - 5000L).coerceAtLeast(0L), 2400L)
                     if (s.dog.tag != sprite) { s.dog.setImageResource(sprite); s.dog.tag = sprite }
                     s.dog.scaleY = 1f
                 }

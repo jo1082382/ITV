@@ -1,5 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
-    <application android:allowBackup="false" tools:replace="android:allowBackup" />
+    <application android:allowBackup="false" tools:replace="android:allowBackup">
+        <activity-alias android:name=".GoldenRetrieverTest" android:targetActivity=".presentation.character.CompanionPreviewActivity"
+            android:label="ITV 캐릭터 테스트" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+    </application>
 </manifest>
