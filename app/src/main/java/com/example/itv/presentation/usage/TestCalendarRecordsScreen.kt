@@ -49,10 +49,12 @@ import com.example.itv.domain.records.DailyHealthTier
 import com.example.itv.domain.records.HealthAxisScore
 import com.example.itv.domain.records.NightReport
 import com.example.itv.domain.records.Report
+import com.example.itv.infrastructure.storage.AccountDataBoundaryStore
 import com.example.itv.infrastructure.storage.CalendarHealthLoader
 import com.example.itv.infrastructure.storage.CalendarMonthHealthBundle
 import com.example.itv.infrastructure.storage.DayResolvedFacts
 import com.example.itv.infrastructure.storage.MonthlyHealthTally
+import com.example.itv.infrastructure.storage.MonthlyUsageArchiveStore
 import com.example.itv.presentation.components.ItvGreen
 import com.example.itv.presentation.components.ItvLine
 import com.example.itv.presentation.components.ItvMint
@@ -198,15 +200,33 @@ internal fun TestCalendarRecordsScreen(
         }
     }
 
-    // Month-level health evaluation bundle
-    var monthBundle by remember { mutableStateOf<CalendarMonthHealthBundle?>(null) }
-    var loadingMonth by remember { mutableStateOf(true) }
+    // Month-level health evaluation bundle (hydrates instantaneously from post-login preload cache when available)
+    val initialCachedBundle = remember(viewMonth, today, stampedDates) {
+        CalendarHealthLoader.getCachedMonth(viewMonth, today, stampedDates)
+    }
+    var monthBundle by remember { mutableStateOf(initialCachedBundle) }
+    var loadingMonth by remember { mutableStateOf(initialCachedBundle == null) }
 
     // Opened-dialog day hourly & app usage report (loaded lazily only when a date popup is opened)
     var dialogDayReport by remember { mutableStateOf<Report?>(null) }
     var loadingDialogDayReport by remember { mutableStateOf(false) }
 
     LaunchedEffect(viewMonth, today, calendarReloadVersion, stampedDates) {
+        val effectiveStamped = DailyStampPrefs.getStampedDates(context)
+        if (effectiveStamped != stampedDates) {
+            stampedDates = effectiveStamped
+        }
+        val cached = CalendarHealthLoader.consumeFreshPreload(viewMonth, today, effectiveStamped)
+            ?: if (calendarReloadVersion == 0) {
+                CalendarHealthLoader.getCachedMonth(viewMonth, today, effectiveStamped)
+            } else {
+                null
+            }
+        if (cached != null) {
+            monthBundle = cached
+            loadingMonth = false
+            return@LaunchedEffect
+        }
         loadingMonth = true
         try {
             val todayRep = withContext(Dispatchers.IO) {
@@ -227,7 +247,7 @@ internal fun TestCalendarRecordsScreen(
                 stampedDates = stampedDates
             )
         } catch (_: Exception) {
-            monthBundle = null
+            if (monthBundle == null) monthBundle = null
         } finally {
             loadingMonth = false
         }
@@ -244,7 +264,20 @@ internal fun TestCalendarRecordsScreen(
         dialogDayReport = null
         try {
             dialogDayReport = withContext(Dispatchers.IO) {
-                runCatching { context.queryUsageReport(1, target) }.getOrNull()
+                val boundaryDate = AccountDataBoundaryStore.getFreshStartDate(context)
+                val archived = MonthlyUsageArchiveStore.buildArchivedDayReport(context, target)
+                if (AccountDataBoundaryStore.isDateBeforeBoundary(target, boundaryDate)) {
+                    // Never pull pre-deletion Android OS UsageEvents for dates before fresh-start boundary
+                    archived
+                } else {
+                    val live = runCatching { context.queryUsageReport(1, target) }.getOrNull()
+                    if (live != null && (live.total > 0.0 || live.values.any { it > 0.0 })) {
+                        runCatching { MonthlyUsageArchiveStore.upsertDayHourlyAndApps(context, target, live) }
+                        live
+                    } else {
+                        archived ?: live
+                    }
+                }
             }
         } catch (_: Exception) {
             dialogDayReport = null
@@ -437,13 +470,20 @@ internal fun TestCalendarRecordsScreen(
 
                     // Month Grid (7 columns)
                     if (loadingMonth && monthBundle == null) {
-                        Box(
+                        Column(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(220.dp),
-                            contentAlignment = Alignment.Center
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
                         ) {
-                            CircularProgressIndicator(Modifier.size(26.dp), color = ItvGreen)
+                            CircularProgressIndicator(Modifier.size(28.dp), color = ItvGreen)
+                            Spacer(Modifier.height(10.dp))
+                            Text(
+                                text = "캘린더 기록을 불러오는 중...",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = CardSubInk
+                            )
                         }
                     } else {
                         val totalSlots = firstDayOfWeek + daysInMonth
@@ -952,12 +992,6 @@ private fun DailyHealthVerdictBanner(
                             )
                         }
                     }
-                    Text(
-                        text = assessment.headline,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = CardSubInk,
-                        lineHeight = 18.sp
-                    )
                     if (assessment.tier != DailyHealthTier.IN_PROGRESS) {
                         Text(
                             text = "도장을 터치하면 쾅! 찍기 모션을 다시 볼 수 있어요",
@@ -968,66 +1002,150 @@ private fun DailyHealthVerdictBanner(
                 }
             }
 
+            // Headline summary in its own bordered box
+            if (assessment.headline.isNotBlank()) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (isDark) Color(0xFF151F18) else Color.White.copy(alpha = 0.92f),
+                    border = BorderStroke(
+                        0.9.dp,
+                        accentColor.copy(alpha = if (isDark) 0.32f else 0.24f)
+                    )
+                ) {
+                    Text(
+                        text = assessment.headline,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = CardInk,
+                        lineHeight = 19.sp,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+                    )
+                }
+            }
+
             if (assessment.isPartialData) {
                 Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = if (isDark) Color(0xFF243028) else Color(0xFFF1F5F9)
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    color = if (isDark) Color(0xFF243028) else Color(0xFFF1F5F9),
+                    border = BorderStroke(
+                        0.8.dp,
+                        if (isDark) ItvLine.copy(alpha = 0.45f) else Color(0xFFCBD5E1)
+                    )
                 ) {
                     Text(
                         text = "ℹ️ ${assessment.evaluatedAxesCount}/${assessment.totalAxesCount}개 항목 데이터로 가중치를 자동 보정해 판정했어요",
                         fontSize = 11.sp,
                         color = CardSubInk,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
                     )
                 }
             }
 
-            // Praises (Restraint highlights)
+            // Praises (Restraint highlights) - boxed section + boxed sentences
             if (assessment.praises.isNotEmpty()) {
-                Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                    Text(
-                        text = "잘한 점 (절제력)",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = ItvGreen
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(13.dp),
+                    color = if (isDark) Color(0xFF16271C) else Color(0xFFF2FBF5),
+                    border = BorderStroke(
+                        1.dp,
+                        ItvGreen.copy(alpha = if (isDark) 0.4f else 0.3f)
                     )
-                    assessment.praises.forEach { praise ->
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalAlignment = Alignment.Top
-                        ) {
-                            Text("✓", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = ItvGreen)
-                            Text(
-                                text = praise,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = CardInk
-                            )
+                ) {
+                    Column(
+                        modifier = Modifier.padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(7.dp)
+                    ) {
+                        Text(
+                            text = "잘한 점 (절제력)",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = ItvGreen,
+                            modifier = Modifier.padding(horizontal = 2.dp)
+                        )
+                        assessment.praises.forEach { praise ->
+                            Surface(
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(9.dp),
+                                color = if (isDark) Color(0xFF1D3024) else Color.White,
+                                border = BorderStroke(
+                                    0.75.dp,
+                                    ItvGreen.copy(alpha = if (isDark) 0.28f else 0.2f)
+                                )
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(7.dp),
+                                    verticalAlignment = Alignment.Top
+                                ) {
+                                    Text("✓", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = ItvGreen)
+                                    Text(
+                                        text = praise,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = CardInk,
+                                        lineHeight = 18.sp
+                                    )
+                                }
+                            }
                         }
                     }
                 }
             }
 
-            // Cautions (Overuse / Rhythm risks)
+            // Cautions (Overuse / Rhythm risks) - boxed section + boxed sentences
             if (assessment.cautions.isNotEmpty()) {
                 val warnColor = if (assessment.tier == DailyHealthTier.CRITICAL) Color(0xFFDC2626) else Color(0xFFD97706)
-                Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                    Text(
-                        text = "아쉬운 점 (과사용·리듬)",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = warnColor
+                val warnSectionBg = when {
+                    assessment.tier == DailyHealthTier.CRITICAL ->
+                        if (isDark) Color(0xFF2B181A) else Color(0xFFFEF5F5)
+                    else ->
+                        if (isDark) Color(0xFF292014) else Color(0xFFFFFBF2)
+                }
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(13.dp),
+                    color = warnSectionBg,
+                    border = BorderStroke(
+                        1.dp,
+                        warnColor.copy(alpha = if (isDark) 0.42f else 0.32f)
                     )
-                    assessment.cautions.forEach { caution ->
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalAlignment = Alignment.Top
-                        ) {
-                            Text("!", fontSize = 12.sp, fontWeight = FontWeight.ExtraBold, color = warnColor)
-                            Text(
-                                text = caution,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = CardInk
-                            )
+                ) {
+                    Column(
+                        modifier = Modifier.padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(7.dp)
+                    ) {
+                        Text(
+                            text = "아쉬운 점 (과사용·리듬)",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = warnColor,
+                            modifier = Modifier.padding(horizontal = 2.dp)
+                        )
+                        assessment.cautions.forEach { caution ->
+                            Surface(
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(9.dp),
+                                color = if (isDark) Color(0xFF241D18) else Color.White,
+                                border = BorderStroke(
+                                    0.75.dp,
+                                    warnColor.copy(alpha = if (isDark) 0.3f else 0.22f)
+                                )
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(7.dp),
+                                    verticalAlignment = Alignment.Top
+                                ) {
+                                    Text("!", fontSize = 12.sp, fontWeight = FontWeight.ExtraBold, color = warnColor)
+                                    Text(
+                                        text = caution,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = CardInk,
+                                        lineHeight = 18.sp
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -1160,72 +1278,103 @@ private fun FourAxesBreakdownCard(axes: List<HealthAxisScore>) {
             )
 
             axes.forEach { axis ->
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                val scoreColor = when {
+                    !axis.available -> CardSubInk.copy(alpha = 0.6f)
+                    axis.score >= 80 -> ItvGreen
+                    axis.score >= 55 -> Color(0xFFD97706)
+                    else -> Color(0xFFDC2626)
+                }
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (isDark) Color(0xFF172019) else Color(0xFFF8FBF8),
+                    border = BorderStroke(
+                        0.9.dp,
+                        if (isDark) ItvLine.copy(alpha = 0.4f) else ItvLine.copy(alpha = 0.85f)
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(7.dp)
                     ) {
                         Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = axis.title,
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.SemiBold,
-                                color = if (axis.available) CardInk else CardSubInk.copy(alpha = 0.6f)
-                            )
-                            if (axis.available) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
                                 Text(
-                                    text = "비중 ${axis.weightPercent}%",
-                                    fontSize = 10.sp,
-                                    color = CardSubInk
+                                    text = axis.title,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (axis.available) CardInk else CardSubInk.copy(alpha = 0.6f)
+                                )
+                                if (axis.available) {
+                                    Surface(
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = if (isDark) Color(0xFF243127) else Color(0xFFECF3ED)
+                                    ) {
+                                        Text(
+                                            text = "비중 ${axis.weightPercent}%",
+                                            fontSize = 10.sp,
+                                            color = CardSubInk,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = scoreColor.copy(alpha = if (axis.available) 0.13f else 0.08f)
+                            ) {
+                                Text(
+                                    text = if (axis.available) "${axis.score}점" else "미집계",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = scoreColor,
+                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
                                 )
                             }
                         }
-                        Text(
-                            text = if (axis.available) "${axis.score}점" else "미집계",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = when {
-                                !axis.available -> CardSubInk.copy(alpha = 0.6f)
-                                axis.score >= 80 -> ItvGreen
-                                axis.score >= 55 -> Color(0xFFD97706)
-                                else -> Color(0xFFDC2626)
+
+                        // Progress track
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(6.dp)
+                                .clip(RoundedCornerShape(3.dp))
+                                .background(if (isDark) Color(0xFF2C392F) else Color(0xFFE2E8F0))
+                        ) {
+                            if (axis.available) {
+                                val barColor = when {
+                                    axis.score >= 80 -> ItvGreen
+                                    axis.score >= 55 -> Color(0xFFF59E0B)
+                                    else -> Color(0xFFEF4444)
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth(fraction = (axis.score / 100f).coerceIn(0.03f, 1f))
+                                        .fillMaxHeight()
+                                        .clip(RoundedCornerShape(3.dp))
+                                        .background(barColor)
+                                )
                             }
+                        }
+
+                        HorizontalDivider(
+                            color = if (isDark) ItvLine.copy(alpha = 0.25f) else ItvLine.copy(alpha = 0.55f)
+                        )
+
+                        Text(
+                            text = axis.summary,
+                            fontSize = 11.5.sp,
+                            color = CardSubInk,
+                            lineHeight = 17.sp
                         )
                     }
-
-                    // Progress track
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(6.dp)
-                            .clip(RoundedCornerShape(3.dp))
-                            .background(if (isDark) Color(0xFF2C392F) else Color(0xFFE2E8F0))
-                    ) {
-                        if (axis.available) {
-                            val barColor = when {
-                                axis.score >= 80 -> ItvGreen
-                                axis.score >= 55 -> Color(0xFFF59E0B)
-                                else -> Color(0xFFEF4444)
-                            }
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth(fraction = (axis.score / 100f).coerceIn(0.03f, 1f))
-                                    .fillMaxHeight()
-                                    .clip(RoundedCornerShape(3.dp))
-                                    .background(barColor)
-                            )
-                        }
-                    }
-
-                    Text(
-                        text = axis.summary,
-                        fontSize = 11.sp,
-                        color = CardSubInk
-                    )
                 }
             }
         }
@@ -1258,8 +1407,9 @@ private fun CalendarDayDetailDialog(
     val dayTypeLabel = if (isRestDay) "🌿 쉬는 날" else "💼 일과 날"
     val hasData = assessment != null && assessment.tier != DailyHealthTier.NO_DATA
 
-    val dailyApps = remember(dayReport) {
-        dayReport?.hourlyApps
+    val context = LocalContext.current
+    val dailyApps = remember(dayReport, date) {
+        val fromLive = dayReport?.hourlyApps
             ?.asSequence()
             ?.flatten()
             ?.groupBy { it.packageName }
@@ -1268,7 +1418,11 @@ private fun CalendarDayDetailDialog(
             }
             ?.sortedByDescending { it.minutes }
             ?.filter { it.minutes >= 1.0 }
-            ?: emptyList()
+            ?.toList()
+            .orEmpty()
+        fromLive.ifEmpty {
+            MonthlyUsageArchiveStore.getArchivedTopApps(context, date)
+        }
     }
 
     Dialog(
@@ -1736,53 +1890,64 @@ private fun AppUsageRowItem(
         hourlyDuration(app.minutes)
     }
 
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
+    val isDark = LocalDarkTheme.current
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(10.dp),
+        color = if (isDark) Color(0xFF172019) else Color(0xFFF8FBF8),
+        border = BorderStroke(
+            0.8.dp,
+            if (isDark) ItvLine.copy(alpha = 0.35f) else ItvLine.copy(alpha = 0.75f)
+        )
     ) {
         Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            modifier = Modifier.weight(1f)
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            val iconBitmap = meta?.icon
-            if (iconBitmap != null) {
-                Image(
-                    bitmap = iconBitmap,
-                    contentDescription = null,
-                    modifier = Modifier
-                        .size(32.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                )
-            } else {
-                Surface(
-                    modifier = Modifier.size(32.dp),
-                    shape = RoundedCornerShape(8.dp),
-                    color = ItvMint
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Text("📱", fontSize = 15.sp)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.weight(1f)
+            ) {
+                val iconBitmap = meta?.icon
+                if (iconBitmap != null) {
+                    Image(
+                        bitmap = iconBitmap,
+                        contentDescription = null,
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                    )
+                } else {
+                    Surface(
+                        modifier = Modifier.size(32.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        color = ItvMint
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text("📱", fontSize = 15.sp)
+                        }
                     }
                 }
+                Text(
+                    text = displayName,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = CardInk,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
             Text(
-                text = displayName,
-                style = MaterialTheme.typography.bodyMedium,
-                color = CardInk,
-                fontWeight = FontWeight.Medium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+                text = durationText,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+                color = ItvGreen
             )
         }
-        Text(
-            text = durationText,
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.Bold,
-            color = ItvGreen
-        )
     }
 }
 

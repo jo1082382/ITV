@@ -22,6 +22,11 @@ android {
         buildConfigField("String", "KAKAO_NATIVE_APP_KEY", "\"c9bc897599445560e87207a69862aa58\"")
         buildConfigField("String", "NAVER_CLIENT_ID", "\"vDIT2IIUievIhb1L_f1e\"")
         buildConfigField("String", "NAVER_CLIENT_SECRET", "\"KsIbHXVHm6\"")
+        buildConfigField(
+            "String",
+            "SOCIAL_TOKEN_EXCHANGE_URL",
+            "\"https://asia-northeast3-itv-app-64579.cloudfunctions.net/exchangeSocialToken\""
+        )
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -82,6 +87,8 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(platform(libs.firebase.bom))
     implementation(libs.firebase.auth)
+    implementation(libs.firebase.firestore)
+    implementation(libs.androidx.work.runtime.ktx)
     implementation(libs.androidx.credentials)
     implementation(libs.androidx.credentials.play.services.auth)
     implementation(libs.googleid)

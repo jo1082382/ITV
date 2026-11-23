@@ -1,13 +1,16 @@
 package com.example.itv.presentation.auth
 
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import com.example.itv.domain.auth.AuthProvider
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -76,6 +79,7 @@ fun LoginScreen(
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsState()
     val currentUser by viewModel.currentUser.collectAsState()
+    val cloudSyncStatus by viewModel.cloudSyncStatus.collectAsState()
     val isGuest = currentUser?.isAnonymous == true
     val lastProvider = remember { viewModel.getLastLoginProvider() }
     var showAllLoginOptions by remember { mutableStateOf(lastProvider == null) }
@@ -343,16 +347,13 @@ fun LoginScreen(
             }
         }
 
-        // 로딩 프로그레스
-        if (uiState is AuthUiState.Loading) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.25f)),
-                contentAlignment = Alignment.Center
-            ) {
-                CircularProgressIndicator(color = Color.White)
-            }
+        // 클라우드 계정 데이터 연동 및 홈 준비 대기 화면 (완료 시 자동으로 홈 화면 이동)
+        val loadingState = uiState as? AuthUiState.Loading
+        if (loadingState != null) {
+            CloudSyncWaitingOverlay(
+                title = loadingState.title,
+                message = cloudSyncStatus.progressMessage ?: loadingState.message
+            )
         }
     }
 
@@ -770,6 +771,89 @@ private fun IntroFeatureCard(
                     fontSize = 12.sp,
                     lineHeight = 16.5.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Full-screen waiting overlay displayed while authenticating, restoring/merging
+ * 6-month cloud data, and pre-warming the Home calendar so the user lands directly
+ * on a fully populated Home screen once sync finishes.
+ */
+@Composable
+internal fun CloudSyncWaitingOverlay(
+    title: String,
+    message: String
+) {
+    // Prevent accidental back-press dismissal while cloud sync/restore is in progress
+    BackHandler(enabled = true) {}
+
+    val interactionSource = remember { MutableInteractionSource() }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.48f))
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = {}
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 32.dp),
+            shape = RoundedCornerShape(24.dp),
+            color = MaterialTheme.colorScheme.surface,
+            shadowElevation = 10.dp
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp, vertical = 28.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Surface(
+                    shape = CircleShape,
+                    color = Color(0xFFE6F7F5),
+                    modifier = Modifier.size(68.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        PuppyFaceMascot(modifier = Modifier.size(48.dp))
+                    }
+                }
+
+                CircularProgressIndicator(
+                    modifier = Modifier.size(34.dp),
+                    color = Color(0xFF1BA396),
+                    strokeWidth = 3.5.dp
+                )
+
+                Text(
+                    text = title,
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    textAlign = TextAlign.Center
+                )
+
+                Text(
+                    text = message,
+                    fontSize = 13.5.sp,
+                    lineHeight = 19.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
+
+                Text(
+                    text = "완료되면 자동으로 이동합니다. 잠시만 기다려 주세요.",
+                    fontSize = 11.5.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f),
+                    textAlign = TextAlign.Center
                 )
             }
         }

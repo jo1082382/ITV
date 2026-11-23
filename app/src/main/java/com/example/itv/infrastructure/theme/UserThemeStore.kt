@@ -47,6 +47,12 @@ object UserThemeStore {
         return next
     }
 
+    fun reset(context: Context) {
+        prefs(context).edit().clear().commit()
+        _darkModeState.value = false
+        initialized = false
+    }
+
     internal fun setDarkModeForTesting(enabled: Boolean) {
         _darkModeState.value = enabled
         initialized = true

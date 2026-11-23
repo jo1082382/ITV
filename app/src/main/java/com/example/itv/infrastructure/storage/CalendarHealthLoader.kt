@@ -1,6 +1,8 @@
 package com.example.itv.infrastructure.storage
 
 import android.content.Context
+import com.example.itv.composition.queryNightReport
+import com.example.itv.composition.queryUsageReport
 import com.example.itv.composition.sleepConfirmationService
 import com.example.itv.data.local.ItvDatabase
 import com.example.itv.domain.records.CalendarDayCyclePolicy
@@ -76,6 +78,85 @@ internal data class CalendarMonthHealthBundle(
 internal object CalendarHealthLoader {
 
     private const val MIN_PHONE_SESSION_MS = 120_000L // 2분 미만 퀵체크 필터링
+    private const val DEFAULT_CACHE_MAX_AGE_MS = 120_000L
+
+    private data class PreloadedMonthCache(
+        val viewMonth: YearMonth,
+        val today: LocalDate,
+        val stampedDates: Set<String>,
+        val bundle: CalendarMonthHealthBundle,
+        val cachedAtMs: Long,
+        val isFreshPreload: Boolean = false
+    )
+
+    @Volatile
+    private var preloadedMonthCache: PreloadedMonthCache? = null
+
+    fun getCachedMonth(
+        viewMonth: YearMonth,
+        today: LocalDate,
+        stampedDates: Set<String>,
+        maxAgeMs: Long = DEFAULT_CACHE_MAX_AGE_MS
+    ): CalendarMonthHealthBundle? {
+        val entry = preloadedMonthCache ?: return null
+        val ageMs = System.currentTimeMillis() - entry.cachedAtMs
+        if (ageMs !in 0L..maxAgeMs) return null
+        if (entry.viewMonth != viewMonth || entry.today != today || entry.stampedDates != stampedDates) {
+            return null
+        }
+        return entry.bundle
+    }
+
+    fun consumeFreshPreload(
+        viewMonth: YearMonth,
+        today: LocalDate,
+        stampedDates: Set<String>,
+        maxAgeMs: Long = DEFAULT_CACHE_MAX_AGE_MS
+    ): CalendarMonthHealthBundle? {
+        val entry = preloadedMonthCache ?: return null
+        if (!entry.isFreshPreload) return null
+        val ageMs = System.currentTimeMillis() - entry.cachedAtMs
+        if (ageMs !in 0L..maxAgeMs) return null
+        if (entry.viewMonth != viewMonth || entry.today != today || entry.stampedDates != stampedDates) {
+            return null
+        }
+        preloadedMonthCache = entry.copy(isFreshPreload = false)
+        return entry.bundle
+    }
+
+    fun clearCache() {
+        preloadedMonthCache = null
+    }
+
+    /**
+     * Pre-warms the current month's calendar health bundle off the main thread (for example,
+     * during the post-login cloud sync waiting screen) so Home displays restored data on frame 0.
+     */
+    suspend fun preloadCurrentMonth(context: Context): CalendarMonthHealthBundle = withContext(Dispatchers.IO) {
+        val appCtx = context.applicationContext
+        val zone = ZoneId.systemDefault()
+        val today = LocalDate.now(zone)
+        val viewMonth = YearMonth.from(today)
+        val todayRep = runCatching { appCtx.queryUsageReport(1, today) }.getOrNull()
+        val nightRep = runCatching { queryNightReport(appCtx, 45) }.getOrNull()
+        val stampedDates = DailyStampPrefs.getStampedDates(appCtx)
+        val bundle = loadMonth(
+            context = appCtx,
+            viewMonth = viewMonth,
+            todayReport = todayRep,
+            existingNightReport = nightRep,
+            stampedDates = stampedDates
+        )
+        preloadedMonthCache = PreloadedMonthCache(
+            viewMonth = viewMonth,
+            today = today,
+            stampedDates = stampedDates,
+            bundle = bundle,
+            cachedAtMs = System.currentTimeMillis(),
+            isFreshPreload = true
+        )
+        bundle
+    }
 
     private data class YesterdayGateState(
         val hasData: Boolean,
@@ -133,8 +214,11 @@ internal object CalendarHealthLoader {
             sleepConfirmationService(appCtx).readDates(wakeDatesToRead)
         }.getOrDefault(emptyMap())
 
-        val candidates = existingNightReport?.candidates.orEmpty()
-        val segments = existingNightReport?.segments.orEmpty()
+        val boundaryMs = AccountDataBoundaryStore.getFreshStartEpochMs(appCtx)
+        val boundaryDate = AccountDataBoundaryStore.getFreshStartDate(appCtx, zone)
+        val boundedNightReport = AccountDataBoundaryStore.filterNightReport(existingNightReport, boundaryMs)
+        val candidates = boundedNightReport?.candidates.orEmpty()
+        val segments = boundedNightReport?.segments.orEmpty()
 
         // 4. Personal baselines (bedtime, phone daily, shortform daily, SPM)
         val estimatedWindow = SleepSummaryPolicy.estimateBedtimeWindow(
@@ -167,13 +251,20 @@ internal object CalendarHealthLoader {
         val earliestTargetDate = if (needsCrossMonthYesterday) yesterday else monthStart
         val phoneSessionsByDate = if (!monthEnd.isBefore(today.minusDays(35))) {
             val queryStartDate = earliestTargetDate.minusDays(1).coerceAtLeast(today.minusDays(36))
-            val startWall = queryStartDate.atStartOfDay(zone).toInstant().toEpochMilli()
+            val startWall = AccountDataBoundaryStore.clampStartWallMs(
+                queryStartDate.atStartOfDay(zone).toInstant().toEpochMilli(),
+                boundaryMs
+            )
             val endWall = monthEnd.plusDays(2).atStartOfDay(zone).toInstant().toEpochMilli()
                 .coerceAtMost(nowWallMs)
-            val events = runCatching {
-                AndroidRecordSource(appCtx).events(startWall, endWall)
-            }.getOrDefault(emptyList())
-            ShortformPersonalStatsStore.parsePhoneSessions(events).groupBy { it.date }
+            if (startWall < endWall) {
+                val events = runCatching {
+                    AndroidRecordSource(appCtx).events(startWall, endWall)
+                }.getOrDefault(emptyList())
+                ShortformPersonalStatsStore.parsePhoneSessions(events).groupBy { it.date }
+            } else {
+                emptyMap()
+            }
         } else {
             emptyMap()
         }
@@ -229,6 +320,19 @@ internal object CalendarHealthLoader {
             val archiveRec = allDailyRecords[dateKey]
             val nextArchiveRec = allDailyRecords[nextDateKey]
 
+            // Respect fresh-start boundary after account deletion / sign-out so old OS records don't leak back in
+            if (AccountDataBoundaryStore.isDateBeforeBoundary(date, boundaryDate) &&
+                archiveRec == null &&
+                sfDailyByDate[dateKey].isNullOrEmpty() &&
+                sfSessionsByDate[dateKey].isNullOrEmpty() &&
+                sleepConfirmations[nextDateKey] == null
+            ) {
+                val emptyAssessment = DailyHealthEvaluator.evaluate(
+                    DailyHealthContext(date = date, isToday = false, isFinalized = true)
+                )
+                return EvaluatedDay(assessment = emptyAssessment, facts = null, isFinalized = true)
+            }
+
             // Resolve previous night's sleep (waking on `date`) and tonight's sleep (waking on `date + 1`)
             val prevNightSleep = CalendarDayCyclePolicy.resolveNightSleepForDate(
                 date = prevDate,
@@ -237,7 +341,10 @@ internal object CalendarHealthLoader {
                 segments = segments,
                 candidates = candidates,
                 nextArchiveBedtimeMin = archiveRec?.bedtimeMinute,
-                nextArchiveWakeupMin = archiveRec?.wakeupMinute
+                nextArchiveWakeupMin = archiveRec?.wakeupMinute,
+                nextArchiveSleepStartWallMs = archiveRec?.sleepStartWallMs,
+                nextArchiveSleepEndWallMs = archiveRec?.sleepEndWallMs,
+                nextArchiveSleepDurationMinutes = archiveRec?.sleepDurationMinutes
             )
             val nightSleep = CalendarDayCyclePolicy.resolveNightSleepForDate(
                 date = date,
@@ -246,7 +353,10 @@ internal object CalendarHealthLoader {
                 segments = segments,
                 candidates = candidates,
                 nextArchiveBedtimeMin = nextArchiveRec?.bedtimeMinute,
-                nextArchiveWakeupMin = nextArchiveRec?.wakeupMinute
+                nextArchiveWakeupMin = nextArchiveRec?.wakeupMinute,
+                nextArchiveSleepStartWallMs = nextArchiveRec?.sleepStartWallMs,
+                nextArchiveSleepEndWallMs = nextArchiveRec?.sleepEndWallMs,
+                nextArchiveSleepDurationMinutes = nextArchiveRec?.sleepDurationMinutes
             )
 
             val isFinalized = CalendarDayCyclePolicy.isDateFinalized(
@@ -284,8 +394,10 @@ internal object CalendarHealthLoader {
             val validPhoneSessions = cyclePhoneSessionDurations.filter { it >= MIN_PHONE_SESSION_MS }
             val phoneAvgSessionMs = if (validPhoneSessions.isNotEmpty()) {
                 validPhoneSessions.average().toLong()
-            } else null
-            val phoneMaxSessionMs = validPhoneSessions.maxOrNull()
+            } else {
+                archiveRec?.phoneAvgSessionMs
+            }
+            val phoneMaxSessionMs = validPhoneSessions.maxOrNull() ?: archiveRec?.phoneMaxSessionMs
 
             // Phone total ms (never mixes previous night's 00:00..wake usage into `date`)
             val totalPhoneMs = when {
@@ -377,12 +489,18 @@ internal object CalendarHealthLoader {
 
             val sfAvgSessionMs = if (cycleSfSessions.isNotEmpty()) {
                 ShortformPersonalStatsStore.calculateRepresentativeSessionMs(cycleSfSessions)
-            } else null
+                    .takeIf { it > 0L }
+            } else {
+                null
+            } ?: archiveRec?.shortformAvgSessionMs
             val sfMaxSessionMs = cycleSfSessions.maxOfOrNull { it.durationMs }
+                ?: archiveRec?.shortformMaxSessionMs
 
             val sfSpm = if (shortformMs >= 30_000L && shortformSwipes > 0L) {
                 shortformSwipes.toDouble() / (shortformMs / 60_000.0)
-            } else null
+            } else {
+                archiveRec?.shortformSpm
+            }
 
             // Pre-sleep window strictly inside `date`'s night (`date` -> `date + 1`), never `date 00:00..04:59`
             val preSleepWindow = CalendarDayCyclePolicy.resolvePreSleepWindow(
@@ -404,7 +522,7 @@ internal object CalendarHealthLoader {
                 preSleepWindow = preSleepWindow,
                 candidateSessions = candidatePhoneSessions,
                 todayReport = todayReport
-            )
+            ) ?: archiveRec?.preSleepUsageMinutes
 
             val preSleepShortformMin = computePreSleepShortformMinutes(
                 zone = zone,
@@ -413,7 +531,7 @@ internal object CalendarHealthLoader {
                 sfHourBuckets = sfHourBuckets,
                 candidateSfSessions = candidateSfSessions,
                 hasShortformTracking = hasShortformTracking
-            )
+            ) ?: archiveRec?.preSleepShortformMinutes
 
             val isRestDay = archiveRec?.dayType == "REST_DAY" ||
                 date.dayOfWeek == DayOfWeek.SATURDAY ||
@@ -499,6 +617,17 @@ internal object CalendarHealthLoader {
             }
         }
 
+        // 6.5 Persist resolved sleep-cycle metrics into the 6-month on-device archive
+        if (factsMap.isNotEmpty()) {
+            runCatching {
+                MonthlyUsageArchiveStore.upsertResolvedDayFacts(
+                    context = appCtx,
+                    factsMap = factsMap,
+                    today = today
+                )
+            }
+        }
+
         // 7. Compute monthly medal & warning tally
         val finalValues = assessments.values.filter {
             it.tier != DailyHealthTier.NO_DATA && it.tier != DailyHealthTier.IN_PROGRESS
@@ -515,14 +644,22 @@ internal object CalendarHealthLoader {
             averageScore = if (finalValues.isNotEmpty()) finalValues.map { it.score }.average().toInt() else 0
         )
 
-        CalendarMonthHealthBundle(
+        val bundle = CalendarMonthHealthBundle(
             viewMonth = viewMonth,
             assessments = assessments,
             facts = factsMap,
             tally = tally,
             baselineBedtimeMinute = baselineBedtimeMin,
-            nightReport = existingNightReport
+            nightReport = boundedNightReport
         )
+        preloadedMonthCache = PreloadedMonthCache(
+            viewMonth = viewMonth,
+            today = today,
+            stampedDates = stampedDates,
+            bundle = bundle,
+            cachedAtMs = System.currentTimeMillis()
+        )
+        bundle
     }
 
     private fun computePreSleepPhoneMinutes(

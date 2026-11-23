@@ -3,6 +3,7 @@ package com.example.itv.infrastructure.auth
 import android.content.Context
 import com.example.itv.domain.auth.AuthProvider
 import com.example.itv.domain.auth.UserProfile
+import com.kakao.sdk.auth.TokenManagerProvider
 import com.kakao.sdk.auth.model.OAuthToken
 import com.kakao.sdk.common.model.ClientError
 import com.kakao.sdk.common.model.ClientErrorCause
@@ -17,9 +18,12 @@ import kotlin.coroutines.resumeWithException
  */
 object KakaoAuthClient {
 
-    suspend fun signIn(context: Context): Result<UserProfile> = runCatching {
+    suspend fun signIn(context: Context): Result<UserProfile> =
+        signInWithToken(context).map { it.profile }
+
+    suspend fun signInWithToken(context: Context): Result<SocialAuthPayload> = runCatching {
         // 1. 카카오 로그인 토큰 획득
-        acquireToken(context)
+        val token = acquireToken(context)
 
         // 2. 카카오 사용자 프로필 획득
         val user = fetchKakaoUser()
@@ -30,13 +34,16 @@ object KakaoAuthClient {
         val photoUrl = user.kakaoAccount?.profile?.profileImageUrl
             ?: user.kakaoAccount?.profile?.thumbnailImageUrl
 
-        UserProfile(
-            uid = uid,
-            provider = AuthProvider.KAKAO,
-            displayName = nickname,
-            email = email,
-            photoUrl = photoUrl,
-            isAnonymous = false
+        SocialAuthPayload(
+            profile = UserProfile(
+                uid = uid,
+                provider = AuthProvider.KAKAO,
+                displayName = nickname,
+                email = email,
+                photoUrl = photoUrl,
+                isAnonymous = false
+            ),
+            accessToken = token.accessToken
         )
     }
 
@@ -78,6 +85,31 @@ object KakaoAuthClient {
                 if (cont.isActive) cont.resumeWithException(IllegalStateException("카카오 사용자 정보를 가져올 수 없습니다."))
             }
         }
+    }
+
+    /**
+     * Returns a valid (auto-refreshed if needed) stored Kakao OAuth access token,
+     * allowing existing local Kakao sessions to seamlessly upgrade to Firebase Custom Token auth.
+     */
+    suspend fun getValidStoredAccessToken(): String? {
+        val hasLocalToken = runCatching {
+            TokenManagerProvider.instance.manager.getToken()?.accessToken?.isNotBlank() == true
+        }.getOrDefault(false)
+        if (!hasLocalToken) return null
+
+        // Calling accessTokenInfo triggers Kakao SDK's automatic refresh if the access token expired
+        val validated = runCatching {
+            suspendCancellableCoroutine<Boolean> { cont ->
+                UserApiClient.instance.accessTokenInfo { tokenInfo, error ->
+                    if (cont.isActive) cont.resume(error == null && tokenInfo != null)
+                }
+            }
+        }.getOrDefault(false)
+        if (!validated) return null
+
+        return runCatching {
+            TokenManagerProvider.instance.manager.getToken()?.accessToken?.takeIf { it.isNotBlank() }
+        }.getOrNull()
     }
 
     suspend fun signOut(): Result<Unit> = suspendCancellableCoroutine { cont ->

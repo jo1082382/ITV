@@ -17,9 +17,15 @@ import kotlin.coroutines.resumeWithException
  */
 object NaverAuthClient {
 
-    suspend fun signIn(context: Context): Result<UserProfile> = runCatching {
+    suspend fun signIn(context: Context): Result<UserProfile> =
+        signInWithToken(context).map { it.profile }
+
+    suspend fun signInWithToken(context: Context): Result<SocialAuthPayload> = runCatching {
         // 1. 네이버 로그인 토큰 획득
         authenticate(context)
+        val accessToken = NidOAuth.getAccessToken()
+            ?.takeIf { it.isNotBlank() }
+            ?: throw IllegalStateException("네이버 액세스 토큰을 가져올 수 없습니다.")
 
         // 2. 네이버 사용자 프로필 획득
         val nidProfile = fetchProfile()
@@ -30,13 +36,16 @@ object NaverAuthClient {
         val email = detail.email.ifEmpty { null }
         val photoUrl = detail.profileImage.ifEmpty { null }
 
-        UserProfile(
-            uid = uid,
-            provider = AuthProvider.NAVER,
-            displayName = displayName,
-            email = email,
-            photoUrl = photoUrl,
-            isAnonymous = false
+        SocialAuthPayload(
+            profile = UserProfile(
+                uid = uid,
+                provider = AuthProvider.NAVER,
+                displayName = displayName,
+                email = email,
+                photoUrl = photoUrl,
+                isAnonymous = false
+            ),
+            accessToken = accessToken
         )
     }
 
@@ -67,6 +76,10 @@ object NaverAuthClient {
             }
         })
     }
+
+    fun getStoredAccessToken(): String? = runCatching {
+        NidOAuth.getAccessToken()?.takeIf { it.isNotBlank() }
+    }.getOrNull()
 
     suspend fun signOut(): Result<Unit> = suspendCancellableCoroutine { cont ->
         NidOAuth.logout(object : NidOAuthCallback {

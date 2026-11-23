@@ -3,6 +3,7 @@ package com.example.itv.infrastructure.storage.shortform
 import android.content.Context
 import com.example.itv.application.records.ShortformRecordingCoordinator
 import com.example.itv.domain.records.*
+import kotlinx.coroutines.withTimeoutOrNull
 
 /** Android compatibility adapter. No accumulated records, queue or retry policy here. */
 internal object ShortformDailyStore {
@@ -27,6 +28,26 @@ internal object ShortformDailyStore {
     suspend fun deleteAllAndAwait(c:Context) {
         instance(c).deleteAllAndAwait()
         ShortformPersonalStatsStore.clear(c)
+    }
+    suspend fun resetForAccountDeletion(c: Context) {
+        val existing = synchronized(this) {
+            coordinator.also { coordinator = null }
+        }
+        try {
+            runCatching { existing?.pause() }
+            withTimeoutOrNull(2_000L) {
+                runCatching { existing?.deleteAllAndAwait() }
+            }
+        } finally {
+            runCatching { existing?.close() }
+        }
+        ShortformPersonalStatsStore.deleteAllAndReset(c)
+    }
+    fun reloadAfterCloudRestore() {
+        val existing = synchronized(this) {
+            coordinator.also { coordinator = null }
+        }
+        runCatching { existing?.close() }
     }
     fun clear(c:Context) {
         instance(c).clear()

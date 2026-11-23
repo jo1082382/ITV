@@ -57,6 +57,7 @@ class PermissionSettingsActivity : ComponentActivity() {
     private fun StandalonePermissions() {
         val screenState by settingsService.state.collectAsState()
         val notice = screenState.error
+        val guardConnected = screenState.data.guardConnected
         val notifications = screenState.data.notifications
         val monitorVisible = screenState.data.monitorVisible
         val consent = screenState.data.consent
@@ -106,6 +107,8 @@ class PermissionSettingsActivity : ComponentActivity() {
                         "전체·앱별 사용시간을 조회하는 권한입니다. 허용되지 않으면 사용량을 조회할 수 없습니다.") { openSystem(false) } }
                     item { FoldPermission("다른 앱 위에 표시", overlay,
                         "다른 앱을 사용하는 중 강아지 개입과 휴식 완료 창을 표시하는 권한입니다.") { openSystem(true) } }
+                    item { FoldPermission("접근성 서비스", guardConnected,
+                        "릴스·쇼츠 화면과 전환을 판별하고, 메시지나 댓글 작성 중에는 개입을 보류하는 권한입니다. (화면 내용·입력 문자는 일체 읽거나 저장하지 않습니다)") { openAccessibility(standalone = true) } }
                     item { FoldPermission("휴식 제안 알림", notifications,
                         "휴식 제안 알림을 표시합니다. 앱 알림 허용과 제안 알림 채널 상태를 함께 확인합니다.") { openNotifications() } }
                     item { FoldPermission("감시 상태 알림", monitorVisible,
@@ -166,10 +169,6 @@ class PermissionSettingsActivity : ComponentActivity() {
             val overlay = screenState.data.overlay
             val history = screenState.data.history
             ITVTheme {
-                if (intent.getBooleanExtra("permissions_only", false)) {
-                    StandalonePermissions()
-                    return@ITVTheme
-                }
                 if (showAccessibilityDisclosure) {
                     AlertDialog(
                         onDismissRequest = { showAccessibilityDisclosure = false },
@@ -186,14 +185,17 @@ class PermissionSettingsActivity : ComponentActivity() {
                         confirmButton = {
                             TextButton(onClick = {
                                 showAccessibilityDisclosure = false
-                                try { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
-                                catch (_: Exception) { settingsService.showMessage("기기 설정 → 접근성 → 설치된 앱 → ITV 작성 보호 테스트에서 변경하세요.") }
+                                launchAccessibilitySystemSettings()
                             }) { Text("확인하고 접근성 설정 열기") }
                         },
                         dismissButton = {
                             TextButton(onClick = { showAccessibilityDisclosure = false }) { Text("나중에") }
                         }
                     )
+                }
+                if (intent.getBooleanExtra("permissions_only", false)) {
+                    StandalonePermissions()
+                    return@ITVTheme
                 }
                 if (showJournalDelete) AlertDialog(
                     onDismissRequest = { showJournalDelete = false },
@@ -448,11 +450,29 @@ items(history.size) { index -> Text(history[index], style = MaterialTheme.typogr
             }
         }
     }
-    private fun openAccessibility() {
-        if (!consent && !guardConnected) {
-            settingsService.showMessage("동의/내역 탭에서 수집 안내를 확인하고 동의해 주세요.")
-            selectedPage = 4
-        } else showAccessibilityDisclosure = true
+    private fun openAccessibility(standalone: Boolean = false) {
+        if (guardConnected) {
+            launchAccessibilitySystemSettings()
+            return
+        }
+        if (!consent) {
+            if (standalone) {
+                settingsService.showMessage("먼저 수집 안내를 확인하고 동의해 주세요.")
+            } else {
+                settingsService.showMessage("동의/내역 탭에서 수집 안내를 확인하고 동의해 주세요.")
+                selectedPage = 4
+            }
+            return
+        }
+        showAccessibilityDisclosure = true
+    }
+
+    private fun launchAccessibilitySystemSettings() {
+        try {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        } catch (_: Exception) {
+            settingsService.showMessage("기기 설정 → 접근성 → 설치된 앱 → ITV에서 변경하세요.")
+        }
     }
     private fun openProbe(target: Class<*>) {
         try { startActivity(Intent(this, target)) }

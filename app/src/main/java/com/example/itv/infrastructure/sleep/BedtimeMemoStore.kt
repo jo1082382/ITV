@@ -34,6 +34,21 @@ class BedtimeMemoStore(context: Context) {
             .apply()
     }
 
+    fun restoreMemo(content: String?, savedAt: Long?, isPending: Boolean) {
+        val editor = prefs.edit().clear()
+        if (!content.isNullOrBlank() && savedAt != null && savedAt > 0L) {
+            editor
+                .putString(KEY_MEMO_CONTENT, content)
+                .putLong(KEY_MEMO_TIME, savedAt)
+                .putBoolean(KEY_PENDING_BRIEFING, isPending)
+        }
+        editor.commit()
+    }
+
+    fun clear() {
+        prefs.edit().clear().commit()
+    }
+
     companion object {
         private const val KEY_MEMO_CONTENT = "memo_content"
         private const val KEY_MEMO_TIME = "memo_time"

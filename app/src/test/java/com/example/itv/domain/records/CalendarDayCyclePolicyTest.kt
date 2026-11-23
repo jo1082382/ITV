@@ -297,4 +297,60 @@ class CalendarDayCyclePolicyTest {
             )
         )
     }
+
+    @Test
+    fun `mergeArchivedSleepData backfills pre-retention archive dates without duplicating live or NOT_SLEEP dates`() {
+        val nov10 = LocalDate.of(2026, 11, 10)
+        val nov11 = LocalDate.of(2026, 11, 11)
+        val nov14 = LocalDate.of(2026, 11, 14)
+
+        val liveSeg = NightSegment(
+            wakeDate = nov14,
+            start = wallMs(nov14, 1, 0),
+            end = wallMs(nov14, 8, 0),
+            minutes = 420.0,
+            briefWakeCount = 2
+        )
+
+        val merged = CalendarDayCyclePolicy.mergeArchivedSleepData(
+            liveSegments = listOf(liveSeg),
+            liveCandidates = listOf(liveSeg),
+            archivedRecords = listOf(
+                ArchivedSleepRecord(wakeDate = nov10, bedtimeMinute = 23 * 60 + 30, wakeupMinute = 7 * 60),
+                ArchivedSleepRecord(wakeDate = nov11, bedtimeMinute = 1 * 60, wakeupMinute = 8 * 60),
+                ArchivedSleepRecord(wakeDate = nov14, bedtimeMinute = 0 * 60 + 30, wakeupMinute = 7 * 60 + 30)
+            ),
+            confirmations = mapOf(
+                nov11.toString() to SleepConfirmation(
+                    date = nov11.toString(),
+                    zoneId = zone.id,
+                    choice = "NOT_SLEEP",
+                    startMs = null,
+                    endMs = null,
+                    origin = "USER",
+                    updatedAt = wallMs(nov11, 9, 0)
+                )
+            ),
+            zone = zone
+        )
+
+        // Nov 14 keeps the live OS segment (briefWakeCount = 2), Nov 11 is skipped (NOT_SLEEP), Nov 10 is backfilled!
+        assertEquals(2, merged.segments.size)
+        val seg14 = merged.segments.first { it.wakeDate == nov14 }
+        assertEquals(2, seg14.briefWakeCount)
+
+        val seg10 = merged.segments.first { it.wakeDate == nov10 }
+        assertEquals(wallMs(nov10.minusDays(1), 23, 30), seg10.start)
+        assertEquals(wallMs(nov10, 7, 0), seg10.end)
+        assertEquals(450.0, seg10.minutes, 0.001)
+
+        // Weekly profile & bedtime estimate now reflect BOTH Nov 10 (archived) and Nov 14 (live)!
+        val estimate = SleepSummaryPolicy.estimateBedtimeWindow(
+            confirmations = emptyMap(),
+            candidates = merged.candidates,
+            zone = zone
+        )
+        assertNotNull(estimate)
+        assertEquals(2, estimate!!.validCount)
+    }
 }

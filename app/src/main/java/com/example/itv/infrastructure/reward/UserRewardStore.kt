@@ -75,6 +75,29 @@ object UserRewardStore {
         )
     }
 
+    fun restoreState(
+        context: Context,
+        totalExp: Long,
+        points: Long,
+        totalMissions: Int,
+        mergeWithLocal: Boolean
+    ) {
+        val p = prefs(context)
+        val nextExp = if (mergeWithLocal) maxOf(p.getLong(KEY_TOTAL_EXP, 0L), totalExp) else totalExp
+        val nextPoints = if (mergeWithLocal) maxOf(p.getLong(KEY_POINTS, 0L), points) else points
+        val nextMissions = if (mergeWithLocal) maxOf(p.getInt(KEY_TOTAL_MISSIONS, 0), totalMissions) else totalMissions
+        p.edit()
+            .putLong(KEY_TOTAL_EXP, nextExp.coerceAtLeast(0L))
+            .putLong(KEY_POINTS, nextPoints.coerceAtLeast(0L))
+            .putInt(KEY_TOTAL_MISSIONS, nextMissions.coerceAtLeast(0))
+            .commit()
+        _rewardState.value = LevelCalculator.calculate(
+            nextExp.coerceAtLeast(0L),
+            nextPoints.coerceAtLeast(0L),
+            nextMissions.coerceAtLeast(0)
+        )
+    }
+
     /**
      * 테스트용 초기화
      */

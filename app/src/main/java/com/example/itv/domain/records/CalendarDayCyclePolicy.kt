@@ -32,6 +32,17 @@ internal data class HourlyUsageBucket(
     val durationMs: Long
 )
 
+internal data class ArchivedSleepRecord(
+    val wakeDate: LocalDate,
+    val bedtimeMinute: Int,
+    val wakeupMinute: Int
+)
+
+internal data class MergedSleepData(
+    val segments: List<NightSegment>,
+    val candidates: List<NightSegment>
+)
+
 /**
  * Pure sleep-cycle day boundary & pre-sleep attribution policy for ITV's calendar scoring.
  *
@@ -65,7 +76,10 @@ internal object CalendarDayCyclePolicy {
         segments: List<NightSegment>,
         candidates: List<NightSegment>,
         nextArchiveBedtimeMin: Int?,
-        nextArchiveWakeupMin: Int?
+        nextArchiveWakeupMin: Int?,
+        nextArchiveSleepStartWallMs: Long? = null,
+        nextArchiveSleepEndWallMs: Long? = null,
+        nextArchiveSleepDurationMinutes: Double? = null
     ): ResolvedNightSleep {
         val nextDate = date.plusDays(1)
         val wakeSegment = segments.firstOrNull { it.wakeDate == nextDate && it.end != null }
@@ -106,17 +120,30 @@ internal object CalendarDayCyclePolicy {
             )
         }
 
-        if (nextArchiveBedtimeMin != null || nextArchiveWakeupMin != null) {
-            val bedWall = nextArchiveBedtimeMin?.let { bedtimeMinuteToWallMs(date, it, zone) }
-            val wakeWall = nextArchiveWakeupMin?.let { wakeupMinuteToWallMs(nextDate, it, bedWall, zone) }
-            val durationMin = if (bedWall != null && wakeWall != null && wakeWall > bedWall) {
-                (wakeWall - bedWall) / 60_000.0
-            } else {
-                null
+        if (nextArchiveBedtimeMin != null || nextArchiveWakeupMin != null ||
+            (nextArchiveSleepStartWallMs != null && nextArchiveSleepEndWallMs != null)
+        ) {
+            val bedWall = nextArchiveSleepStartWallMs
+                ?: nextArchiveBedtimeMin?.let { bedtimeMinuteToWallMs(date, it, zone) }
+            val wakeWall = nextArchiveSleepEndWallMs
+                ?: nextArchiveWakeupMin?.let { wakeupMinuteToWallMs(nextDate, it, bedWall, zone) }
+            val resolvedBedMin = nextArchiveBedtimeMin ?: bedWall?.let {
+                val zdt = Instant.ofEpochMilli(it).atZone(zone)
+                zdt.hour * 60 + zdt.minute
             }
+            val resolvedWakeMin = nextArchiveWakeupMin ?: wakeWall?.let {
+                val zdt = Instant.ofEpochMilli(it).atZone(zone)
+                zdt.hour * 60 + zdt.minute
+            }
+            val durationMin = nextArchiveSleepDurationMinutes
+                ?: if (bedWall != null && wakeWall != null && wakeWall > bedWall) {
+                    (wakeWall - bedWall) / 60_000.0
+                } else {
+                    null
+                }
             return ResolvedNightSleep(
-                bedtimeMinute = nextArchiveBedtimeMin,
-                wakeupMinute = nextArchiveWakeupMin,
+                bedtimeMinute = resolvedBedMin,
+                wakeupMinute = resolvedWakeMin,
                 sleepDurationMinutes = durationMin,
                 bedtimeStartWallMs = bedWall,
                 sleepEndWallMs = wakeWall,
@@ -330,5 +357,67 @@ internal object CalendarDayCyclePolicy {
             }
         }
         return totalMinutes
+    }
+
+    /**
+     * Merges live OS UsageEvents sleep segments/candidates with long-term archived sleep records
+     * and user-confirmed sleep records so sleep pattern summaries and 30-day charts retain full history
+     * even after Android OS prunes UsageEvents older than ~7-10 days.
+     */
+    fun mergeArchivedSleepData(
+        liveSegments: List<NightSegment>,
+        liveCandidates: List<NightSegment>,
+        archivedRecords: List<ArchivedSleepRecord>,
+        confirmations: Map<String, SleepConfirmation>,
+        zone: ZoneId
+    ): MergedSleepData {
+        val mergedSegments = liveSegments.toMutableList()
+        val mergedCandidates = liveCandidates.toMutableList()
+
+        val liveDates = (liveSegments.map { it.wakeDate } + liveCandidates.map { it.wakeDate }).toMutableSet()
+
+        // 1. Add user-confirmed sleep records whose wakeDate is no longer in live OS events
+        for ((dateKey, conf) in confirmations) {
+            if (conf.choice != "SLEEP" || conf.startMs == null || conf.endMs == null || conf.endMs <= conf.startMs) continue
+            val wakeDate = runCatching { LocalDate.parse(dateKey) }.getOrNull() ?: continue
+            if (wakeDate in liveDates) continue
+            val durationMin = (conf.endMs - conf.startMs) / 60_000.0
+            val seg = NightSegment(
+                wakeDate = wakeDate,
+                start = conf.startMs,
+                end = conf.endMs,
+                minutes = durationMin,
+                briefWakeCount = 0
+            )
+            mergedSegments.add(seg)
+            mergedCandidates.add(seg)
+            liveDates.add(wakeDate)
+        }
+
+        // 2. Backfill older dates from MonthlyUsageArchiveStore (skipping live dates & explicit NOT_SLEEP)
+        for (rec in archivedRecords) {
+            if (rec.wakeDate in liveDates) continue
+            if (confirmations[rec.wakeDate.toString()]?.choice == "NOT_SLEEP") continue
+            val nightDate = rec.wakeDate.minusDays(1)
+            val startMs = bedtimeMinuteToWallMs(nightDate, rec.bedtimeMinute, zone)
+            val endMs = wakeupMinuteToWallMs(rec.wakeDate, rec.wakeupMinute, startMs, zone) ?: continue
+            val durationMin = (endMs - startMs) / 60_000.0
+            if (durationMin < 60.0 || durationMin > 18.0 * 60.0) continue
+            val seg = NightSegment(
+                wakeDate = rec.wakeDate,
+                start = startMs,
+                end = endMs,
+                minutes = durationMin,
+                briefWakeCount = 0
+            )
+            mergedSegments.add(seg)
+            mergedCandidates.add(seg)
+            liveDates.add(rec.wakeDate)
+        }
+
+        return MergedSleepData(
+            segments = mergedSegments.sortedByDescending { it.wakeDate },
+            candidates = mergedCandidates.sortedByDescending { it.wakeDate }
+        )
     }
 }

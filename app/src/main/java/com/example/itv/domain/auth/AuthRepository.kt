@@ -28,14 +28,22 @@ interface AuthRepository {
     suspend fun signInWithGoogle(idToken: String): Result<UserProfile>
 
     /**
-     * 카카오 소셜 계정으로 로그인
+     * 카카오 소셜 계정으로 로그인 (accessToken이 있으면 Firebase Custom Token으로 통합 인증 및 클라우드 동기화)
      */
-    suspend fun signInWithKakao(profile: UserProfile): Result<UserProfile>
+    suspend fun signInWithKakao(
+        profile: UserProfile,
+        accessToken: String? = null,
+        mergeLocalGuestData: Boolean = false
+    ): Result<UserProfile>
 
     /**
-     * 네이버 소셜 계정으로 로그인
+     * 네이버 소셜 계정으로 로그인 (accessToken이 있으면 Firebase Custom Token으로 통합 인증 및 클라우드 동기화)
      */
-    suspend fun signInWithNaver(profile: UserProfile): Result<UserProfile>
+    suspend fun signInWithNaver(
+        profile: UserProfile,
+        accessToken: String? = null,
+        mergeLocalGuestData: Boolean = false
+    ): Result<UserProfile>
 
     /**
      * 기존 게스트 계정을 구글 계정으로 통합(Account Linking)

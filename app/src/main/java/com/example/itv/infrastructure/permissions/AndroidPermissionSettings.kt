@@ -79,8 +79,23 @@ internal class AndroidPermissionSettings(context: Context) : android.content.Con
     }
     override suspend fun snapshot(): PermissionSnapshot = withContext(Dispatchers.IO) { PermissionSnapshot(guardConnected, notifications, monitorVisible,
         autoEnabled, consent, usage, overlay, history, notice) }
+    private fun isAccessibilityEnabled(): Boolean {
+        return try {
+            val enabled = Settings.Secure.getInt(contentResolver, Settings.Secure.ACCESSIBILITY_ENABLED, 0) == 1
+            if (!enabled) return false
+            val services = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+            if (services != null) {
+                services.contains(packageName)
+            } else {
+                WritingGuard.connected
+            }
+        } catch (_: Exception) {
+            WritingGuard.connected
+        }
+    }
+
     override suspend fun poll() = withContext(Dispatchers.IO) {
-        guardConnected = WritingGuard.connected
+        guardConnected = isAccessibilityEnabled()
         usage = try { (getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager).checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), packageName) == AppOpsManager.MODE_ALLOWED } catch (_: Exception) { null }
         overlay = try { Settings.canDrawOverlays(this@AndroidPermissionSettings) } catch (_: Exception) { null }
         notifications = try { com.example.itv.composition.CoachingAccess.notifications(this@AndroidPermissionSettings) } catch (_: Exception) { null }
@@ -101,7 +116,7 @@ internal class AndroidPermissionSettings(context: Context) : android.content.Con
     }
     override suspend fun refresh() = withContext(Dispatchers.IO) {
         notice = null
-        guardConnected = com.example.itv.infrastructure.observation.accessibility.WritingGuard.connected
+        guardConnected = isAccessibilityEnabled()
         usage = try {
             val ops = getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
             ops.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), packageName) == AppOpsManager.MODE_ALLOWED
@@ -116,7 +131,12 @@ internal class AndroidPermissionSettings(context: Context) : android.content.Con
         autoEnabled = CoachingAutoStart.testModeEnabled(this@AndroidPermissionSettings)
         val next = JSONObject(doc.toString())
         var changed = false
-        for ((key, name, value) in listOf(Triple("usage", "사용 정보 접근", usage), Triple("overlay", "다른 앱 위에 표시", overlay), Triple("notifications", "휴식 제안 알림", notifications))) {
+        for ((key, name, value) in listOf(
+            Triple("usage", "사용 정보 접근", usage),
+            Triple("overlay", "다른 앱 위에 표시", overlay),
+            Triple("accessibility", "접근성 서비스", guardConnected as Boolean?),
+            Triple("notifications", "휴식 제안 알림", notifications)
+        )) {
             if (value != null && (!next.has(key) || next.optBoolean(key) != value)) {
                 addEvent(next, "$name: ${if (value) "허용 확인" else "미허용 확인"}")
                 next.put(key, value)

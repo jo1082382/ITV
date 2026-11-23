@@ -62,4 +62,31 @@ object UserEquipStore {
         val state = _equipState.value.takeIf { it.isNotEmpty() } ?: getEquipped(context)
         return state.values.any { it?.id == itemId }
     }
+
+    fun restoreEquipped(
+        context: Context,
+        slotToItemId: Map<String, String>,
+        mergeWithLocal: Boolean
+    ) {
+        val p = prefs(context)
+        val editor = p.edit()
+        if (!mergeWithLocal) {
+            editor.clear()
+        }
+        for (slot in EquipSlot.values()) {
+            val remoteItemId = slotToItemId[slot.name]
+            if (remoteItemId != null && EquipCatalog.findById(remoteItemId) != null) {
+                if (!mergeWithLocal || p.getString(slotKey(slot), null) == null) {
+                    editor.putString(slotKey(slot), remoteItemId)
+                }
+            }
+        }
+        editor.commit()
+        getEquipped(context)
+    }
+
+    fun reset(context: Context) {
+        prefs(context).edit().clear().commit()
+        _equipState.value = emptyMap()
+    }
 }

@@ -38,15 +38,23 @@ class AuthService(
     /**
      * 카카오 소셜 계정으로 로그인
      */
-    suspend fun signInWithKakao(profile: UserProfile): Result<UserProfile> {
-        return authRepository.signInWithKakao(profile)
+    suspend fun signInWithKakao(
+        profile: UserProfile,
+        accessToken: String? = null,
+        mergeLocalGuestData: Boolean = false
+    ): Result<UserProfile> {
+        return authRepository.signInWithKakao(profile, accessToken, mergeLocalGuestData)
     }
 
     /**
      * 네이버 소셜 계정으로 로그인
      */
-    suspend fun signInWithNaver(profile: UserProfile): Result<UserProfile> {
-        return authRepository.signInWithNaver(profile)
+    suspend fun signInWithNaver(
+        profile: UserProfile,
+        accessToken: String? = null,
+        mergeLocalGuestData: Boolean = false
+    ): Result<UserProfile> {
+        return authRepository.signInWithNaver(profile, accessToken, mergeLocalGuestData)
     }
 
     /**

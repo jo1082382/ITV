@@ -170,6 +170,24 @@ internal object DailyStampPrefs {
     fun setSelectedCharacter(context: Context, characterId: String) {
         prefs(context).edit().putString(KEY_SELECTED_CHARACTER_ID, characterId).apply()
     }
+
+    fun restoreFromCloud(
+        context: Context,
+        stampedDates: Set<String>,
+        selectedCharacterId: String?,
+        mergeWithLocal: Boolean
+    ) {
+        val mergedDates = if (mergeWithLocal) getStampedDates(context) + stampedDates else stampedDates
+        val editor = prefs(context).edit().putStringSet(KEY_STAMPED_DATES, mergedDates)
+        if (!selectedCharacterId.isNullOrBlank()) {
+            editor.putString(KEY_SELECTED_CHARACTER_ID, selectedCharacterId)
+        }
+        editor.commit()
+    }
+
+    fun clear(context: Context) {
+        prefs(context).edit().clear().commit()
+    }
 }
 
 /**

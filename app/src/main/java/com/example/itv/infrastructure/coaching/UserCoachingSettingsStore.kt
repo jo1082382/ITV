@@ -97,6 +97,29 @@ class UserCoachingSettingsStore(context: Context) {
         _settings.value = _settings.value.copy(customBedtimeHour = hour, customBedtimeMinute = minute)
     }
 
+    fun restoreSettings(settings: UserCoachingSettings) {
+        val editor = prefs.edit()
+            .putString(KEY_INTERVENTION_TYPE, settings.interventionType.name)
+            .putString(KEY_COACHING_INTENSITY, settings.coachingIntensity.name)
+            .putString(KEY_CHARACTER_INTENSITY, settings.characterIntensity.name)
+            .putString(KEY_TONE, settings.tone.name)
+            .putBoolean(KEY_BEDTIME_CARE_ENABLED, settings.bedtimeCareEnabled)
+        if (settings.customBedtimeHour != null && settings.customBedtimeMinute != null) {
+            editor.putInt(KEY_CUSTOM_BEDTIME_HOUR, settings.customBedtimeHour)
+            editor.putInt(KEY_CUSTOM_BEDTIME_MINUTE, settings.customBedtimeMinute)
+        } else {
+            editor.remove(KEY_CUSTOM_BEDTIME_HOUR)
+            editor.remove(KEY_CUSTOM_BEDTIME_MINUTE)
+        }
+        editor.commit()
+        _settings.value = loadSettings()
+    }
+
+    fun reset() {
+        prefs.edit().clear().commit()
+        _settings.value = loadSettings()
+    }
+
     companion object {
         private const val PREFS_NAME = "user_coaching_settings_prefs"
         private const val KEY_INTERVENTION_TYPE = "key_intervention_type"

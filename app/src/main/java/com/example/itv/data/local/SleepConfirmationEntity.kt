@@ -8,7 +8,11 @@ data class SleepConfirmationEntity(val ownerId:String,val recordDate:String,val 
 interface SleepConfirmationDao {
     @Query("SELECT * FROM sleep_confirmations WHERE ownerId=:owner AND recordDate=:date")
     suspend fun read(owner:String,date:String):SleepConfirmationEntity?
+    @Query("SELECT * FROM sleep_confirmations WHERE ownerId=:owner")
+    suspend fun all(owner:String):List<SleepConfirmationEntity>
     @Upsert suspend fun save(value:SleepConfirmationEntity)
     @Query("DELETE FROM sleep_confirmations WHERE ownerId=:owner AND recordDate=:date")
     suspend fun reset(owner:String,date:String)
+    @Query("DELETE FROM sleep_confirmations WHERE ownerId=:owner AND recordDate < :cutoffDate")
+    suspend fun deleteOlderThan(owner:String,cutoffDate:String)
 }

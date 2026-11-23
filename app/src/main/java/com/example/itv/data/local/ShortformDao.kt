@@ -17,6 +17,8 @@ interface ShortformDao {
     suspend fun saveRecords(records: List<ShortformDailyRecordEntity>)
     @Query("DELETE FROM shortform_daily_records WHERE ownerId = :ownerId")
     suspend fun deleteOwnerRecords(ownerId: String)
+    @Query("DELETE FROM shortform_daily_records WHERE ownerId = :ownerId AND localDate < :cutoffDate")
+    suspend fun deleteOlderThan(ownerId: String, cutoffDate: String)
     // ABORT is deliberate: an import must not silently replace existing rows.
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertRecords(records: List<ShortformDailyRecordEntity>)

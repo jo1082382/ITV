@@ -25,7 +25,8 @@ internal object ShortformPersonalStatsStore {
     private const val MIN_REPRESENTATIVE_SESSION_MS = 60_000L
     private const val MIN_PHONE_REPRESENTATIVE_SESSION_MS = 120_000L // 2분 미만 퀵체크(카톡 단답, 메모/알림 확인) 필터링
     private const val SESSION_GRACE_MS = 15_000L
-    private const val MAX_STORED_SESSIONS = 300
+    internal const val MAX_RETENTION_MONTHS = 6L
+    private const val MAX_STORED_SESSIONS = 6_000
 
     enum class TargetFilter(val label: String) {
         PHONE_TOTAL("휴대폰 전체"),
@@ -699,7 +700,16 @@ internal object ShortformPersonalStatsStore {
         } catch (_: Exception) {
             // Fresh file or no existing file yet.
         }
+        val cutoffDate = LocalDate.now().minusMonths(MAX_RETENTION_MONTHS).toString()
+        val beforeCount = sessions.size
+        sessions.removeAll { it.date < cutoffDate }
+        while (sessions.size > MAX_STORED_SESSIONS) {
+            sessions.removeAt(0)
+        }
         initialized = true
+        if (sessions.size != beforeCount) {
+            persist()
+        }
     }
 
     @Synchronized
@@ -802,6 +812,44 @@ internal object ShortformPersonalStatsStore {
         persist()
     }
 
+    @Synchronized
+    fun deleteAllAndReset(context: Context) {
+        val appCtx = context.applicationContext
+        sessions.clear()
+        runs.values.forEach { it.reset() }
+        runCatching { file?.delete() }
+        val base = File(appCtx.noBackupFilesDir, "shortform_personal_stats_v1.json")
+        runCatching { base.delete() }
+        runCatching { File(base.path + ".bak").delete() }
+        file = null
+        initialized = false
+    }
+
+    @Synchronized
+    fun restoreOrMergeFromCloud(
+        context: Context,
+        cloudSessions: List<SessionRecord>,
+        mergeWithLocal: Boolean,
+        today: LocalDate = LocalDate.now()
+    ) {
+        ensureInitialized(context)
+        val cutoffDate = today.minusMonths(MAX_RETENTION_MONTHS).toString()
+        val byId = LinkedHashMap<String, SessionRecord>()
+        if (mergeWithLocal) {
+            sessions.filter { it.date >= cutoffDate }.forEach { byId[it.id] = it }
+        }
+        cloudSessions.filter { it.date >= cutoffDate && it.id.isNotBlank() }.forEach { remote ->
+            val existing = byId[remote.id]
+            byId[remote.id] = if (existing == null || remote.durationMs >= existing.durationMs) remote else existing
+        }
+        val merged = byId.values
+            .sortedBy { it.startWallMs }
+            .let { list -> if (list.size > MAX_STORED_SESSIONS) list.takeLast(MAX_STORED_SESSIONS) else list }
+        sessions.clear()
+        sessions.addAll(merged)
+        persist()
+    }
+
     private fun upsertRunToHistory(pkg: String, run: ActiveRun, nowWall: Long) {
         val dateStr = Instant.ofEpochMilli(run.startWallMs.takeIf { it > 0L } ?: nowWall)
             .atZone(ZoneId.systemDefault())
@@ -822,7 +870,7 @@ internal object ShortformPersonalStatsStore {
         } else {
             sessions.add(record)
         }
-        val cutoffDate = LocalDate.now().minusDays(30).toString()
+        val cutoffDate = LocalDate.now().minusMonths(MAX_RETENTION_MONTHS).toString()
         sessions.removeAll { it.date < cutoffDate }
         while (sessions.size > MAX_STORED_SESSIONS) {
             sessions.removeAt(0)

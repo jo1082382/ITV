@@ -2,7 +2,7 @@ package com.example.itv.presentation.navigation
 import com.example.itv.domain.goals.HomeGoalRow
 
 
-import com.example.itv.presentation.usage.UsageRecordsContent
+import com.example.itv.presentation.usage.SleepEstimationTabContent
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -27,7 +27,6 @@ import androidx.compose.foundation.border
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.layout.*
@@ -70,10 +69,12 @@ import com.example.itv.infrastructure.equip.UserEquipStore
 import com.example.itv.infrastructure.reward.UserRewardStore
 import com.example.itv.infrastructure.storage.CalendarHealthLoader
 import com.example.itv.infrastructure.storage.MonthlyUsageArchiveStore
+import com.example.itv.presentation.usage.DailyHealthStampBadge
 import com.example.itv.presentation.usage.DailyStampPrefs
 import com.example.itv.presentation.usage.DailyStampRitualOverlay
 import com.example.itv.presentation.usage.StampCharacterBitmapCache
 import com.example.itv.presentation.usage.StampRitualRequest
+import com.example.itv.presentation.usage.stampInkColor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -85,7 +86,7 @@ import java.time.YearMonth
 private data class MainTab(val id: String, val label: String, val mark: String)
 private val tabs = listOf(
     MainTab("home", "홈", "⌂"),
-    MainTab("records", "기록", "▤"),
+    MainTab("records", "취침", "☾"),
     MainTab("character", "캐릭터", "♧")
 )
 
@@ -394,7 +395,7 @@ fun ItvMainScreen(
                                 verticalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
                                 when (tab.id) {
-                                    "records" -> RecordsTabIcon(if (selected) ItvGreen else MaterialTheme.colorScheme.onSurfaceVariant)
+                                    "records" -> SleepTabIcon(if (selected) ItvGreen else MaterialTheme.colorScheme.onSurfaceVariant)
                                     "character" -> PuppyFaceMascot(Modifier.size(28.dp))
                                     else -> Box(Modifier.size(28.dp), contentAlignment = Alignment.Center) {
                                         Text(tab.mark, style = MaterialTheme.typography.titleLarge,
@@ -430,8 +431,16 @@ fun ItvMainScreen(
                     }
                 )
             }
-            "records" -> Box(Modifier.fillMaxSize().padding(padding)) { RecordsScreen() }
-            "character" -> Box(Modifier.fillMaxSize().padding(padding)) { CharacterScreen() }
+            "records" -> Box(Modifier.fillMaxSize().padding(padding)) {
+                SleepTabScreen(onSleepDataChanged = { calendarReloadVersion++ })
+            }
+            "character" -> Box(Modifier.fillMaxSize().padding(padding)) {
+                CharacterScreen(
+                    calendarReloadVersion = calendarReloadVersion,
+                    stampRefreshVersion = stampRefreshVersion,
+                    daySyncTick = resumeTick
+                )
+            }
         }
     }
     HomeSettingsDrawer(
@@ -456,7 +465,7 @@ fun ItvMainScreen(
             onAccountDeleted = {
                 showAccountSettings = false
                 val intent = Intent(context, MainActivity::class.java).apply {
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
                     putExtra(MainActivity.EXTRA_FORCE_ONBOARDING, true)
                 }
                 context.startActivity(intent)
@@ -464,10 +473,16 @@ fun ItvMainScreen(
             onSignedOut = {
                 showAccountSettings = false
                 val intent = Intent(context, MainActivity::class.java).apply {
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                    putExtra(MainActivity.EXTRA_FORCE_ONBOARDING, true)
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
                 }
                 context.startActivity(intent)
+            },
+            onAccountLinked = {
+                showAccountSettings = false
+                settingsOpen = false
+                stampRefreshVersion++
+                calendarReloadVersion++
+                onSelectTab("home")
             },
             onGoogleSignInRequested = { callback ->
                 coroutineScope.launch {
@@ -509,12 +524,33 @@ fun ItvMainScreen(
 }
 
 @Composable
-private fun RecordsScreen() {
-    UsageRecordsContent()
+private fun SleepTabScreen(onSleepDataChanged: () -> Unit) {
+    SleepEstimationTabContent(onSleepDataChanged = onSleepDataChanged)
+}
+
+internal fun DailyHealthTier?.toPuppyMoodOrNull(): PuppyMood? = when (this) {
+    DailyHealthTier.GOLD -> PuppyMood.BRIGHT
+    DailyHealthTier.SILVER -> PuppyMood.SMILE
+    DailyHealthTier.BRONZE -> PuppyMood.SAD
+    DailyHealthTier.WARNING -> PuppyMood.ANGRY
+    DailyHealthTier.CRITICAL -> PuppyMood.SICK
+    else -> null
+}
+
+internal fun PuppyMood.toHealthTier(): DailyHealthTier = when (this) {
+    PuppyMood.BRIGHT -> DailyHealthTier.GOLD
+    PuppyMood.SMILE -> DailyHealthTier.SILVER
+    PuppyMood.SAD -> DailyHealthTier.BRONZE
+    PuppyMood.ANGRY -> DailyHealthTier.WARNING
+    PuppyMood.SICK -> DailyHealthTier.CRITICAL
 }
 
 @Composable
-private fun CharacterScreen() {
+private fun CharacterScreen(
+    calendarReloadVersion: Int,
+    stampRefreshVersion: Int,
+    daySyncTick: Int
+) {
     val context = LocalContext.current
     val rewardFlow = remember { UserRewardStore.rewardState }
     val currentReward by rewardFlow.collectAsState()
@@ -524,61 +560,114 @@ private fun CharacterScreen() {
     val currentEquip by equipFlow.collectAsState()
     val equippedItems = if (currentEquip.isNotEmpty()) currentEquip else remember { UserEquipStore.getEquipped(context) }
 
+    // 어제 캘린더 등급을 불러와 캐릭터의 기본 표정으로 연동
+    val initialYesterdayTier = remember {
+        val today = LocalDate.now()
+        val yesterday = today.minusDays(1)
+        val stampedDates = DailyStampPrefs.getStampedDates(context)
+        CalendarHealthLoader.getCachedMonth(
+            viewMonth = YearMonth.from(yesterday),
+            today = today,
+            stampedDates = stampedDates
+        )?.assessments?.get(yesterday)?.tier
+    }
+    var yesterdayTier by remember { mutableStateOf(initialYesterdayTier) }
+
+    LaunchedEffect(calendarReloadVersion, stampRefreshVersion, daySyncTick) {
+        val today = LocalDate.now()
+        val yesterday = today.minusDays(1)
+        val yesterdayMonth = YearMonth.from(yesterday)
+        val stampedDates = DailyStampPrefs.getStampedDates(context)
+        val cached = CalendarHealthLoader.getCachedMonth(
+            viewMonth = yesterdayMonth,
+            today = today,
+            stampedDates = stampedDates
+        )
+        val resolvedTier = cached?.assessments?.get(yesterday)?.tier ?: runCatching {
+            withContext(Dispatchers.IO) {
+                val todayRep = if (yesterdayMonth == YearMonth.from(today)) {
+                    runCatching { context.queryUsageReport(1, today) }.getOrNull()
+                } else {
+                    null
+                }
+                val nightRep = runCatching { queryNightReport(context, 45) }.getOrNull()
+                CalendarHealthLoader.loadMonth(
+                    context = context,
+                    viewMonth = yesterdayMonth,
+                    todayReport = todayRep,
+                    existingNightReport = nightRep,
+                    stampedDates = stampedDates
+                ).assessments[yesterday]?.tier
+            }
+        }.getOrNull()
+        yesterdayTier = resolvedTier
+    }
+
+    val yesterdayMood = yesterdayTier.toPuppyMoodOrNull()
+    var previewMoodName by rememberSaveable { mutableStateOf<String?>(null) }
+    var moodReplayKey by remember { mutableIntStateOf(0) }
+    val previewMood = previewMoodName?.let { name -> PuppyMood.entries.firstOrNull { it.name == name } }
+    val activeMood = previewMood ?: yesterdayMood ?: PuppyMood.SMILE
+
     var selectedSlot by remember { mutableStateOf(EquipSlot.HAT) }
     val slotItems = remember(selectedSlot) { EquipCatalog.getItemsForSlot(selectedSlot) }
 
     Column(
         modifier = Modifier.fillMaxSize()
     ) {
-        // 상단: 캐릭터 피팅룸 및 레벨/경험치 영역 (보관함을 내린 만큼 강아지와 경험치 바도 안정적으로 배치)
+        // 상단: 캐릭터 피팅룸, 5단계 표정 선택 바, 레벨/경험치 영역
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
-                .padding(top = 16.dp, bottom = 12.dp),
+                .padding(top = 8.dp, bottom = 10.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // 캐릭터 + 5개 코디 장착 슬롯
+            // 캐릭터 + 5개 코디 장착 슬롯 (코디 슬롯 안쪽 안전 영역에 캐릭터를 배치해 점프·자세 변경 시에도 겹침 방지)
             BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f),
-                contentAlignment = Alignment.Center
+                    .weight(1f)
             ) {
-                val hOffset = minOf(maxWidth * 0.36f, 136.dp)
-                val vTopOffset = (-118).dp
-                val vMidOffset = (-6).dp
-                val vBottomOffset = 80.dp
+                val slotSize = 54.dp
+                val topEdgePadding = 2.dp
+                val sideEdgePadding = 14.dp
+                val safeTop = topEdgePadding + slotSize + 6.dp
+                val safeSide = sideEdgePadding + slotSize + 6.dp
+                val safeWidth = (maxWidth - safeSide * 2f).coerceAtLeast(152.dp)
+                val safeHeight = (maxHeight - safeTop - 4.dp).coerceAtLeast(136.dp)
+                val midSlotTop = (safeTop + safeHeight * 0.22f - slotSize / 2f).coerceAtLeast(safeTop)
+                val botSlotTop = (safeTop + safeHeight * 0.72f - slotSize / 2f).coerceAtLeast(midSlotTop + slotSize + 10.dp)
 
-                // 중앙: 장착 아이템들이 오버레이 렌더링되는 강아지 캐릭터 + 바닥 그림자
+                // 중앙 안전 무대: 5가지 표정/자세와 4초 모션이 코디 슬롯 영역 밖으로 겹치지 않도록 배치
                 Box(
                     modifier = Modifier
-                        .align(Alignment.Center)
-                        .offset(y = 24.dp),
-                    contentAlignment = Alignment.Center
+                        .align(Alignment.TopCenter)
+                        .padding(top = safeTop)
+                        .size(width = safeWidth, height = safeHeight),
+                    contentAlignment = Alignment.BottomCenter
                 ) {
-                    Canvas(
-                        modifier = Modifier
-                            .size(width = 160.dp, height = 22.dp)
-                            .align(Alignment.BottomCenter)
-                            .offset(y = 8.dp)
-                    ) {
-                        drawOval(
-                            color = Color.Black.copy(alpha = 0.07f),
-                            size = size
-                        )
-                    }
                     EquippedPuppyMascot(
                         equippedItems = equippedItems,
-                        modifier = Modifier.size(200.dp)
+                        mood = activeMood,
+                        replayKey = moodReplayKey,
+                        showGroundShadow = true,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null
+                            ) {
+                                moodReplayKey++
+                            }
                     )
                 }
 
-                // 1. 모자 (상단 중앙 - 강아지 머리 위로 겹치지 않게 배치)
+                // 1. 모자 (상단 중앙)
                 Box(
                     modifier = Modifier
-                        .align(Alignment.Center)
-                        .offset(y = vTopOffset)
+                        .align(Alignment.TopCenter)
+                        .padding(top = topEdgePadding)
                 ) {
                     EquipSlotCard(
                         slot = EquipSlot.HAT,
@@ -591,8 +680,8 @@ private fun CharacterScreen() {
                 // 2. 안경 (상단 좌측)
                 Box(
                     modifier = Modifier
-                        .align(Alignment.Center)
-                        .offset(x = -hOffset, y = vMidOffset)
+                        .align(Alignment.TopStart)
+                        .padding(start = sideEdgePadding, top = midSlotTop)
                 ) {
                     EquipSlotCard(
                         slot = EquipSlot.GLASSES,
@@ -605,8 +694,8 @@ private fun CharacterScreen() {
                 // 3. 코와 입 (상단 우측)
                 Box(
                     modifier = Modifier
-                        .align(Alignment.Center)
-                        .offset(x = hOffset, y = vMidOffset)
+                        .align(Alignment.TopEnd)
+                        .padding(end = sideEdgePadding, top = midSlotTop)
                 ) {
                     EquipSlotCard(
                         slot = EquipSlot.NOSE_MOUTH,
@@ -619,8 +708,8 @@ private fun CharacterScreen() {
                 // 4. 옷 (하단 좌측)
                 Box(
                     modifier = Modifier
-                        .align(Alignment.Center)
-                        .offset(x = -hOffset, y = vBottomOffset)
+                        .align(Alignment.TopStart)
+                        .padding(start = sideEdgePadding, top = botSlotTop)
                 ) {
                     EquipSlotCard(
                         slot = EquipSlot.CLOTHES,
@@ -633,8 +722,8 @@ private fun CharacterScreen() {
                 // 5. 신발 (하단 우측)
                 Box(
                     modifier = Modifier
-                        .align(Alignment.Center)
-                        .offset(x = hOffset, y = vBottomOffset)
+                        .align(Alignment.TopEnd)
+                        .padding(end = sideEdgePadding, top = botSlotTop)
                 ) {
                     EquipSlotCard(
                         slot = EquipSlot.SHOES,
@@ -645,7 +734,19 @@ private fun CharacterScreen() {
                 }
             }
 
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(6.dp))
+
+            // 캐릭터와 경험치 사이: 5가지 표정 선택 바 (어제 캘린더 표정 표시 + 표정별 4초 모션 확인)
+            PuppyMoodSelectorBar(
+                selectedMood = activeMood,
+                yesterdayMood = yesterdayMood,
+                onSelectMood = { selected ->
+                    previewMoodName = if (selected == yesterdayMood) null else selected.name
+                    moodReplayKey++
+                }
+            )
+
+            Spacer(Modifier.height(8.dp))
 
             // 캐릭터 레벨 및 경험치 게이지
             Surface(
@@ -903,6 +1004,92 @@ private fun CharacterScreen() {
 }
 
 @Composable
+private fun PuppyMoodSelectorBar(
+    selectedMood: PuppyMood,
+    yesterdayMood: PuppyMood?,
+    onSelectMood: (PuppyMood) -> Unit
+) {
+    val isDark = LocalDarkTheme.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        PuppyMood.entries.forEach { mood ->
+            val tier = mood.toHealthTier()
+            val accent = stampInkColor(tier)
+            val isSelected = mood == selectedMood
+            val isYesterday = mood == yesterdayMood
+            val bgColor = when {
+                isSelected -> accent.copy(alpha = if (isDark) 0.24f else 0.14f)
+                else -> MaterialTheme.colorScheme.surface
+            }
+            val borderColor = when {
+                isSelected -> accent
+                isYesterday -> accent.copy(alpha = 0.55f)
+                else -> ItvLine
+            }
+
+            Surface(
+                onClick = { onSelectMood(mood) },
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(14.dp),
+                color = bgColor,
+                border = BorderStroke(if (isSelected) 1.5.dp else 1.dp, borderColor),
+                shadowElevation = if (isSelected) 2.dp else 0.dp
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 5.dp, horizontal = 2.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        DailyHealthStampBadge(
+                            tier = tier,
+                            size = 22.dp
+                        )
+                        Text(
+                            text = mood.label,
+                            fontSize = 11.sp,
+                            lineHeight = 13.sp,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                            color = if (isSelected) accent else MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+
+                    if (isYesterday) {
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = accent,
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(end = 3.dp)
+                        ) {
+                            Text(
+                                text = "어제",
+                                fontSize = 7.sp,
+                                lineHeight = 8.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                modifier = Modifier.padding(horizontal = 3.dp, vertical = 1.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun EquipSlotCard(
     slot: EquipSlot,
     equippedItem: EquipItem?,
@@ -946,20 +1133,55 @@ private fun EquipSlotCard(
 }
 
 @Composable
-private fun RecordsTabIcon(color: Color) {
+private fun SleepTabIcon(color: Color) {
     Canvas(Modifier.size(28.dp)) {
-        val stroke = 1.6.dp.toPx()
-        drawLine(color, Offset(size.width * .12f, size.height * .12f),
-            Offset(size.width * .12f, size.height * .88f), stroke)
-        drawLine(color, Offset(size.width * .12f, size.height * .88f),
-            Offset(size.width * .94f, size.height * .88f), stroke)
-        repeat(3) { index ->
-            val barHeight = when (index) { 0 -> .30f; 1 -> .52f; else -> .68f }
-            drawRoundRect(color,
-                topLeft = Offset(size.width * (.25f + index * .23f), size.height * (.82f - barHeight)),
-                size = Size(size.width * .14f, size.height * barHeight),
-                cornerRadius = androidx.compose.ui.geometry.CornerRadius(2.dp.toPx()))
+        val w = size.width
+        val h = size.height
+        val stroke = 1.7.dp.toPx()
+
+        // Clean vector crescent moon
+        val moonPath = androidx.compose.ui.graphics.Path().apply {
+            moveTo(w * 0.56f, h * 0.16f)
+            cubicTo(
+                w * 0.25f, h * 0.18f,
+                w * 0.14f, h * 0.52f,
+                w * 0.34f, h * 0.74f
+            )
+            cubicTo(
+                w * 0.52f, h * 0.90f,
+                w * 0.80f, h * 0.82f,
+                w * 0.84f, h * 0.62f
+            )
+            cubicTo(
+                w * 0.64f, h * 0.68f,
+                w * 0.44f, h * 0.54f,
+                w * 0.46f, h * 0.34f
+            )
+            cubicTo(
+                w * 0.47f, h * 0.26f,
+                w * 0.51f, h * 0.20f,
+                w * 0.56f, h * 0.16f
+            )
+            close()
         }
+        drawPath(
+            path = moonPath,
+            color = color,
+            style = androidx.compose.ui.graphics.drawscope.Stroke(
+                width = stroke,
+                cap = androidx.compose.ui.graphics.StrokeCap.Round,
+                join = androidx.compose.ui.graphics.StrokeJoin.Round
+            )
+        )
+
+        // Two subtle stars inside the crescent opening
+        val s1x = w * 0.74f
+        val s1y = h * 0.26f
+        val s1r = w * 0.08f
+        drawLine(color, Offset(s1x - s1r, s1y), Offset(s1x + s1r, s1y), stroke * 0.85f)
+        drawLine(color, Offset(s1x, s1y - s1r), Offset(s1x, s1y + s1r), stroke * 0.85f)
+
+        drawCircle(color, radius = stroke * 0.65f, center = Offset(w * 0.66f, h * 0.43f))
     }
 }
 
@@ -1027,14 +1249,9 @@ private fun HomeSettingsDrawer(
                         }
                     }
                     DrawerSettingItem("목표 설정", "사용시간·취침·휴식 목표") { onClose(); onOpenGoals() }
-                    DrawerSettingItem("권한", "수집 동의와 필요한 권한 확인") {
+                    DrawerSettingItem("권한", "수집 동의·접근성 및 필요한 권한 확인") {
                         onClose()
                         context.startActivity(Intent(context, PermissionSettingsActivity::class.java).putExtra("initial_page", 1).putExtra("permissions_only", true))
-                    }
-                    DrawerSettingItem("접근성", "Android 접근성 설정 열기") {
-                        onClose()
-                        runCatching { context.startActivity(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
-                            .onFailure { android.widget.Toast.makeText(context, "접근성 설정을 열지 못했습니다.", android.widget.Toast.LENGTH_SHORT).show() }
                     }
                 }
             }

@@ -32,12 +32,25 @@ internal class RoomShortformPersistence(context: Context, private val ownerId: S
             if (receipt != null) {
                 check(receipt.ownerId == ownerId) { "이전된 기록의 소유자가 다릅니다." }
             } else {
-                // Do not overwrite or guess how an existing unreceipted target arose.
-                check(dao.all(ownerId).isEmpty()) { "기존 Room 기록과 이전 상태를 확인해 주세요." }
-                val rows = readLegacy()
-                dao.insertRecords(rows.map { entity(it) })
-                dao.insertReceipt(LocalImportReceiptEntity(importKey, ownerId, sourceName,
-                    rows.size.toLong(), System.currentTimeMillis()))
+                val existingRows = dao.all(ownerId)
+                if (existingRows.isNotEmpty()) {
+                    // Existing Room rows (e.g., restored from Cloud Firestore) take precedence;
+                    // record the import receipt without re-importing legacy JSON on top of them.
+                    dao.insertReceipt(
+                        LocalImportReceiptEntity(
+                            importKey = importKey,
+                            ownerId = ownerId,
+                            sourceName = "cloud_or_existing_room",
+                            importedRows = existingRows.size.toLong(),
+                            completedAt = System.currentTimeMillis()
+                        )
+                    )
+                } else {
+                    val rows = readLegacy()
+                    dao.insertRecords(rows.map { entity(it) })
+                    dao.insertReceipt(LocalImportReceiptEntity(importKey, ownerId, sourceName,
+                        rows.size.toLong(), System.currentTimeMillis()))
+                }
             }
         }
         dao.all(ownerId).map { value(it) }

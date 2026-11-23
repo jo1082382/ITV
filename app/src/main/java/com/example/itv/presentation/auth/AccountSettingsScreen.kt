@@ -20,7 +20,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.itv.domain.auth.AuthProvider
 import com.example.itv.domain.auth.UserProfile
+import com.example.itv.infrastructure.cloud.CloudSyncStatus
 import com.example.itv.presentation.components.PuppyFaceMascot
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -30,14 +35,21 @@ fun AccountSettingsScreen(
     onNavigateBack: () -> Unit,
     onAccountDeleted: () -> Unit = {},
     onSignedOut: () -> Unit = {},
+    onAccountLinked: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val currentUser by viewModel.currentUser.collectAsState()
+    val cloudSyncStatus by viewModel.cloudSyncStatus.collectAsState()
     val uiState by viewModel.uiState.collectAsState()
+    var showSignOutConfirmDialog by remember { mutableStateOf(false) }
     var showDeleteConfirmDialog by remember { mutableStateOf(false) }
     var showReauthRequiredDialog by remember { mutableStateOf(false) }
     var pendingLinkProvider by remember { mutableStateOf<AuthProvider?>(null) }
+
+    LaunchedEffect(Unit) {
+        viewModel.refreshCloudSyncStatus(context)
+    }
 
     pendingLinkProvider?.let { provider ->
         GuestAccountLinkDialog(
@@ -75,6 +87,8 @@ fun AccountSettingsScreen(
                     onAccountDeleted()
                 } else if (state.message.contains("로그아웃")) {
                     onSignedOut()
+                } else if (state.message.contains("연동")) {
+                    onAccountLinked()
                 }
             }
             is AuthUiState.Error -> {
@@ -88,6 +102,7 @@ fun AccountSettingsScreen(
         }
     }
 
+    Box(modifier = modifier.fillMaxSize()) {
     Scaffold(
         topBar = {
             TopAppBar(
@@ -102,7 +117,7 @@ fun AccountSettingsScreen(
                 )
             )
         },
-        modifier = modifier.fillMaxSize()
+        modifier = Modifier.fillMaxSize()
     ) { innerPadding ->
         Column(
             modifier = Modifier
@@ -114,6 +129,18 @@ fun AccountSettingsScreen(
         ) {
             // 1. 프로필 요약 카드
             AccountProfileCard(currentUser = currentUser)
+
+            // 1-B. 클라우드 백업 및 동기화 상태 카드
+            val isSocialLoggedIn = currentUser != null && !currentUser!!.isAnonymous &&
+                (currentUser!!.provider == AuthProvider.GOOGLE ||
+                 currentUser!!.provider == AuthProvider.KAKAO ||
+                 currentUser!!.provider == AuthProvider.NAVER)
+
+            CloudBackupStatusCard(
+                isSocialLoggedIn = isSocialLoggedIn,
+                syncStatus = cloudSyncStatus,
+                onBackupNow = { viewModel.backupNowToCloud(context) }
+            )
 
             // 2. 게스트 계정일 때: 소셜 계정 연동 안내 섹션
             if (currentUser == null || currentUser?.isAnonymous == true) {
@@ -137,15 +164,10 @@ fun AccountSettingsScreen(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
 
             // 3. 로그아웃 버튼 (소셜 로그인: 구글, 네이버, 카카오 로그인 사용자에게만 노출)
-            val isSocialLoggedIn = currentUser != null && !currentUser!!.isAnonymous &&
-                (currentUser!!.provider == AuthProvider.GOOGLE ||
-                 currentUser!!.provider == AuthProvider.KAKAO ||
-                 currentUser!!.provider == AuthProvider.NAVER)
-
             if (isSocialLoggedIn) {
                 OutlinedButton(
-                    onClick = { viewModel.signOut() },
-                    enabled = uiState !is AuthUiState.Loading,
+                    onClick = { showSignOutConfirmDialog = true },
+                    enabled = uiState !is AuthUiState.Loading && !cloudSyncStatus.isSyncing,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(48.dp),
@@ -193,6 +215,48 @@ fun AccountSettingsScreen(
                 }
             }
         }
+    }
+
+    val loadingState = uiState as? AuthUiState.Loading
+    if (loadingState != null) {
+        CloudSyncWaitingOverlay(
+            title = loadingState.title,
+            message = cloudSyncStatus.progressMessage ?: loadingState.message
+        )
+    }
+    }
+
+    // 로그아웃 확인 팝업 (다른 계정 간 기기 데이터 혼합 방지 안내)
+    if (showSignOutConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showSignOutConfirmDialog = false },
+            title = {
+                Text("로그아웃하시겠습니까?", fontWeight = FontWeight.Bold, fontSize = 17.sp)
+            },
+            text = {
+                Text(
+                    "로그아웃 전 최신 6개월 기록과 설정이 클라우드에 백업됩니다.\n이후 다른 계정과 기록이 섞이지 않도록 이 기기의 로컬 데이터는 초기화됩니다.",
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showSignOutConfirmDialog = false
+                        viewModel.signOut()
+                    }
+                ) {
+                    Text("로그아웃", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSignOutConfirmDialog = false }) {
+                    Text("취소")
+                }
+            },
+            shape = RoundedCornerShape(18.dp)
+        )
     }
 
     // 계정 영구 삭제 확인 팝업 (실수 방지용 2단계 확인 다이얼로그)
@@ -684,3 +748,127 @@ private fun GuestAccountLinkingSection(
         }
     }
 }
+
+@Composable
+private fun CloudBackupStatusCard(
+    isSocialLoggedIn: Boolean,
+    syncStatus: CloudSyncStatus,
+    onBackupNow: () -> Unit
+) {
+    val formattedLastBackup = remember(syncStatus.lastBackupAt) {
+        syncStatus.lastBackupAt?.let { ms ->
+            runCatching {
+                Instant.ofEpochMilli(ms)
+                    .atZone(ZoneId.systemDefault())
+                    .format(DateTimeFormatter.ofPattern("yyyy.MM.dd HH:mm", Locale.KOREA))
+            }.getOrNull()
+        }
+    }
+
+    Card(
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isSocialLoggedIn) {
+                MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f)
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+            }
+        ),
+        border = BorderStroke(
+            width = 1.dp,
+            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
+        ),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = if (isSocialLoggedIn) "☁️ 6개월 클라우드 자동 백업" else "📱 로컬 전용 저장 모드",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Surface(
+                    shape = RoundedCornerShape(999.dp),
+                    color = if (isSocialLoggedIn) {
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                    } else {
+                        MaterialTheme.colorScheme.outline.copy(alpha = 0.16f)
+                    }
+                ) {
+                    Text(
+                        text = if (isSocialLoggedIn) "동기화 활성" else "백업 꺼짐",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (isSocialLoggedIn) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp)
+                    )
+                }
+            }
+
+            if (isSocialLoggedIn) {
+                Text(
+                    text = "최근 6개월의 휴대폰·숏폼·수면 기록, 도장, 코디·보상, 목표 설정이 Firebase 클라우드에 매일 자동 백업됩니다.",
+                    fontSize = 11.5.sp,
+                    lineHeight = 16.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = when {
+                        syncStatus.isSyncing -> "동기화 진행 중..."
+                        formattedLastBackup != null -> "마지막 백업: $formattedLastBackup"
+                        else -> "아직 백업 이력이 없습니다. 아래 버튼으로 바로 백업할 수 있어요."
+                    },
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                if (!syncStatus.lastError.isNullOrBlank()) {
+                    Text(
+                        text = "최근 동기화 오류: ${syncStatus.lastError}",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+                OutlinedButton(
+                    onClick = onBackupNow,
+                    enabled = !syncStatus.isSyncing,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(40.dp),
+                    shape = RoundedCornerShape(9.dp)
+                ) {
+                    if (syncStatus.isSyncing) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("클라우드 백업 중...", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
+                    } else {
+                        Text("지금 클라우드 백업", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            } else {
+                Text(
+                    text = "게스트 모드에서는 최근 6개월 기록이 이 기기에만 저장됩니다. Google·카카오·네이버 중 하나의 계정으로 연동하면 기기 변경·재설치 시에도 기록과 코디가 안전하게 복원됩니다.",
+                    fontSize = 11.5.sp,
+                    lineHeight = 16.5.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+

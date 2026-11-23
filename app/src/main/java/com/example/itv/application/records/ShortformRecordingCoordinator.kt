@@ -177,4 +177,8 @@ internal class ShortformRecordingCoordinator(
         completion.await()
     }
     fun clear() { submit(Command(4,true)) }
+    fun close() {
+        runCatching { queue.close() }
+        runCatching { scope.cancel() }
+    }
 }

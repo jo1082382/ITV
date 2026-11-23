@@ -11,4 +11,6 @@ interface ShortformHourDao {
  @Upsert suspend fun save(rows:List<ShortformHourEntity>)
  @Query("DELETE FROM shortform_hourly_records WHERE ownerId=:owner")
  suspend fun clear(owner:String)
+ @Query("DELETE FROM shortform_hourly_records WHERE ownerId=:owner AND localDate < :cutoffDate")
+ suspend fun deleteOlderThan(owner:String,cutoffDate:String)
 }

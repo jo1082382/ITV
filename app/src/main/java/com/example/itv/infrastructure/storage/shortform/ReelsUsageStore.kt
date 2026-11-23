@@ -119,10 +119,15 @@ internal object ReelsUsageStore {
     }
     /** Available for a future account-wide deletion flow, which must also stop collection. */
     @Synchronized fun clearAll(context: Context) {
-        initialize(context)
+        val appCtx = context.applicationContext
         data = JSONObject(); sampleKey = ""
-        previous = false; lastTick = 0L; lastWall = 0L; lastSeen = 0L
-        file?.delete()
+        previous = false; lastTick = 0L; lastWall = 0L; lastSeen = 0L; lastSave = 0L
+        loadError = null
+        runCatching { file?.delete() }
+        val base = File(appCtx.noBackupFilesDir, "reels_usage_v1.json")
+        runCatching { base.delete() }
+        runCatching { File(base.path + ".bak").delete() }
+        file = null
     }
     @Synchronized fun today(context: Context): Day {
         initialize(context)
