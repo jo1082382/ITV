@@ -405,20 +405,20 @@ internal fun NightSummary(
                         HelpBadgeButton(isDark = isDark) { showSleepRhythmHelp = true }
                     }
 
-                    // Adaptive Target Highlight Banner (오늘 밤 목표 & 내일 기상)
+                    // Adaptive Target Highlight Banner (오늘 밤 추정 취침 & 기상 기준 권장 취침)
                     Surface(
                         shape = RoundedCornerShape(10.dp),
                         color = if (isDark) Color(0xFF22362B) else Color(0xFFE1F3E6),
                         border = BorderStroke(1.dp, if (isDark) Color(0xFF4A735A) else Color(0xFF97CDA8)),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 Text(
-                                    "🌙 오늘 밤 권장 취침:",
+                                    "🌙 오늘 밤 추정 취침:",
                                     style = MaterialTheme.typography.bodyMedium,
                                     fontWeight = FontWeight.Bold,
                                     color = if (isDark) Color(0xFFE2EBE4) else Color(0xFF1B4332)
@@ -431,10 +431,32 @@ internal fun NightSummary(
                                 )
                                 Spacer(Modifier.weight(1f))
                                 Text(
-                                    "내일 예상 기상 %02d:%02d".format(
+                                    "예상 기상 %02d:%02d".format(
                                         adaptiveTarget.expectedWakeHour,
                                         adaptiveTarget.expectedWakeMinute
                                     ),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (isDark) Color(0xFFA5C4B5) else Color(0xFF52796F)
+                                )
+                            }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(
+                                    "✨ 기상 기준 권장 취침:",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (isDark) Color(0xFFCDE6D6) else Color(0xFF2D5A44)
+                                )
+                                Text(
+                                    "%02d:%02d".format(adaptiveTarget.recommendedHour, adaptiveTarget.recommendedMinute),
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isDark) Color(0xFF85E3B3) else Color(0xFF1B4332)
+                                )
+                                Text(
+                                    "(7~8.5시간 수면 기준)",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = if (isDark) Color(0xFFA5C4B5) else Color(0xFF52796F)
                                 )
@@ -567,10 +589,10 @@ internal fun NightSummary(
                     },
                     text = {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("• 기상 시간 분석: 아침에 폰을 켜는 시각을 요일별로 파악합니다.", style = MaterialTheme.typography.bodyMedium)
-                            Text("• 맞춤 취침 추천: 내일 일어날 시간에 맞춰 건강 수면(7~8시간)을 역산해 오늘 밤 잘 시간을 알려줍니다.", style = MaterialTheme.typography.bodyMedium)
+                            Text("• 오늘 밤 추정 취침: 내일 기상 요일의 평소 실제 취침 패턴을 바탕으로 계산한 시각입니다.", style = MaterialTheme.typography.bodyMedium)
+                            Text("• 기상 기준 권장 취침: 내일 예상 기상 시각에서 건강 수면(7~8.5시간)을 역산한 권장 시각입니다.", style = MaterialTheme.typography.bodyMedium)
                             Text("• 장기 기록 통합: OS가 보관하는 최근 기록과 앱에 저장된 장기 아카이브·사용자 확인 기록을 함께 반영합니다.", style = MaterialTheme.typography.bodyMedium)
-                            Text("• 평일 출근/등교와 주말 휴식 리듬에 맞춰 자동으로 조절됩니다.", style = MaterialTheme.typography.bodyMedium)
+                            Text("• 스탬프 점수와 야간 개입 모두 이 요일별 수면 리듬을 기준으로 자동 조절됩니다.", style = MaterialTheme.typography.bodyMedium)
                         }
                     },
                     confirmButton = {

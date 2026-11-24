@@ -49,6 +49,7 @@ class DailyHealthEvaluatorTest {
                 phoneMaxSessionMs = 24 * 60_000L,
                 phoneShortformRatio = 0.08,
                 baselinePhoneDailyMs = 180 * 60_000L,
+                baselinePhoneDailySampleDays = 14,
                 isRestDay = false
             )
         )
@@ -85,6 +86,7 @@ class DailyHealthEvaluatorTest {
                 phoneMaxSessionMs = 38 * 60_000L,
                 phoneShortformRatio = 0.11,
                 baselinePhoneDailyMs = 180 * 60_000L,
+                baselinePhoneDailySampleDays = 14,
                 isRestDay = false
             )
         )
@@ -118,6 +120,7 @@ class DailyHealthEvaluatorTest {
                 phoneMaxSessionMs = 55 * 60_000L,
                 phoneShortformRatio = 0.14,
                 baselinePhoneDailyMs = 190 * 60_000L,
+                baselinePhoneDailySampleDays = 14,
                 isRestDay = false
             )
         )
@@ -148,6 +151,7 @@ class DailyHealthEvaluatorTest {
                 phoneAvgSessionMs = 17 * 60_000L,
                 phoneMaxSessionMs = 38 * 60_000L,
                 baselinePhoneDailyMs = 190 * 60_000L,
+                baselinePhoneDailySampleDays = 14,
                 isRestDay = false
             )
         )
@@ -180,6 +184,7 @@ class DailyHealthEvaluatorTest {
                 phoneMaxSessionMs = 110 * 60_000L,
                 phoneShortformRatio = 0.48,
                 baselinePhoneDailyMs = 180 * 60_000L,
+                baselinePhoneDailySampleDays = 14,
                 isRestDay = false
             )
         )
@@ -201,7 +206,8 @@ class DailyHealthEvaluatorTest {
                 totalPhoneMs = 90 * 60_000L,
                 phoneAvgSessionMs = 10 * 60_000L,
                 phoneMaxSessionMs = 20 * 60_000L,
-                baselinePhoneDailyMs = 180 * 60_000L
+                baselinePhoneDailyMs = 180 * 60_000L,
+                baselinePhoneDailySampleDays = 14
             )
         )
         assertEquals(DailyHealthTier.IN_PROGRESS, result.tier)
@@ -221,7 +227,8 @@ class DailyHealthEvaluatorTest {
                 preSleepUsageMinutes = 2.0,
                 hasShortformTracking = false,    // Pre-install: no shortform telemetry
                 totalPhoneMs = 120 * 60_000L,
-                baselinePhoneDailyMs = 180 * 60_000L
+                baselinePhoneDailyMs = 180 * 60_000L,
+                baselinePhoneDailySampleDays = 14
             )
         )
         assertTrue(result.isPartialData)
@@ -232,6 +239,165 @@ class DailyHealthEvaluatorTest {
         assertEquals(0, sfAxis.weightPercent)
         val totalWeights = result.axes.sumOf { it.weightPercent }
         assertTrue("Normalized weights should sum near 100, got $totalWeights", totalWeights in 99..101)
+    }
+
+    @Test
+    fun `daily screen volume in axis 3 is skipped before 14 days of personal baseline`() {
+        val underTwoWeeks = DailyHealthEvaluator.evaluate(
+            DailyHealthContext(
+                date = sampleDate,
+                isToday = false,
+                isFinalized = true,
+                hasShortformTracking = false,
+                totalPhoneMs = 540 * 60_000L, // 9h (would have triggered heavy penalty under fixed threshold)
+                phoneAvgSessionMs = 16 * 60_000L,
+                phoneMaxSessionMs = 40 * 60_000L,
+                baselinePhoneDailyMs = 180 * 60_000L,
+                baselinePhoneDailySampleDays = 13
+            )
+        )
+        val sessionAxisUnder = underTwoWeeks.axes.first { it.id == "session" }
+        assertEquals(84, sessionAxisUnder.score) // 82 baseline + 2 session bonus, 0 daily-volume penalty
+        assertTrue(underTwoWeeks.cautions.none { it.contains("화면 사용량") })
+
+        val twoWeeksHeavy = DailyHealthEvaluator.evaluate(
+            DailyHealthContext(
+                date = sampleDate,
+                isToday = false,
+                isFinalized = true,
+                hasShortformTracking = false,
+                totalPhoneMs = 540 * 60_000L, // 3.0x personal baseline
+                phoneAvgSessionMs = 16 * 60_000L,
+                phoneMaxSessionMs = 40 * 60_000L,
+                baselinePhoneDailyMs = 180 * 60_000L,
+                baselinePhoneDailySampleDays = 14
+            )
+        )
+        val sessionAxisHeavy = twoWeeksHeavy.axes.first { it.id == "session" }
+        assertEquals(62, sessionAxisHeavy.score) // 82 + 2 - 22
+        assertTrue(twoWeeksHeavy.cautions.any { it.contains("화면 사용량") })
+
+        val twoWeeksNormalHighUser = DailyHealthEvaluator.evaluate(
+            DailyHealthContext(
+                date = sampleDate,
+                isToday = false,
+                isFinalized = true,
+                hasShortformTracking = false,
+                totalPhoneMs = 360 * 60_000L, // 6h, matching their own 6h personal baseline (1.0x)
+                phoneAvgSessionMs = 16 * 60_000L,
+                phoneMaxSessionMs = 40 * 60_000L,
+                baselinePhoneDailyMs = 360 * 60_000L,
+                baselinePhoneDailySampleDays = 14
+            )
+        )
+        val sessionAxisNormal = twoWeeksNormalHighUser.axes.first { it.id == "session" }
+        assertEquals(84, sessionAxisNormal.score) // Personal baseline ratio 1.0 -> no penalty
+    }
+
+    @Test
+    fun `axis 4 rhythm is excluded from score when personal baseline is missing`() {
+        val result = DailyHealthEvaluator.evaluate(
+            DailyHealthContext(
+                date = sampleDate,
+                isToday = false,
+                isFinalized = true,
+                bedtimeMinute = 20,
+                baselineBedtimeMinute = 30,
+                preSleepUsageMinutes = 2.0,
+                hasShortformTracking = true,
+                shortformTotalMs = 0L,
+                totalPhoneMs = 400 * 60_000L,
+                phoneAvgSessionMs = 15 * 60_000L,
+                phoneMaxSessionMs = 35 * 60_000L,
+                baselinePhoneDailyMs = null,
+                baselinePhoneDailySampleDays = 0
+            )
+        )
+        val rhythmAxis = result.axes.first { it.id == "rhythm" }
+        assertFalse(rhythmAxis.available)
+        assertEquals(0, rhythmAxis.weightPercent)
+        assertEquals(0, rhythmAxis.score)
+        assertTrue(result.isPartialData)
+        assertEquals(3, result.evaluatedAxesCount)
+        val totalWeights = result.axes.sumOf { it.weightPercent }
+        assertTrue("Normalized weights should sum near 100, got $totalWeights", totalWeights in 99..101)
+    }
+
+    @Test
+    fun `bedtime evaluation uses recommended bedtime safeguard and falls back to goal or skips without baseline`() {
+        // 1. Slept later than usual (22:30 -> 23:15, +45m) but STILL inside recommended bedtime (23:30) -> no penalty!
+        val insideRecommended = DailyHealthEvaluator.evaluate(
+            DailyHealthContext(
+                date = sampleDate,
+                isToday = false,
+                isFinalized = true,
+                bedtimeMinute = 23 * 60 + 15,
+                sleepDurationMinutes = 450.0,
+                baselineBedtimeMinute = 22 * 60 + 30,
+                recommendedBedtimeMinute = 23 * 60 + 30,
+                preSleepUsageMinutes = 2.0
+            )
+        )
+        val sleepAxisRec = insideRecommended.axes.first { it.id == "sleep" }
+        assertTrue("Expected positive score when inside recommended bedtime, got ${sleepAxisRec.score}", sleepAxisRec.score >= 90)
+        assertTrue(insideRecommended.cautions.none { it.contains("취침이") })
+
+        // 2. No personal sleep history yet, but user has a bedtime goal (23:30) -> evaluates against goal!
+        val goalFallback = DailyHealthEvaluator.evaluate(
+            DailyHealthContext(
+                date = sampleDate,
+                isToday = false,
+                isFinalized = true,
+                bedtimeMinute = 1 * 60 + 10, // 01:10 (+100m vs 23:30 goal)
+                baselineBedtimeMinute = null,
+                recommendedBedtimeMinute = null,
+                goalBedtimeMinute = 23 * 60 + 30
+            )
+        )
+        assertTrue(goalFallback.cautions.any { it.contains("목표 취침") })
+
+        // 3. Neither personal sleep history nor bedtime goal -> does NOT penalize against hardcoded 00:30
+        val noReference = DailyHealthEvaluator.evaluate(
+            DailyHealthContext(
+                date = sampleDate,
+                isToday = false,
+                isFinalized = true,
+                bedtimeMinute = 2 * 60 + 30, // 02:30 (would have been +120m severe trigger under 00:30 default!)
+                sleepDurationMinutes = 430.0,
+                baselineBedtimeMinute = null,
+                recommendedBedtimeMinute = null,
+                goalBedtimeMinute = null
+            )
+        )
+        val sleepAxisNoRef = noReference.axes.first { it.id == "sleep" }
+        assertEquals(84, sleepAxisNoRef.score) // 82 base + 2 duration, 0 arbitrary bedtime penalty
+        assertTrue(noReference.cautions.isEmpty())
+    }
+
+    @Test
+    fun `all-nighter sets sleep axis to 0 points and triggers warning or critical`() {
+        val result = DailyHealthEvaluator.evaluate(
+            DailyHealthContext(
+                date = sampleDate,
+                isToday = false,
+                isFinalized = true,
+                isAllNighter = true,
+                hasShortformTracking = true,
+                shortformTotalMs = 0L, // 96점
+                totalPhoneMs = 120 * 60_000L,
+                phoneAvgSessionMs = 10 * 60_000L,
+                phoneMaxSessionMs = 20 * 60_000L,
+                baselinePhoneDailyMs = 180 * 60_000L,
+                baselinePhoneDailySampleDays = 14
+            )
+        )
+        val sleepAxis = result.axes.first { it.id == "sleep" }
+        assertTrue(sleepAxis.available)
+        assertEquals(0, sleepAxis.score)
+        assertEquals(40, sleepAxis.weightPercent)
+        assertTrue(sleepAxis.summary.contains("밤샘"))
+        assertTrue(result.cautions.any { it.contains("밤샘") })
+        assertTrue(result.tier == DailyHealthTier.WARNING || result.tier == DailyHealthTier.CRITICAL)
     }
 
     @Test

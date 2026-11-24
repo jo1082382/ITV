@@ -47,6 +47,8 @@ internal object SleepSummaryPolicy {
     data class AdaptiveBedtimeTarget(
         val targetHour: Int,
         val targetMinute: Int,
+        val recommendedHour: Int,
+        val recommendedMinute: Int,
         val expectedWakeHour: Int,
         val expectedWakeMinute: Int,
         val sourceDescription: String,
@@ -235,6 +237,8 @@ internal object SleepSummaryPolicy {
             return AdaptiveBedtimeTarget(
                 targetHour = dayProfile.avgStartHour,
                 targetMinute = dayProfile.avgStartMinute,
+                recommendedHour = dayProfile.recommendedBedtimeHour,
+                recommendedMinute = dayProfile.recommendedBedtimeMinute,
                 expectedWakeHour = dayProfile.avgWakeHour,
                 expectedWakeMinute = dayProfile.avgWakeMinute,
                 sourceDescription = "내일(${dowKorean}) 기상 패턴(${wakeTimeStr}) 기반 추정 (${dayProfile.validCount}일 기록)",
@@ -247,9 +251,14 @@ internal object SleepSummaryPolicy {
         if (weeklyProfile != null) {
             val global = weeklyProfile.globalWindow
             val wakeTimeStr = "%02d:%02d".format(global.avgEndHour, global.avgEndMinute)
+            val effSleepMins = global.avgDurationMinutes.coerceIn(420L, 510L)
+            val wakeMinuteOfDay = global.avgEndHour * 60 + global.avgEndMinute
+            val recBedtimeMinuteOfDay = (wakeMinuteOfDay - effSleepMins + 1440L * 2) % 1440L
             return AdaptiveBedtimeTarget(
                 targetHour = global.avgStartHour,
                 targetMinute = global.avgStartMinute,
+                recommendedHour = (recBedtimeMinuteOfDay / 60).toInt(),
+                recommendedMinute = (recBedtimeMinuteOfDay % 60).toInt(),
                 expectedWakeHour = global.avgEndHour,
                 expectedWakeMinute = global.avgEndMinute,
                 sourceDescription = "수면 추정/확인 기록 (${wakeTimeStr} 기상, 전체 ${global.validCount}일 평균)",
@@ -262,6 +271,8 @@ internal object SleepSummaryPolicy {
         return AdaptiveBedtimeTarget(
             targetHour = 23,
             targetMinute = 30,
+            recommendedHour = 23,
+            recommendedMinute = 30,
             expectedWakeHour = 7,
             expectedWakeMinute = 30,
             sourceDescription = "기본 기준 시각 (23:30)",

@@ -46,9 +46,13 @@ internal data class DailyHealthContext(
     val bedtimeMinute: Int? = null,             // 0..1439 (e.g., 23:30 = 1410, 00:30 = 30)
     val wakeupMinute: Int? = null,
     val sleepDurationMinutes: Double? = null,
-    val baselineBedtimeMinute: Int? = null,     // Personal average bedtime (circular)
-    val preSleepUsageMinutes: Double? = null,   // Screen usage in pre-sleep / late-night window
+    val baselineBedtimeMinute: Int? = null,     // 취침 탭 평소 추정 취침 시각 (요일별 우선 -> 전체 평균)
+    val recommendedBedtimeMinute: Int? = null,  // 취침 탭 기상 기반 건강 권장 취침 시각 (기상 - 7~8.5h)
+    val goalBedtimeMinute: Int? = null,         // 데이터 부족 시 fallback 목표 취침 시각
+    val baselineSleepDurationMinutes: Double? = null, // 개인 평소 평균 수면 시간 (요일별 우선 -> 전체 평균)
+    val preSleepUsageMinutes: Double? = null,   // 실제 취침(비사용 시작) 직전 1시간 스마트폰 사용량
     val preSleepShortformMinutes: Double? = null,
+    val isAllNighter: Boolean = false,          // 확정된 날 밤샘(수면 없음) -> 수면 축 0점 처리
 
     // 2. Shortform escape & swipe speed (SPM) context
     val hasShortformTracking: Boolean = false,
@@ -67,6 +71,7 @@ internal data class DailyHealthContext(
     val phoneMaxSessionMs: Long? = null,
     val phoneShortformRatio: Double? = null,
     val baselinePhoneDailyMs: Long? = null,
+    val baselinePhoneDailySampleDays: Int = 0,
     val baselinePhoneSessionMs: Long? = null,
 
     // 4. Day type rhythm context
@@ -97,12 +102,13 @@ internal data class DailyHealthAssessment(
  */
 internal object DailyHealthEvaluator {
 
-    private const val DEFAULT_BASELINE_BEDTIME_MIN = 30 // 00:30 default fallback
+    internal const val MIN_PERSONAL_PHONE_BASELINE_DAYS = 14 // 2주 이상 개인 지표 확보 시 총 화면량 평가 적용
 
     fun evaluate(ctx: DailyHealthContext): DailyHealthAssessment {
         val hasAnyData = ctx.totalPhoneMs > 0L ||
             ctx.shortformTotalMs > 0L ||
             ctx.bedtimeMinute != null ||
+            ctx.isAllNighter ||
             (ctx.preSleepUsageMinutes ?: 0.0) > 0.0
 
         if (!hasAnyData) {
@@ -134,47 +140,78 @@ internal object DailyHealthEvaluator {
         val hasSleepAxis = ctx.bedtimeMinute != null ||
             ctx.preSleepUsageMinutes != null ||
             ctx.preSleepShortformMinutes != null ||
-            ctx.sleepDurationMinutes != null
+            ctx.sleepDurationMinutes != null ||
+            ctx.isAllNighter
 
         var sleepScore = 82
         var sleepSummary = "수면 데이터 없음"
         if (hasSleepAxis) {
+            if (ctx.isAllNighter && ctx.bedtimeMinute == null && ctx.sleepDurationMinutes == null) {
+                sleepScore = 0
+                severeTriggers++
+                cautions += "밤샘으로 수면 기록이 없어 수면 점수가 0점 처리됐어요"
+                sleepSummary = "밤샘 (수면 없음 · 0점)"
+            } else {
             val summaryParts = mutableListOf<String>()
 
-            // 1-A. Bedtime rhythm consistency (circular diff vs baseline)
+            // 1-A. Bedtime rhythm consistency (취침 탭 평소 추정 취침 + 권장 취침 + 목표 취침 fallback)
             val bedMin = ctx.bedtimeMinute
             if (bedMin != null) {
-                val baseMin = ctx.baselineBedtimeMinute ?: DEFAULT_BASELINE_BEDTIME_MIN
-                val delayMin = circularBedtimeDiffMinutes(bedMin, baseMin)
-                val tightAllowed = if (ctx.isRestDay) 25 else 15
+                val refMin = ctx.baselineBedtimeMinute ?: ctx.goalBedtimeMinute ?: ctx.recommendedBedtimeMinute
+                if (refMin != null) {
+                    val refLabel = when {
+                        ctx.baselineBedtimeMinute != null -> "평소 취침"
+                        ctx.goalBedtimeMinute != null -> "목표 취침"
+                        else -> "권장 취침"
+                    }
+                    val delayMin = circularBedtimeDiffMinutes(bedMin, refMin)
+                    val recMin = ctx.recommendedBedtimeMinute
+                    val recDelayMin = recMin?.let { circularBedtimeDiffMinutes(bedMin, it) }
+                    val tightAllowed = if (ctx.isRestDay) 25 else 15
+                    val metRecommendedBedtime = recDelayMin != null && recDelayMin <= tightAllowed
 
-                when {
-                    delayMin <= tightAllowed -> {
-                        sleepScore += 10
-                        praises += "평소 취침 리듬(${formatMinute(baseMin)})을 잘 지켰어요"
-                        summaryParts += "취침 ${formatMinute(bedMin)}"
+                    when {
+                        delayMin <= tightAllowed -> {
+                            if (recDelayMin != null && recDelayMin > 45) {
+                                // 평소 리듬은 지켰으나 건강 권장 취침보다 크게 늦은 습관: 억울한 감점 대신 가점 완화
+                                sleepScore += 4
+                                summaryParts += "취침 ${formatMinute(bedMin)} (권장 ${formatMinute(recMin)})"
+                            } else {
+                                sleepScore += 10
+                                praises += "${refLabel} 리듬(${formatMinute(refMin)})을 잘 지켰어요"
+                                summaryParts += "취침 ${formatMinute(bedMin)}"
+                            }
+                        }
+                        metRecommendedBedtime -> {
+                            // 평소보다 약간 늦었어도 건강 권장 취침 시각은 지킨 경우 -> 불필요한 지연 감점 방지
+                            sleepScore += 6
+                            praises += "권장 취침 시각(${formatMinute(recMin)}) 안에 잘 잠들었어요"
+                            summaryParts += "취침 ${formatMinute(bedMin)}"
+                        }
+                        delayMin <= tightAllowed + 20 -> {
+                            sleepScore -= 4
+                            summaryParts += "취침 +${delayMin}분"
+                        }
+                        delayMin <= 60 -> {
+                            sleepScore -= 10
+                            cautions += "${refLabel}보다 취침이 ${delayMin}분 늦어졌어요"
+                            summaryParts += "취침 +${delayMin}분 지연"
+                        }
+                        delayMin <= 95 -> {
+                            sleepScore -= 22
+                            severeTriggers++
+                            cautions += "${refLabel}보다 취침이 ${formatDurationMinutes(delayMin)} 늦어졌어요"
+                            summaryParts += "취침 +${delayMin}분 지연"
+                        }
+                        else -> {
+                            sleepScore -= 34
+                            severeTriggers++
+                            cautions += "${refLabel}보다 취침이 ${formatDurationMinutes(delayMin)} 크게 밀렸어요"
+                            summaryParts += "취침 심하게 밀림"
+                        }
                     }
-                    delayMin <= tightAllowed + 20 -> {
-                        sleepScore -= 4
-                        summaryParts += "취침 +${delayMin}분"
-                    }
-                    delayMin <= 60 -> {
-                        sleepScore -= 10
-                        cautions += "평소보다 취침이 ${delayMin}분 늦어졌어요"
-                        summaryParts += "취침 +${delayMin}분 지연"
-                    }
-                    delayMin <= 95 -> {
-                        sleepScore -= 22
-                        severeTriggers++
-                        cautions += "평소보다 취침이 ${formatDurationMinutes(delayMin)} 늦어졌어요"
-                        summaryParts += "취침 +${delayMin}분 지연"
-                    }
-                    else -> {
-                        sleepScore -= 34
-                        severeTriggers++
-                        cautions += "평소보다 취침이 ${formatDurationMinutes(delayMin)} 크게 밀렸어요"
-                        summaryParts += "취침 심하게 밀림"
-                    }
+                } else {
+                    summaryParts += "취침 ${formatMinute(bedMin)} (기준 수집 중)"
                 }
             }
 
@@ -190,17 +227,17 @@ internal object DailyHealthEvaluator {
                     }
                     preSleepSf < 22.0 -> {
                         sleepScore -= 14
-                        cautions += "취침 전·심야 숏폼 ${preSleepSf.roundToInt()}분 시청"
+                        cautions += "취침 전 1시간 숏폼 ${preSleepSf.roundToInt()}분 시청"
                     }
                     preSleepSf < 35.0 -> {
                         sleepScore -= 24
                         severeTriggers++
-                        cautions += "취침 전·심야 숏폼 ${preSleepSf.roundToInt()}분 몰입"
+                        cautions += "취침 전 1시간 숏폼 ${preSleepSf.roundToInt()}분 몰입"
                     }
                     else -> {
                         sleepScore -= 36
                         severeTriggers++
-                        cautions += "취침 전·심야 숏폼 ${preSleepSf.roundToInt()}분 과몰입"
+                        cautions += "취침 전 1시간 숏폼 ${preSleepSf.roundToInt()}분 과몰입"
                     }
                 }
             }
@@ -215,41 +252,46 @@ internal object DailyHealthEvaluator {
                         summaryParts += "취침 전 클린"
                     }
                     preSleepPhone < 15.0 -> {
-                        summaryParts += "야간 ${preSleepPhone.roundToInt()}분"
+                        summaryParts += "취침 전 ${preSleepPhone.roundToInt()}분"
                     }
                     preSleepPhone < 30.0 -> {
                         sleepScore -= 7
-                        cautions += "취침 전·심야 화면 사용 ${preSleepPhone.roundToInt()}분"
-                        summaryParts += "야간 ${preSleepPhone.roundToInt()}분"
+                        cautions += "취침 전 1시간 화면 사용 ${preSleepPhone.roundToInt()}분"
+                        summaryParts += "취침 전 ${preSleepPhone.roundToInt()}분"
                     }
                     preSleepPhone < 50.0 -> {
                         sleepScore -= 16
-                        cautions += "취침 전·심야 화면 사용 ${preSleepPhone.roundToInt()}분으로 피로 누적"
-                        summaryParts += "야간 ${preSleepPhone.roundToInt()}분"
+                        cautions += "취침 전 1시간 화면 사용 ${preSleepPhone.roundToInt()}분으로 피로 누적"
+                        summaryParts += "취침 전 ${preSleepPhone.roundToInt()}분"
                     }
                     else -> {
                         sleepScore -= 28
                         if ((preSleepSf ?: 0.0) < 22.0) {
                             severeTriggers++
                         }
-                        cautions += "야간 화면 과사용(${preSleepPhone.roundToInt()}분)으로 수면 방해"
-                        summaryParts += "야간 과사용"
+                        cautions += "취침 전 화면 과사용(${preSleepPhone.roundToInt()}분)으로 수면 방해"
+                        summaryParts += "취침 전 과사용"
                     }
                 }
             }
 
-            // 1-D. Sleep duration sanity
+            // 1-D. Sleep duration sanity (개인 평균 수면 + 건강 권장 범위 6.5~8.5h 결합)
             val sleepDur = ctx.sleepDurationMinutes
             if (sleepDur != null && sleepDur > 0.0) {
+                val personalHealthyTarget = ctx.baselineSleepDurationMinutes?.coerceIn(390.0, 510.0)
+                val deficitFromPersonal = personalHealthyTarget?.let { it - sleepDur }
                 when {
-                    sleepDur < 300.0 -> { // < 5h
+                    sleepDur < 300.0 || (deficitFromPersonal != null && deficitFromPersonal >= 120.0 && sleepDur < 390.0) -> {
                         sleepScore -= 14
                         cautions += "수면 시간이 ${(sleepDur / 60.0).let { String.format(Locale.KOREA, "%.1f", it) }}시간으로 크게 부족했어요"
                     }
-                    sleepDur < 360.0 -> { // 5~6h
+                    sleepDur < 360.0 || (deficitFromPersonal != null && deficitFromPersonal >= 60.0 && sleepDur < 420.0) -> {
                         sleepScore -= 6
                     }
-                    sleepDur in 400.0..540.0 -> {
+                    personalHealthyTarget != null && sleepDur in (personalHealthyTarget - 25.0)..540.0 -> {
+                        sleepScore += 2
+                    }
+                    personalHealthyTarget == null && sleepDur in 400.0..540.0 -> {
                         sleepScore += 2
                     }
                 }
@@ -257,6 +299,7 @@ internal object DailyHealthEvaluator {
 
             sleepScore = sleepScore.coerceIn(0, 100)
             sleepSummary = summaryParts.joinToString(" · ").ifEmpty { "야간 리듬 점검 완료" }
+            }
         }
 
         // =========================================================================
@@ -429,25 +472,30 @@ internal object DailyHealthEvaluator {
                 }
             }
 
-            // 3-C. Overall screen load guard (gentle if purposeful, stricter if heavy)
+            // 3-C. Overall screen load guard:
+            // 개인 지표가 2주(14일) 이상 누적된 경우에만 적용하며, 고정 시간 기준이 아닌 개인 기준선 비율로만 평가
             val basePhoneMin = ctx.baselinePhoneDailyMs?.takeIf { it >= 30 * 60_000L }?.let { it / 60_000.0 }
-            val phoneVsBase = if (basePhoneMin != null) phoneMin / (basePhoneMin * restAllowance) else null
-            val isLowShortform = (sfRatio ?: 0.0) < 0.10 && ctx.hasShortformTracking
-            when {
-                phoneMin >= 480.0 * restAllowance -> { // >= 8h
-                    sessionScore -= if (isLowShortform) 12 else 22
-                    if (!isLowShortform) {
-                        cautions += "하루 총 화면 사용량이 ${formatDurationMinutes(phoneMin.roundToInt())}으로 매우 많았어요"
+            val hasTwoWeekPhoneBaseline = basePhoneMin != null &&
+                ctx.baselinePhoneDailySampleDays >= MIN_PERSONAL_PHONE_BASELINE_DAYS
+            if (hasTwoWeekPhoneBaseline) {
+                val phoneVsBase = phoneMin / (basePhoneMin * restAllowance)
+                val isLowShortform = (sfRatio ?: 0.0) < 0.10 && ctx.hasShortformTracking
+                when {
+                    phoneVsBase >= 1.75 -> {
+                        sessionScore -= if (isLowShortform) 12 else 22
+                        if (!isLowShortform) {
+                            cautions += "하루 총 화면 사용량이 평소보다 크게 많았어요(${formatDurationMinutes(phoneMin.roundToInt())})"
+                        }
                     }
-                }
-                phoneMin >= 330.0 * restAllowance || (phoneVsBase != null && phoneVsBase >= 1.45 && phoneMin >= 200.0) -> {
-                    sessionScore -= if (isLowShortform) 8 else 14
-                }
-                phoneMin >= 210.0 * restAllowance -> {
-                    sessionScore -= if (isLowShortform) 3 else 6
-                }
-                phoneMin <= 130.0 * restAllowance -> {
-                    sessionScore += 6
+                    phoneVsBase >= 1.45 -> {
+                        sessionScore -= if (isLowShortform) 8 else 14
+                    }
+                    phoneVsBase >= 1.20 -> {
+                        sessionScore -= if (isLowShortform) 3 else 6
+                    }
+                    phoneVsBase <= 0.85 -> {
+                        sessionScore += 6
+                    }
                 }
             }
 
@@ -459,36 +507,27 @@ internal object DailyHealthEvaluator {
 
         // =========================================================================
         // Axis 4: 요일/생활 리듬 보정 (Base Weight: 10)
+        // 개인 기준선이 없을 때는 점수에 적용하지 않고(available = false) 나머지 축으로 가중치 자동 재분배
         // =========================================================================
-        val hasRhythmAxis = ctx.totalPhoneMs > 0L
+        val rhythmBasePhoneMin = ctx.baselinePhoneDailyMs?.takeIf { it >= 30 * 60_000L }?.let { it / 60_000.0 }
+        val hasRhythmAxis = ctx.totalPhoneMs > 0L && rhythmBasePhoneMin != null
         var rhythmScore = 80
-        var rhythmSummary = if (ctx.isRestDay) "쉬는 날 패턴 반영" else "일과 날 패턴 반영"
+        var rhythmSummary = "개인 기준선 없음 (가중치 자동 보정)"
 
         if (hasRhythmAxis) {
             val phoneMin = ctx.totalPhoneMs / 60_000.0
-            val basePhoneMin = ctx.baselinePhoneDailyMs?.takeIf { it >= 30 * 60_000L }?.let { it / 60_000.0 }
-
-            if (basePhoneMin != null) {
-                val ratio = phoneMin / (basePhoneMin * restAllowance)
-                rhythmScore = when {
-                    ratio <= 0.90 -> 92
-                    ratio <= 1.08 -> 80
-                    ratio <= 1.25 -> 70
-                    ratio <= 1.45 -> 56
-                    else -> 40
-                }
-                rhythmSummary = if (ctx.isRestDay) {
-                    if (ratio <= 1.15) "휴일 여유 패턴 내 안정적" else "휴일 평소 패턴 초과"
-                } else {
-                    if (ratio <= 1.08) "평일 생활 리듬 유지" else "평일 평소 사용량 초과"
-                }
+            val ratio = phoneMin / (rhythmBasePhoneMin * restAllowance)
+            rhythmScore = when {
+                ratio <= 0.90 -> 92
+                ratio <= 1.08 -> 80
+                ratio <= 1.25 -> 70
+                ratio <= 1.45 -> 56
+                else -> 40
+            }
+            rhythmSummary = if (ctx.isRestDay) {
+                if (ratio <= 1.15) "휴일 여유 패턴 내 안정적" else "휴일 평소 패턴 초과"
             } else {
-                rhythmScore = when {
-                    phoneMin <= 150.0 * restAllowance -> 90
-                    phoneMin <= 240.0 * restAllowance -> 78
-                    phoneMin <= 340.0 * restAllowance -> 64
-                    else -> 48
-                }
+                if (ratio <= 1.08) "평일 생활 리듬 유지" else "평일 평소 사용량 초과"
             }
         }
 

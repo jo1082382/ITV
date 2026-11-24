@@ -187,20 +187,24 @@ class SleepSummaryPolicyTest {
         assertEquals(13, wedProfile?.avgWakeHour)
         assertEquals(3, wedProfile?.avgStartHour)
 
-        // 시나리오 1: 월요일 밤 22:00 -> 내일(화요일) 07:00 기상 패턴에 맞춰 23:00 취침을 타겟팅
+        // 시나리오 1: 월요일 밤 22:00 -> 내일(화요일) 07:00 기상 패턴에 맞춰 23:00 추정 취침 + 23:00 권장 취침(8h 역산)
         val monday22 = ZonedDateTime.of(2026, 11, 16, 22, 0, 0, 0, zone)
         val targetMon = SleepSummaryPolicy.getAdaptiveBedtimeTarget(profile, monday22)
         assertEquals(23, targetMon.targetHour)
         assertEquals(0, targetMon.targetMinute)
+        assertEquals(23, targetMon.recommendedHour)
+        assertEquals(0, targetMon.recommendedMinute)
         assertEquals(7, targetMon.expectedWakeHour)
         assertTrue(targetMon.isDayOfWeekSpecific)
         assertTrue(targetMon.sourceDescription.contains("내일(화)"))
 
-        // 시나리오 2: 화요일 밤 22:00 -> 내일(수요일) 13:00 기상 패턴에 맞춰 03:00 취침을 타겟팅
+        // 시나리오 2: 화요일 밤 22:00 -> 내일(수요일) 13:00 기상 패턴(10h 수면)에 맞춰 03:00 추정 취침 + 04:30 권장 취침(8.5h 상한 역산)
         val tuesday22 = ZonedDateTime.of(2026, 11, 17, 22, 0, 0, 0, zone)
         val targetTue = SleepSummaryPolicy.getAdaptiveBedtimeTarget(profile, tuesday22)
         assertEquals(3, targetTue.targetHour)
         assertEquals(0, targetTue.targetMinute)
+        assertEquals(4, targetTue.recommendedHour)
+        assertEquals(30, targetTue.recommendedMinute)
         assertEquals(13, targetTue.expectedWakeHour)
         assertTrue(targetTue.isDayOfWeekSpecific)
         assertTrue(targetTue.sourceDescription.contains("내일(수)"))

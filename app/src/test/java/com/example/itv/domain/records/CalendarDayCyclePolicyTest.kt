@@ -65,7 +65,8 @@ class CalendarDayCyclePolicyTest {
             nowWallMs = nowWall,
             cycleBounds = bounds22,
             bedtimeStartWallMs = null,
-            isDateFinalized = is22Finalized
+            isDateFinalized = is22Finalized,
+            fallbackBedtimeMinute = 0 // 00:00 personal/goal bedtime -> pre-sleep starts at 23:00
         )
         assertNotNull(preSleep22)
         assertEquals(wallMs(day22, 23, 0), preSleep22!!.startMs)
@@ -169,7 +170,7 @@ class CalendarDayCyclePolicyTest {
         )
         assertEquals(10.0, day23ReportMin, 0.001)
 
-        // Before 23:00 on 23rd, 23rd's pre-sleep window has not started (null, never 00:00..04:59!)
+        // Before (fallbackBedtime - 1h) on 23rd, 23rd's pre-sleep window has not started (null, never 00:00..04:59!)
         val preSleep23Morning = CalendarDayCyclePolicy.resolvePreSleepWindow(
             date = day23,
             today = day23,
@@ -177,9 +178,10 @@ class CalendarDayCyclePolicyTest {
             nowWallMs = nowMorning,
             cycleBounds = bounds23,
             bedtimeStartWallMs = null,
-            isDateFinalized = false
+            isDateFinalized = false,
+            fallbackBedtimeMinute = 0
         )
-        assertNull("23rd pre-sleep window must be null before 23:00", preSleep23Morning)
+        assertNull("23rd pre-sleep window must be null before pre-sleep start", preSleep23Morning)
     }
 
     @Test
@@ -213,11 +215,13 @@ class CalendarDayCyclePolicyTest {
 
         val preSleep22 = CalendarDayCyclePolicy.resolvePreSleepWindow(
             date = day22, today = today, zone = zone, nowWallMs = nowWall,
-            cycleBounds = bounds22, bedtimeStartWallMs = null, isDateFinalized = true
+            cycleBounds = bounds22, bedtimeStartWallMs = null, isDateFinalized = true,
+            fallbackBedtimeMinute = 0
         )!!
         val preSleep23 = CalendarDayCyclePolicy.resolvePreSleepWindow(
             date = day23, today = today, zone = zone, nowWallMs = nowWall,
-            cycleBounds = bounds23, bedtimeStartWallMs = null, isDateFinalized = true
+            cycleBounds = bounds23, bedtimeStartWallMs = null, isDateFinalized = true,
+            fallbackBedtimeMinute = 0
         )!!
 
         // Combined sessions across 22nd, 23rd, 24th early mornings
@@ -251,7 +255,8 @@ class CalendarDayCyclePolicyTest {
         )
         val preSleep21 = CalendarDayCyclePolicy.resolvePreSleepWindow(
             date = day21, today = today, zone = zone, nowWallMs = nowWall,
-            cycleBounds = bounds21, bedtimeStartWallMs = null, isDateFinalized = true
+            cycleBounds = bounds21, bedtimeStartWallMs = null, isDateFinalized = true,
+            fallbackBedtimeMinute = 0
         )!!
         assertEquals(30 * 60_000L, CalendarDayCyclePolicy.computeHourlyBucketsOverlapMs(sfBuckets, preSleep21, zone))
     }
@@ -352,5 +357,58 @@ class CalendarDayCyclePolicyTest {
         )
         assertNotNull(estimate)
         assertEquals(2, estimate!!.validCount)
+    }
+
+    @Test
+    fun `resolvePreSleepWindow uses strictly 1h before actual non-use onset and returns null without baseline or goal`() {
+        val day22 = LocalDate.of(2026, 11, 22)
+        val day23 = LocalDate.of(2026, 11, 23)
+        val bounds = DayCycleBounds(
+            dayStartWallMs = wallMs(day22, 8, 0),
+            dayEndWallMs = wallMs(day23, 8, 0)
+        )
+
+        // Actual sleep onset at 01:40 -> strictly [00:40, 01:40]
+        val actualOnset = wallMs(day23, 1, 40)
+        val actualWin = CalendarDayCyclePolicy.resolvePreSleepWindow(
+            date = day22,
+            today = day23,
+            zone = zone,
+            nowWallMs = wallMs(day23, 9, 0),
+            cycleBounds = bounds,
+            bedtimeStartWallMs = actualOnset,
+            isDateFinalized = true,
+            fallbackBedtimeMinute = 23 * 60 + 30
+        )
+        assertNotNull(actualWin)
+        assertEquals(wallMs(day23, 0, 40), actualWin!!.startMs)
+        assertEquals(actualOnset, actualWin.endMs)
+
+        // No actual onset AND no personal/goal bedtime -> null (never guesses 23:00)
+        val noRefWin = CalendarDayCyclePolicy.resolvePreSleepWindow(
+            date = day22,
+            today = day22,
+            zone = zone,
+            nowWallMs = wallMs(day22, 23, 40),
+            cycleBounds = DayCycleBounds(wallMs(day22, 8, 0), wallMs(day22, 23, 40)),
+            bedtimeStartWallMs = null,
+            isDateFinalized = false,
+            fallbackBedtimeMinute = null
+        )
+        assertNull(noRefWin)
+
+        // Explicit NOT_SLEEP -> null even if fallback bedtime exists
+        val noSleepWin = CalendarDayCyclePolicy.resolvePreSleepWindow(
+            date = day22,
+            today = day23,
+            zone = zone,
+            nowWallMs = wallMs(day23, 9, 0),
+            cycleBounds = bounds,
+            bedtimeStartWallMs = null,
+            isDateFinalized = true,
+            fallbackBedtimeMinute = 0,
+            hasExplicitNoSleep = true
+        )
+        assertNull(noSleepWin)
     }
 }

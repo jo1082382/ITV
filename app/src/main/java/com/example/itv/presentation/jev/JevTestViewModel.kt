@@ -394,6 +394,19 @@ data class CategorySimResult(
     val passedBase: Boolean get() = probability >= baseThreshold
 }
 
+data class ContextBubbleEvalResult(
+    val id: String,
+    val summaryTag: String,
+    val probability: Double,
+    val baseThreshold: Double,
+    val effectiveThreshold: Double,
+    val latencyMs: Long?,
+    val model: String?,
+    val recordedAt: Long,
+) {
+    val passedEffective: Boolean get() = probability >= effectiveThreshold
+}
+
 class JevTestViewModel(app: Application): AndroidViewModel(app) {
     val repository=JevRepository.get(app)
     val store=repository.store
@@ -404,6 +417,7 @@ class JevTestViewModel(app: Application): AndroidViewModel(app) {
     val manualAnswer=MutableStateFlow<JevAnswer?>(null)
     val simResults=MutableStateFlow<List<CategorySimResult>>(emptyList())
     val simProgress=MutableStateFlow<String?>(null)
+    val contextBubbleResult=MutableStateFlow<ContextBubbleEvalResult?>(null)
     private var simBatchJob: Job? = null
 
     private fun action(block: suspend ()->Unit) {
@@ -431,6 +445,31 @@ class JevTestViewModel(app: Application): AndroidViewModel(app) {
     fun retry(id: String) = action { manualAnswer.value=repository.retryTrial(id);message.value="동일 요청 결과 확인 완료" }
     fun feedback(id: String,score: Int?) = action { repository.feedback(id,score);message.value="평가 저장 완료 · 서버 전송 대기열에 등록했습니다." }
     fun retryUploads() = action { store.dao.retry();repository.flush();message.value="전송 재시도 완료 · 남은 대기 건수를 확인해 주세요." }
+
+    fun evaluateContextBubble(context: JevContext, summaryTag: String) = action {
+        val settings = store.settings.value
+        val effThreshold = JevCandidatePolicy.effectiveThreshold(settings, context)
+        val (trial, probability) = repository.evaluate(context, settings, "MANUAL", "CONTEXT_BUBBLE_TEST")
+        contextBubbleResult.value = ContextBubbleEvalResult(
+            id = trial.id,
+            summaryTag = summaryTag,
+            probability = probability,
+            baseThreshold = settings.probabilityThreshold,
+            effectiveThreshold = effThreshold,
+            latencyMs = trial.latencyMs,
+            model = trial.model,
+            recordedAt = System.currentTimeMillis()
+        )
+        message.value = if (probability >= effThreshold) {
+            "Jev 확률 ${"%.1f".format(probability * 100.0)}% ≥ 최종 기준 ${"%.1f".format(effThreshold * 100.0)}% → 개입 조건 충족!"
+        } else {
+            "Jev 확률 ${"%.1f".format(probability * 100.0)}% < 최종 기준 ${"%.1f".format(effThreshold * 100.0)}% → 개입 보류"
+        }
+    }
+
+    fun clearContextBubbleResult() {
+        contextBubbleResult.value = null
+    }
 
     fun runCategorySimulation(req: CategorySimRequest) {
         runCategorySimulations(listOf(req), reasonPrefix = "CATEGORY_SIM_SINGLE")

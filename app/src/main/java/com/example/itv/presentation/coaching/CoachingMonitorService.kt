@@ -33,6 +33,9 @@ class CoachingMonitorService : Service() {
         const val ACTION_TRIGGER_TEST = "com.example.itv.TRIGGER_TEST"
         const val EXTRA_FORCE_STRONG = "extra_force_strong"
         const val EXTRA_DELAY_MS = "extra_delay_ms"
+        const val EXTRA_CUSTOM_REASONS = "extra_custom_reasons"
+        const val EXTRA_INTENSITY_OVERRIDE = "extra_intensity_override"
+        const val EXTRA_TONE_OVERRIDE = "extra_tone_override"
 
         @Volatile
         private var instanceRef: java.lang.ref.WeakReference<CoachingMonitorService>? = null
@@ -43,11 +46,27 @@ class CoachingMonitorService : Service() {
             }
         }
 
-        fun triggerTest(context: android.content.Context, forceStrong: Boolean = false, delayMs: Long = 0L) {
+        fun triggerTest(
+            context: android.content.Context,
+            forceStrong: Boolean = false,
+            delayMs: Long = 0L,
+            customReasons: List<String>? = null,
+            intensityOverride: CharacterIntensity? = null,
+            toneOverride: com.example.itv.domain.coaching.CoachingTone? = null
+        ) {
             val intent = Intent(context, CoachingMonitorService::class.java).apply {
                 action = ACTION_TRIGGER_TEST
                 putExtra(EXTRA_FORCE_STRONG, forceStrong)
                 putExtra(EXTRA_DELAY_MS, delayMs)
+                if (!customReasons.isNullOrEmpty()) {
+                    putStringArrayListExtra(EXTRA_CUSTOM_REASONS, ArrayList(customReasons))
+                }
+                if (intensityOverride != null) {
+                    putExtra(EXTRA_INTENSITY_OVERRIDE, intensityOverride.name)
+                }
+                if (toneOverride != null) {
+                    putExtra(EXTRA_TONE_OVERRIDE, toneOverride.name)
+                }
             }
             if (Build.VERSION.SDK_INT >= 26) {
                 context.startForegroundService(intent)
@@ -1066,6 +1085,11 @@ class CoachingMonitorService : Service() {
         if (intent?.action == ACTION_TRIGGER_TEST) {
             val forceStrong = intent.getBooleanExtra(EXTRA_FORCE_STRONG, false)
             val delayMs = intent.getLongExtra(EXTRA_DELAY_MS, 0L)
+            val customReasons = intent.getStringArrayListExtra(EXTRA_CUSTOM_REASONS)
+            val intensityOverride = intent.getStringExtra(EXTRA_INTENSITY_OVERRIDE)
+                ?.let { name -> runCatching { CharacterIntensity.valueOf(name) }.getOrNull() }
+            val toneOverride = intent.getStringExtra(EXTRA_TONE_OVERRIDE)
+                ?.let { name -> runCatching { com.example.itv.domain.coaching.CoachingTone.valueOf(name) }.getOrNull() }
             if (!running) {
                 try {
                     val open = PendingIntent.getActivity(this, 7100, Intent(this, com.example.itv.presentation.permissions.PermissionSettingsActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
@@ -1082,9 +1106,12 @@ class CoachingMonitorService : Service() {
                 } catch (_: Exception) {}
             }
             if (delayMs > 0) {
-                handler.postDelayed({ triggerTestIntervention(forceStrong) }, delayMs)
+                handler.postDelayed(
+                    { triggerTestIntervention(forceStrong, customReasons, intensityOverride, toneOverride) },
+                    delayMs
+                )
             } else {
-                triggerTestIntervention(forceStrong)
+                triggerTestIntervention(forceStrong, customReasons, intensityOverride, toneOverride)
             }
             return START_NOT_STICKY
         }
@@ -1111,8 +1138,16 @@ class CoachingMonitorService : Service() {
         return START_NOT_STICKY
     }
 
-    fun triggerTestIntervention(forceStrong: Boolean = false) {
-        if (!Settings.canDrawOverlays(this)) return
+    fun triggerTestIntervention(
+        forceStrong: Boolean = false,
+        customReasons: List<String>? = null,
+        intensityOverride: CharacterIntensity? = null,
+        toneOverride: com.example.itv.domain.coaching.CoachingTone? = null
+    ) {
+        if (!Settings.canDrawOverlays(this)) {
+            android.widget.Toast.makeText(this, "다른 앱 위에 표시(오버레이) 권한을 먼저 허용해 주세요.", android.widget.Toast.LENGTH_SHORT).show()
+            return
+        }
         val currentFg = JevObservationHub.foregroundPackage
         if (com.example.itv.infrastructure.observation.GeneralAppTracker.isFinancialPackage(currentFg)) {
             android.widget.Toast.makeText(this, "금융/뱅킹 앱 사용 중에는 개입이 발생하지 않습니다.", android.widget.Toast.LENGTH_SHORT).show()
@@ -1123,20 +1158,31 @@ class CoachingMonitorService : Service() {
         dismissCompletion()
         val tracker = com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this)
         val ambient = tracker.snapshot.value
-        val reasons = com.example.itv.domain.coaching.InterventionReasonResolver.resolveReasons(
-            isJev = false,
-            jevContext = null,
-            continuousUsedMs = 1_800_000L,
-            ambient = ambient,
-            shortformAppName = null
-        )
-        val effectiveIntensity = if (forceStrong) CharacterIntensity.STRONG else getEffectiveIntensity()
+        val reasons = if (!customReasons.isNullOrEmpty()) {
+            customReasons
+        } else {
+            com.example.itv.domain.coaching.InterventionReasonResolver.resolveReasons(
+                isJev = false,
+                jevContext = null,
+                continuousUsedMs = 1_800_000L,
+                ambient = ambient,
+                shortformAppName = null
+            )
+        }
+        val effectiveIntensity = intensityOverride
+            ?: if (forceStrong) CharacterIntensity.STRONG else getEffectiveIntensity()
         lastOfferedIntensity = effectiveIntensity
         val isStrong = effectiveIntensity == CharacterIntensity.STRONG
         val missionContext = buildMissionSelectionContext(ambient, ambient.posture)
         val rec = com.example.itv.domain.coaching.RestMissionCatalog.pick(ambient.posture, isStrong, missionContext)
         currentRecommendation = rec
-        val (root, params) = overlayFactory.offer(::onChoice, reasons, intensityOverride = effectiveIntensity, recommendation = rec)
+        val (root, params) = overlayFactory.offer(
+            onChoice = ::onChoice,
+            reasons = reasons,
+            intensityOverride = effectiveIntensity,
+            toneOverride = toneOverride,
+            recommendation = rec
+        )
         try {
             wm.addView(root, params); overlay = root; offerFromJev = false
             responseController.offered = true; waitingTransition = false; waitingYoutube = false

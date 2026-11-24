@@ -514,12 +514,12 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
             s.dogParams.flags = s.dogParams.flags or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
             add(s.dog, s.dogParams)
 
-            val firstReason = s.reasons.firstOrNull() ?: "영상을 오래 시청하고 있어"
-            val strongSpeechText = CoachingSpeechCatalog.pickSpeech(SpeechSituation.STRONG_OFFER, s.tone, reason = firstReason)
-            s.speech = label(strongSpeechText, customTextSize = 14f)
+            val reasonBlock = formatReasonLines(s.reasons, maxLines = 2) ?: "영상을 오래 시청하고 있어"
+            val strongSpeechText = CoachingSpeechCatalog.pickSpeech(SpeechSituation.STRONG_OFFER, s.tone, reason = reasonBlock)
+            s.speech = label(strongSpeechText, customTextSize = 13.5f)
             s.speech.visibility = View.INVISIBLE
             val speechWidth = minOf(dp(320), width - dp(32))
-            val speechY = (s.homeY - dp(120)).coerceAtLeast(dp(36))
+            val speechY = (s.homeY - dp(138)).coerceAtLeast(dp(32))
             s.speechParams = params(
                 speechWidth, WindowManager.LayoutParams.WRAP_CONTENT,
                 (width - speechWidth) / 2, speechY, true
@@ -630,7 +630,7 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
         s.speech = label(normalText)
         s.speech.visibility = View.INVISIBLE
         val speechWidth = minOf(dp(320), width - dp(24))
-        val speechY = (s.homeY - dp(145)).coerceAtLeast(dp(36))
+        val speechY = (s.homeY - dp(158)).coerceAtLeast(dp(32))
         s.speechParams = params(speechWidth, WindowManager.LayoutParams.WRAP_CONTENT, (width - speechWidth) / 2, speechY, false)
         add(s.speech, s.speechParams!!)
 
@@ -871,21 +871,63 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
     private fun formatGentleSpeech(
         reasons: List<String>,
         tone: CoachingTone = CoachingTone.SOFT
-    ): String {
-        val firstReason = reasons.firstOrNull()
-        return CoachingSpeechCatalog.pickSpeech(SpeechSituation.GENTLE_OFFER, tone, reason = firstReason)
-    }
+    ): String = formatOfferSpeech(CharacterIntensity.GENTLE, reasons, tone)
 
     private fun formatReasonsSpeech(
         reasons: List<String>,
         tone: CoachingTone = CoachingTone.SOFT
-    ): String {
-        val title = CoachingSpeechCatalog.pickSpeech(SpeechSituation.NORMAL_OFFER_TITLE, tone)
-        val firstReason = reasons.firstOrNull()?.takeIf { it.isNotBlank() }
-        return if (firstReason == null) {
-            "$title\n화면을 끄고 쉬어가자"
-        } else {
-            "$title\n$firstReason"
+    ): String = formatOfferSpeech(CharacterIntensity.NORMAL, reasons, tone)
+
+    companion object {
+        fun formatReasonLines(
+            reasons: List<String>,
+            maxLines: Int = 2
+        ): String? {
+            val picked = reasons.map { it.trim() }.filter { it.isNotEmpty() }.distinct().take(maxLines)
+            return when (picked.size) {
+                0 -> null
+                1 -> picked[0]
+                else -> picked.joinToString("\n") { "• $it" }
+            }
+        }
+
+        fun formatOfferSpeech(
+            intensity: CharacterIntensity,
+            reasons: List<String>,
+            tone: CoachingTone = CoachingTone.SOFT,
+            random: kotlin.random.Random = kotlin.random.Random.Default
+        ): String = when (intensity) {
+            CharacterIntensity.GENTLE -> {
+                val firstReason = reasons.firstOrNull { it.isNotBlank() }
+                CoachingSpeechCatalog.pickSpeech(
+                    SpeechSituation.GENTLE_OFFER,
+                    tone,
+                    reason = firstReason,
+                    random = random
+                )
+            }
+            CharacterIntensity.NORMAL -> {
+                val title = CoachingSpeechCatalog.pickSpeech(
+                    SpeechSituation.NORMAL_OFFER_TITLE,
+                    tone,
+                    random = random
+                )
+                val reasonBlock = formatReasonLines(reasons, maxLines = 2)
+                if (reasonBlock == null) {
+                    "$title\n화면을 끄고 쉬어가자"
+                } else {
+                    "$title\n$reasonBlock"
+                }
+            }
+            CharacterIntensity.STRONG -> {
+                val reasonBlock = formatReasonLines(reasons, maxLines = 2) ?: "영상을 오래 시청하고 있어"
+                CoachingSpeechCatalog.pickSpeech(
+                    SpeechSituation.STRONG_OFFER,
+                    tone,
+                    reason = reasonBlock,
+                    random = random
+                )
+            }
         }
     }
 

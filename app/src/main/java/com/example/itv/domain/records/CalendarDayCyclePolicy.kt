@@ -61,7 +61,6 @@ internal data class MergedSleepData(
 internal object CalendarDayCyclePolicy {
 
     val DEFAULT_NIGHT_CUTOFF: LocalTime = LocalTime.of(5, 0)
-    val LATE_NIGHT_START: LocalTime = LocalTime.of(23, 0)
     val ALL_NIGHTER_FINALIZE_CUTOFF: LocalTime = LocalTime.of(12, 0)
     const val PRE_SLEEP_WINDOW_MS: Long = 60 * 60_000L
 
@@ -253,6 +252,15 @@ internal object CalendarDayCyclePolicy {
      * Computes the exact pre-sleep window for the night of [date] ([date] -> [date] + 1),
      * strictly bounded inside [cycleBounds] so it can NEVER include [date]'s own early morning (00:00..04:59)
      * or overlap with (date - 1)'s pre-sleep window.
+     *
+     * Priority:
+     * 1. When actual sleep onset ([bedtimeStartWallMs], start of the non-use sleep interval) is known:
+     *    strictly `[bedtimeStartWallMs - 1h, bedtimeStartWallMs]`.
+     * 2. When the user explicitly marked `NOT_SLEEP`: returns `null`.
+     * 3. When actual sleep has not started/been detected yet:
+     *    uses `[fallbackBedtimeMinute - 1h, ...]` where [fallbackBedtimeMinute] comes from
+     *    the Sleep tab's personal estimated bedtime (day-of-week -> global) or bedtime goal.
+     *    If neither personal data nor goal exists, returns `null` rather than guessing 23:00.
      */
     fun resolvePreSleepWindow(
         date: LocalDate,
@@ -261,7 +269,9 @@ internal object CalendarDayCyclePolicy {
         nowWallMs: Long,
         cycleBounds: DayCycleBounds,
         bedtimeStartWallMs: Long?,
-        isDateFinalized: Boolean
+        isDateFinalized: Boolean,
+        fallbackBedtimeMinute: Int? = null,
+        hasExplicitNoSleep: Boolean = false
     ): TimeWindowMs? {
         val isDateToday = date == today
         val isDateYesterday = date == today.minusDays(1)
@@ -272,21 +282,25 @@ internal object CalendarDayCyclePolicy {
             return if (winEnd > winStart) TimeWindowMs(winStart, winEnd) else null
         }
 
-        val lateNightStart = date.atTime(LATE_NIGHT_START).atZone(zone).toInstant().toEpochMilli()
-        val winStart = maxOf(lateNightStart, cycleBounds.dayStartWallMs)
+        if (hasExplicitNoSleep) return null
+
+        val refBedtimeMin = fallbackBedtimeMinute ?: return null
+        val refBedtimeWallMs = bedtimeMinuteToWallMs(date, refBedtimeMin, zone)
+        val winStart = maxOf(refBedtimeWallMs - PRE_SLEEP_WINDOW_MS, cycleBounds.dayStartWallMs)
 
         val winEnd = when {
             isDateToday -> {
-                // Tonight's pre-sleep window has not started yet before 23:00.
+                // Tonight's pre-sleep window has not started yet before (refBedtime - 1h).
                 if (nowWallMs <= winStart) return null
                 minOf(nowWallMs, cycleBounds.dayEndWallMs)
             }
             isDateYesterday && !isDateFinalized -> {
                 // Still awake past midnight without measured sleep: continue attributing usage to yesterday up to now.
+                if (nowWallMs <= winStart) return null
                 nowWallMs
             }
             else -> {
-                // Finalized past day without measured sleep: [23:00 of date, dayEnd (05:00 of date+1 or next wake)].
+                // Finalized past day without measured sleep (e.g., all-nighter): [refBedtime - 1h, dayEnd].
                 cycleBounds.dayEndWallMs
             }
         }

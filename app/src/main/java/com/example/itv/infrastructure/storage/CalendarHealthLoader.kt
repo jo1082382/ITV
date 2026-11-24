@@ -5,6 +5,7 @@ import com.example.itv.composition.queryNightReport
 import com.example.itv.composition.queryUsageReport
 import com.example.itv.composition.sleepConfirmationService
 import com.example.itv.data.local.ItvDatabase
+import com.example.itv.domain.records.ArchivedSleepRecord
 import com.example.itv.domain.records.CalendarDayCyclePolicy
 import com.example.itv.domain.records.DailyHealthAssessment
 import com.example.itv.domain.records.DailyHealthContext
@@ -16,6 +17,7 @@ import com.example.itv.domain.records.NightSegment
 import com.example.itv.domain.records.Report
 import com.example.itv.domain.records.SleepSummaryPolicy
 import com.example.itv.domain.records.TimeWindowMs
+import com.example.itv.infrastructure.coaching.UserCoachingSettingsStore
 import com.example.itv.infrastructure.records.AndroidRecordSource
 import com.example.itv.infrastructure.storage.shortform.ShortformPersonalStatsStore
 import com.example.itv.presentation.usage.DailyStampPrefs
@@ -207,32 +209,67 @@ internal object CalendarHealthLoader {
         val monthDates = (1..daysInMonth).map { viewMonth.atDay(it) }
         val needsCrossMonthYesterday = viewMonth == YearMonth.from(today) && yesterday.month != viewMonth.month
         val datesNeedingSleep = if (needsCrossMonthYesterday) monthDates + yesterday else monthDates
-        val wakeDatesToRead = (datesNeedingSleep.map { it.plusDays(1) } + datesNeedingSleep)
-            .distinct()
-            .map { it.toString() }
-        val sleepConfirmations = runCatching {
-            sleepConfirmationService(appCtx).readDates(wakeDatesToRead)
-        }.getOrDefault(emptyMap())
-
         val boundaryMs = AccountDataBoundaryStore.getFreshStartEpochMs(appCtx)
         val boundaryDate = AccountDataBoundaryStore.getFreshStartDate(appCtx, zone)
         val boundedNightReport = AccountDataBoundaryStore.filterNightReport(existingNightReport, boundaryMs)
         val candidates = boundedNightReport?.candidates.orEmpty()
         val segments = boundedNightReport?.segments.orEmpty()
 
-        // 4. Personal baselines (bedtime, phone daily, shortform daily, SPM)
-        val estimatedWindow = SleepSummaryPolicy.estimateBedtimeWindow(
+        val archivedSleepRecords = allDailyRecords.values.mapNotNull { rec ->
+            val bed = rec.bedtimeMinute ?: return@mapNotNull null
+            val wake = rec.wakeupMinute ?: return@mapNotNull null
+            val d = runCatching { LocalDate.parse(rec.date) }.getOrNull() ?: return@mapNotNull null
+            if (AccountDataBoundaryStore.isDateBeforeBoundary(d, boundaryDate)) return@mapNotNull null
+            ArchivedSleepRecord(wakeDate = d, bedtimeMinute = bed, wakeupMinute = wake)
+        }
+
+        val wakeDatesToRead = (
+            datesNeedingSleep.map { it.plusDays(1) } +
+                datesNeedingSleep +
+                archivedSleepRecords.map { it.wakeDate }
+            )
+            .distinct()
+            .map { it.toString() }
+        val sleepConfirmations = runCatching {
+            sleepConfirmationService(appCtx).readDates(wakeDatesToRead)
+        }.getOrDefault(emptyMap())
+
+        // 4. Personal baselines — 취침 탭(NightSummary)과 동일한 통합 수면 프로파일(요일별 추정·권장 취침) 사용
+        val mergedSleep = CalendarDayCyclePolicy.mergeArchivedSleepData(
+            liveSegments = segments,
+            liveCandidates = candidates,
+            archivedRecords = archivedSleepRecords,
             confirmations = sleepConfirmations,
-            candidates = candidates,
             zone = zone
         )
-        val baselineBedtimeMin = estimatedWindow?.let { it.avgStartHour * 60 + it.avgStartMinute }
-            ?: run {
-                val archivedBedtimes = allDailyRecords.values.mapNotNull { it.bedtimeMinute }
-                if (archivedBedtimes.isNotEmpty()) circularAvgMinute(archivedBedtimes) else null
+        val weeklySleepProfile = SleepSummaryPolicy.estimateWeeklySleepProfile(
+            confirmations = sleepConfirmations,
+            candidates = mergedSleep.candidates,
+            zone = zone
+        )
+        val globalWindow = weeklySleepProfile?.globalWindow
+        val globalEstimatedBedtimeMin = globalWindow?.let { it.avgStartHour * 60 + it.avgStartMinute }
+        val globalRecommendedBedtimeMin = globalWindow?.let {
+            val effSleep = it.avgDurationMinutes.coerceIn(420L, 510L)
+            ((it.avgEndHour * 60 + it.avgEndMinute - effSleep + 2880L) % 1440L).toInt()
+        }
+
+        // 데이터가 모자랄 때 사용할 목표 취침 시각 (직접 지정 취침 시각 -> 활성화된 취침 목표 순)
+        val goalBedtimeMin: Int? = runCatching {
+            val coachingSettings = UserCoachingSettingsStore(appCtx).loadSettings()
+            if (coachingSettings.customBedtimeHour != null && coachingSettings.customBedtimeMinute != null) {
+                coachingSettings.customBedtimeHour * 60 + coachingSettings.customBedtimeMinute
+            } else {
+                val goal = db.dao().goal("demo-guest", "BEDTIME")
+                val detail = goal?.goalId?.let { db.dao().bedtimeGoal(it) }
+                if (goal?.enabled == true && detail != null) detail.localMinuteOfDay else null
             }
+        }.getOrNull()
+
+        val baselineBedtimeMin = globalEstimatedBedtimeMin ?: goalBedtimeMin
 
         val activePhoneTotals = allDailyRecords.values.map { it.totalPhoneMs }.filter { it >= 10 * 60_000L }
+        val baselinePhoneDailySampleDays = activePhoneTotals.size
         val baselinePhoneDailyMs = if (activePhoneTotals.isNotEmpty()) activePhoneTotals.average().toLong() else null
 
         val activeSfTotals = allDailyRecords.values.map { it.shortformMs }.filter { it >= 60_000L }
@@ -502,7 +539,41 @@ internal object CalendarHealthLoader {
                 archiveRec?.shortformSpm
             }
 
-            // Pre-sleep window strictly inside `date`'s night (`date` -> `date + 1`), never `date 00:00..04:59`
+            // 해당 밤(다음 날 기상 요일)에 맞는 취침 탭 기준(요일별 평소 추정·권장 취침 -> 전체 평균 -> 목표값) 산출
+            val daySleepProfile = weeklySleepProfile?.dayProfiles?.get(nextDate.dayOfWeek)
+            val dateEstimatedBedtimeMin = daySleepProfile?.let { it.avgStartHour * 60 + it.avgStartMinute }
+                ?: globalEstimatedBedtimeMin
+            val dateRecommendedBedtimeMin = daySleepProfile?.let { it.recommendedBedtimeHour * 60 + it.recommendedBedtimeMinute }
+                ?: globalRecommendedBedtimeMin
+            val dateBaselineSleepDurationMin = daySleepProfile?.avgDurationMinutes?.toDouble()
+                ?: globalWindow?.avgDurationMinutes?.toDouble()
+            val datePreSleepFallbackBedtimeMin = dateEstimatedBedtimeMin
+                ?: goalBedtimeMin
+                ?: dateRecommendedBedtimeMin
+
+            // 확정된 과거 날에 수면(>=3h 비사용)이 전혀 없고 실제 야간 활동이 감지되었거나 사용자가 수면 아님을 확인한 경우 -> 밤샘 판정
+            val nightStartWallMs = date.atTime(23, 0).atZone(zone).toInstant().toEpochMilli()
+            val nightEndWallMs = nextDate.atTime(6, 0).atZone(zone).toInstant().toEpochMilli()
+            val nightCheckWindow = TimeWindowMs(nightStartWallMs, nightEndWallMs)
+            val nightActivityMinutes = if (candidatePhoneSessions.isNotEmpty()) {
+                CalendarDayCyclePolicy.computeIntervalsOverlapMinutes(
+                    intervals = candidatePhoneSessions.map { it.startWallMs to it.endWallMs },
+                    window = nightCheckWindow
+                )
+            } else {
+                0.0
+            }
+            val nightActivitySessionCount = candidatePhoneSessions.count { s ->
+                minOf(s.endWallMs, nightEndWallMs) > maxOf(s.startWallMs, nightStartWallMs)
+            }
+            val isAllNighter = isFinalized &&
+                !isDateToday &&
+                nightSleep.bedtimeMinute == null &&
+                nightSleep.sleepDurationMinutes == null &&
+                (nightSleep.hasExplicitNoSleep || nightActivityMinutes >= 10.0 || nightActivitySessionCount >= 2)
+
+            // Pre-sleep window: 실제 비사용 시작점(bedtimeStartWallMs) 기준 직전 1시간,
+            // 미감지 시 개인 추정/목표 취침 시각 기준 직전 1시간부터 적용 (밤샘/수면아님/기준없음 시 null)
             val preSleepWindow = CalendarDayCyclePolicy.resolvePreSleepWindow(
                 date = date,
                 today = today,
@@ -510,28 +581,38 @@ internal object CalendarHealthLoader {
                 nowWallMs = nowWallMs,
                 cycleBounds = cycleBounds,
                 bedtimeStartWallMs = nightSleep.bedtimeStartWallMs,
-                isDateFinalized = isFinalized
+                isDateFinalized = isFinalized,
+                fallbackBedtimeMinute = datePreSleepFallbackBedtimeMin,
+                hasExplicitNoSleep = nightSleep.hasExplicitNoSleep || isAllNighter
             )
 
-            val preSleepUsageMin = computePreSleepPhoneMinutes(
-                today = today,
-                zone = zone,
-                isDateToday = isDateToday,
-                isDateYesterday = isDateYesterday,
-                isDateFinalized = isFinalized,
-                preSleepWindow = preSleepWindow,
-                candidateSessions = candidatePhoneSessions,
-                todayReport = todayReport
-            ) ?: archiveRec?.preSleepUsageMinutes
+            val preSleepUsageMin = if (isAllNighter) {
+                null
+            } else {
+                computePreSleepPhoneMinutes(
+                    today = today,
+                    zone = zone,
+                    isDateToday = isDateToday,
+                    isDateYesterday = isDateYesterday,
+                    isDateFinalized = isFinalized,
+                    preSleepWindow = preSleepWindow,
+                    candidateSessions = candidatePhoneSessions,
+                    todayReport = todayReport
+                ) ?: archiveRec?.preSleepUsageMinutes
+            }
 
-            val preSleepShortformMin = computePreSleepShortformMinutes(
-                zone = zone,
-                bedtimeStartWallMs = nightSleep.bedtimeStartWallMs,
-                preSleepWindow = preSleepWindow,
-                sfHourBuckets = sfHourBuckets,
-                candidateSfSessions = candidateSfSessions,
-                hasShortformTracking = hasShortformTracking
-            ) ?: archiveRec?.preSleepShortformMinutes
+            val preSleepShortformMin = if (isAllNighter) {
+                null
+            } else {
+                computePreSleepShortformMinutes(
+                    zone = zone,
+                    bedtimeStartWallMs = nightSleep.bedtimeStartWallMs,
+                    preSleepWindow = preSleepWindow,
+                    sfHourBuckets = sfHourBuckets,
+                    candidateSfSessions = candidateSfSessions,
+                    hasShortformTracking = hasShortformTracking
+                ) ?: archiveRec?.preSleepShortformMinutes
+            }
 
             val isRestDay = archiveRec?.dayType == "REST_DAY" ||
                 date.dayOfWeek == DayOfWeek.SATURDAY ||
@@ -544,9 +625,13 @@ internal object CalendarHealthLoader {
                 bedtimeMinute = nightSleep.bedtimeMinute,
                 wakeupMinute = nightSleep.wakeupMinute,
                 sleepDurationMinutes = nightSleep.sleepDurationMinutes,
-                baselineBedtimeMinute = baselineBedtimeMin,
+                baselineBedtimeMinute = dateEstimatedBedtimeMin,
+                recommendedBedtimeMinute = dateRecommendedBedtimeMin,
+                goalBedtimeMinute = goalBedtimeMin,
+                baselineSleepDurationMinutes = dateBaselineSleepDurationMin,
                 preSleepUsageMinutes = preSleepUsageMin,
                 preSleepShortformMinutes = preSleepShortformMin,
+                isAllNighter = isAllNighter,
                 hasShortformTracking = hasShortformTracking,
                 shortformTotalMs = shortformMs,
                 shortformSwipes = shortformSwipes,
@@ -562,6 +647,7 @@ internal object CalendarHealthLoader {
                     (shortformMs.toDouble() / totalPhoneMs.toDouble()).coerceIn(0.0, 1.0)
                 } else null,
                 baselinePhoneDailyMs = baselinePhoneDailyMs,
+                baselinePhoneDailySampleDays = baselinePhoneDailySampleDays,
                 isRestDay = isRestDay
             )
 
@@ -730,17 +816,5 @@ internal object CalendarHealthLoader {
         }
 
         return 0.0
-    }
-
-    private fun circularAvgMinute(minutes: List<Int>): Int {
-        var sinSum = 0.0
-        var cosSum = 0.0
-        for (m in minutes) {
-            val angle = (((m % 1440) + 1440) % 1440) / 1440.0 * 2.0 * Math.PI
-            sinSum += Math.sin(angle)
-            cosSum += Math.cos(angle)
-        }
-        val avgAngle = (Math.atan2(sinSum, cosSum) + 2.0 * Math.PI) % (2.0 * Math.PI)
-        return (Math.round(avgAngle / (2.0 * Math.PI) * 1440.0) % 1440L).toInt()
     }
 }
