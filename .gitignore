@@ -33,3 +33,11 @@ keystore.properties
 .env
 .env.*
 
+# Node / Cloudflare / Firebase 로컬 의존성 및 캐시
+**/node_modules/
+**/.wrangler/
+.firebase/
+firebase-debug.log
+firestore-debug.log
+
+

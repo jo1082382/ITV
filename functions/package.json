@@ -1,0 +1,12 @@
+{
+  "name": "itv-firebase-functions",
+  "description": "Firebase Cloud Functions for ITV (Kakao & Naver Custom Token authentication)",
+  "main": "index.js",
+  "engines": {
+    "node": "22"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.2.0",
+    "firebase-functions": "^6.3.2"
+  }
+}

@@ -86,21 +86,29 @@ internal fun DailyHealthStampBadge(
     onSelectedSurface: Boolean = false,
     tiltDegrees: Float = 0f,
     reactionPhase: Float = 0f,
-    character: StampCharacterSpec = StampCharacterRegistry.default
+    character: StampCharacterSpec = StampCharacterRegistry.default,
+    preloadedOutlineBitmap: ImageBitmap? = null
 ) {
-    val context = LocalContext.current
-    val outlineBitmap by produceState(
-        initialValue = StampCharacterBitmapCache.getCachedMonochromeOutline(character.id),
-        key1 = context,
-        key2 = character.id
-    ) {
-        if (value == null) {
+    val cachedOutline = preloadedOutlineBitmap ?: remember(character.id) {
+        StampCharacterBitmapCache.getCachedMonochromeOutline(character.id)
+    }
+    val outlineBitmap: ImageBitmap? = if (cachedOutline != null) {
+        cachedOutline
+    } else {
+        val context = LocalContext.current
+        val loaded by produceState<ImageBitmap?>(
+            initialValue = null,
+            key1 = context,
+            key2 = character.id
+        ) {
             value = withContext(Dispatchers.Default) {
                 StampCharacterBitmapCache.getMonochromeOutline(context, character)
             }
         }
+        loaded
     }
     val ink = stampInkColor(tier, onSelectedSurface)
+    val tintFilter = remember(ink) { ColorFilter.tint(ink) }
 
     Canvas(modifier = modifier.size(size)) {
         if (tier == DailyHealthTier.NO_DATA) return@Canvas
@@ -161,6 +169,7 @@ internal fun DailyHealthStampBadge(
             drawRealCharacterStamp(
                 tier = tier,
                 ink = ink,
+                tintFilter = tintFilter,
                 outlineBitmap = outlineBitmap,
                 character = character,
                 reactionPhase = p
@@ -254,6 +263,7 @@ internal fun SlammablePuppyStamp(
 private fun DrawScope.drawRealCharacterStamp(
     tier: DailyHealthTier,
     ink: Color,
+    tintFilter: ColorFilter,
     outlineBitmap: ImageBitmap?,
     character: StampCharacterSpec,
     reactionPhase: Float
@@ -277,14 +287,14 @@ private fun DrawScope.drawRealCharacterStamp(
             image = outlineBitmap,
             dstOffset = IntOffset(imgLeft.roundToInt(), imgTop.roundToInt()),
             dstSize = IntSize(imgW.roundToInt().coerceAtLeast(1), imgH.roundToInt().coerceAtLeast(1)),
-            colorFilter = ColorFilter.tint(ink)
+            colorFilter = tintFilter
         )
     } else {
         drawFallbackHeadOutline(imgLeft, imgTop, imgW, imgH, ink)
     }
 
-    val lineW = (imgW * 0.042f).coerceAtLeast(1.25f)
-    val thinW = (imgW * 0.032f).coerceAtLeast(1.0f)
+    val lineW = (imgW * 0.064f).coerceAtLeast(2.1f)
+    val thinW = (imgW * 0.050f).coerceAtLeast(1.65f)
     val stroke = Stroke(width = lineW, cap = StrokeCap.Round, join = StrokeJoin.Round)
     val thinStroke = Stroke(width = thinW, cap = StrokeCap.Round, join = StrokeJoin.Round)
 
@@ -292,8 +302,8 @@ private fun DrawScope.drawRealCharacterStamp(
     val noseCenter = pt(0.515f, 0.612f)
     drawOval(
         color = ink,
-        topLeft = Offset(noseCenter.x - imgW * 0.036f, noseCenter.y - imgH * 0.026f),
-        size = Size(imgW * 0.072f, imgH * 0.052f)
+        topLeft = Offset(noseCenter.x - imgW * 0.044f, noseCenter.y - imgH * 0.032f),
+        size = Size(imgW * 0.088f, imgH * 0.064f)
     )
 
     val isAnim = reactionPhase > 0.001f
@@ -363,7 +373,7 @@ private fun DrawScope.drawRealCharacterStamp(
 
         DailyHealthTier.SILVER -> {
             // 2단계: 기분 좋게 웃는 얼굴 (동글 반짝 눈 + 귀여운 w 미소)
-            val eyeRadius = (imgW * 0.032f).coerceAtLeast(1.3f)
+            val eyeRadius = (imgW * 0.042f).coerceAtLeast(1.8f)
             drawCircle(color = ink, radius = eyeRadius, center = pt(0.405f, 0.515f))
             drawCircle(color = ink, radius = eyeRadius, center = pt(0.625f, 0.515f))
 
@@ -390,7 +400,7 @@ private fun DrawScope.drawRealCharacterStamp(
             drawLine(ink, pt(0.355f, 0.455f), pt(0.445f, 0.415f), thinW, StrokeCap.Round)
             drawLine(ink, pt(0.675f, 0.455f), pt(0.585f, 0.415f), thinW, StrokeCap.Round)
 
-            val eyeRadius = (imgW * 0.030f).coerceAtLeast(1.2f)
+            val eyeRadius = (imgW * 0.040f).coerceAtLeast(1.7f)
             drawCircle(color = ink, radius = eyeRadius, center = pt(0.405f, 0.525f))
             drawCircle(color = ink, radius = eyeRadius, center = pt(0.625f, 0.525f))
 
@@ -765,7 +775,7 @@ private fun DrawScope.drawFallbackHeadOutline(
     imgH: Float,
     ink: Color
 ) {
-    val stroke = Stroke(width = (imgW * 0.042f).coerceAtLeast(1.3f), cap = StrokeCap.Round, join = StrokeJoin.Round)
+    val stroke = Stroke(width = (imgW * 0.064f).coerceAtLeast(2.0f), cap = StrokeCap.Round, join = StrokeJoin.Round)
     fun pt(nx: Float, ny: Float) = Offset(imgLeft + nx * imgW, imgTop + ny * imgH)
     val head = Path().apply {
         moveTo(pt(0.28f, 0.25f).x, pt(0.28f, 0.25f).y)
@@ -781,7 +791,7 @@ private fun DrawScope.drawInProgressStamp(ink: Color) {
     val w = size.width
     val center = Offset(w * 0.5f, w * 0.5f)
     val radius = w * 0.34f
-    val strokeW = (w * 0.065f).coerceAtLeast(1.3f)
+    val strokeW = (w * 0.088f).coerceAtLeast(2.0f)
 
     drawCircle(
         color = ink.copy(alpha = 0.72f),

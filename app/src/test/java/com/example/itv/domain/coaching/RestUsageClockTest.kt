@@ -92,4 +92,30 @@ class RestUsageClockTest {
         assertEquals(0L, clock.restMs)
         assertEquals(10_000L, clock.usedMs)
     }
+
+    @Test
+    fun pausedOwnAppPreservesUsageWithoutIncrementingOrResetting() {
+        val clock = RestUsageClock(requiredRestMs = 15_000L)
+        // 숏폼 10초 사용
+        clock.observe(now = 0L, using = true, isShortform = true)
+        for (i in 1..10) {
+            clock.observe(now = i * 1000L, using = true, isShortform = true)
+        }
+        assertEquals(10_000L, clock.usedMs)
+
+        // 우리 앱(ITV) 20초 체류 (paused = true): 사용량도 늘지 않고, 휴식으로 초기화되지도 않아야 함
+        for (i in 11..30) {
+            val reset = clock.observe(now = i * 1000L, using = true, isShortform = false, paused = true)
+            assertFalse(reset)
+        }
+        assertEquals(10_000L, clock.usedMs)
+        assertEquals(0L, clock.restMs)
+
+        // 일반 앱으로 복귀해 9초 사용 -> 1:3 비율로 +3초(총 13초)만 증가해야 함
+        clock.observe(now = 31_000L, using = true, isShortform = false, paused = false)
+        for (i in 32..40) {
+            clock.observe(now = i * 1000L, using = true, isShortform = false, paused = false)
+        }
+        assertEquals(13_000L, clock.usedMs)
+    }
 }

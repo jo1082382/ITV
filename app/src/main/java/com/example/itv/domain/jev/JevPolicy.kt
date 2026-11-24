@@ -38,7 +38,7 @@ data class JevSettings(
     fun targets(pkg: String): Boolean {
         if (pkg == "ALL") return true
         if (pkg == "LOCKED" || pkg == "GUARD_BLOCKED") return false
-        if (pkg == "com.team.itv" || pkg == "com.example.itv") return false
+        if (pkg.startsWith("com.team.itv") || pkg.startsWith("com.example.itv")) return false
         if (isLauncherPackage(pkg)) return false
         if (isExcludedSystemPackage(pkg)) return false
         if (pkg == INSTAGRAM) return instagram
@@ -137,9 +137,6 @@ data class JevContext(
     val isNearOrOccluded: Boolean = false,
     val bedtimeDistanceMinutes: Int? = null,
     val userEnvironmentState: String? = null,
-    val lastInterventionOutcome: String? = null,
-    val postInterventionActivity: Boolean = false,
-    val resistanceStreak: Int = 0,
     val estimatedDayType: String? = null,
     val dayTypeReason: String? = null,
     // YouTube 롱폼 시청 맥락 (Jev 서버 전송용)
@@ -152,8 +149,9 @@ data class JevContext(
     val activityPhase: String? = null,
     val audioPipelineKind: String? = null,
     val generalAppIdleSeconds: Long? = null,
-    // 추천 영상을 타고 연속으로 본 횟수 (Jev 서버에는 전송하지 않고 우리 앱 내부 기준점 보정에만 사용)
-    val consecutiveLongformChainCount: Int = 0
+    // 유튜브 롱폼 영상 전환 횟수 & 숏폼 누적 스와이프 수 (우리 앱 내부 기준점 보정용)
+    val consecutiveLongformChainCount: Int = 0,
+    val shortformSwipeCount: Int = 0
 ) {
     val isRestDay: Boolean get() = estimatedDayType == "REST_DAY"
 }
@@ -296,9 +294,13 @@ object JevCandidatePolicy {
             if (c.continuousMs >= 1800_000L) {
                 add("CONTINUOUS_FATIGUE")
             }
-            // 직전 개입 미룸 / 무응답 후 시청 지속
-            if (c.lastInterventionOutcome in setOf("LATER", "NO_RESPONSE") && c.postInterventionActivity) {
-                add("INTERVENTION_RESISTANCE")
+            // 유튜브 롱폼 연속 영상 전환(3회 이상) / 숏폼 누적 스와이프(30회 이상)
+            val minSwitchMs = minOf(120_000L, s.continuousSeconds * 1000L)
+            if (c.continuousMs >= minSwitchMs && c.consecutiveLongformChainCount >= 3) {
+                add("LONGFORM_BINGE_CHAIN")
+            }
+            if (c.continuousMs >= minSwitchMs && c.shortformSwipeCount >= 30) {
+                add("SHORTFORM_SWIPE_COUNT")
             }
         }
     }
@@ -309,7 +311,9 @@ object JevCandidatePolicy {
         val phoneShareDelta: Double = 0.0,
         val bedtimeDelta: Double = 0.0,
         val fatigueDelta: Double = 0.0,
-        val resistanceDelta: Double = 0.0,
+        val longformSwitchDelta: Double = 0.0,
+        val shortformSwipeCountDelta: Double = 0.0,
+        val contentSwitchDelta: Double = 0.0,
         val totalDelta: Double,
         val effectiveThreshold: Double
     )
@@ -337,39 +341,41 @@ object JevCandidatePolicy {
     }
 
     /**
-     * 직전 개입 반응 이력 (개입 저항 및 시청 지속):
-     * - '나중에(LATER)' 선택 후 시청 지속: 1회 -5%p, 2회 이상 -8%p ~ -10%p
-     * - '무응답(NO_RESPONSE)' 후 스와이프 등 시청 활동 지속 (무시하고 시청): 1회 -6%p, 2회 이상 -10%p
+     * 유튜브 롱폼 영상 전환 횟수 기반 기준선 보정:
+     * - 0~1회: 0%p (정상 시청/단발 탐색)
+     * - 2회~5회 이상: 0%p -> 최대 -10%p 선형 보간 (전환 1회당 -2.5%p)
      */
-    fun computeInterventionResistanceDelta(c: JevContext): Double {
-        val outcome = c.lastInterventionOutcome ?: return 0.0
-        val streak = c.resistanceStreak.coerceAtLeast(1)
-        val delta = when (outcome) {
-            "LATER" -> {
-                if (streak >= 2) -0.08 - (0.02 * (streak - 2).coerceIn(0, 1))
-                else -0.05
-            }
-            "NO_RESPONSE" -> {
-                if (c.postInterventionActivity) {
-                    if (streak >= 2) -0.10
-                    else -0.06
-                } else 0.0
-            }
-            else -> 0.0
-        }
+    fun computeLongformSwitchDelta(c: JevContext): Double {
+        val switches = c.consecutiveLongformChainCount
+        if (switches <= 1) return 0.0
+        val ratio = ((switches - 1) / 4.0).coerceIn(0.0, 1.0)
+        val delta = ratio * -0.10
+        return kotlin.math.round(delta.coerceIn(-0.10, 0.0) * 1000.0) / 1000.0
+    }
+
+    /**
+     * 숏폼 누적 스와이프 수 기반 기준선 보정:
+     * - 0~10회: 0%p (가벼운 탐색)
+     * - 11~50회 이상: 0%p -> 최대 -10%p 선형 보간 (10회 초과 10회당 -2.5%p)
+     */
+    fun computeShortformSwipeCountDelta(c: JevContext): Double {
+        val swipes = c.shortformSwipeCount
+        if (swipes <= 10) return 0.0
+        val ratio = ((swipes - 10) / 40.0).coerceIn(0.0, 1.0)
+        val delta = ratio * -0.10
         return kotlin.math.round(delta.coerceIn(-0.10, 0.0) * 1000.0) / 1000.0
     }
 
     fun computeThresholdAdjustment(s: JevSettings, c: JevContext? = null): ThresholdAdjustment {
         if (c == null || !s.personalizedEnabled) {
-            return ThresholdAdjustment(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, s.probabilityThreshold)
+            return ThresholdAdjustment(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, s.probabilityThreshold)
         }
         val hasAnySignal = c.sessionVsAvgRatio != null || c.effectiveSpm1m != null ||
             c.swipeAccel1m != null || c.fastSwipeStreak > 0 ||
             c.ambientLux != null || c.screenBrightness != null || c.bedtimeDistanceMinutes != null ||
-            c.continuousMs >= 900_000L || c.lastInterventionOutcome != null
+            c.continuousMs >= 900_000L || c.consecutiveLongformChainCount >= 2 || c.shortformSwipeCount > 10
         if (!hasAnySignal) {
-            return ThresholdAdjustment(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, s.probabilityThreshold)
+            return ThresholdAdjustment(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, s.probabilityThreshold)
         }
 
         // 1. 단일 세션 과몰입 선형 보간: 0.5배 (+10%p) ~ 1.0배 (0%p) ~ 1.5배 이상 (-10%p)
@@ -406,12 +412,25 @@ object JevCandidatePolicy {
         // 4. 연속 시청 피로도 누적: 15분 미만(0%p) ~ 30분(-2%p) ~ 45분 이상(-4%p)
         val fatigueDelta = computeContinuousFatigueDelta(c)
 
-        // 5. 직전 개입 반응 이력 (나중에/무응답 후 시청 지속): -5%p ~ -10%p
-        val resistanceDelta = computeInterventionResistanceDelta(c)
+        // 5. 유튜브 롱폼 영상 전환 횟수 & 숏폼 누적 스와이프 수: 최대 -10%p
+        val longformSwitchDelta = computeLongformSwitchDelta(c)
+        val shortformSwipeCountDelta = computeShortformSwipeCountDelta(c)
+        val contentSwitchDelta = kotlin.math.round((longformSwitchDelta + shortformSwipeCountDelta).coerceIn(-0.10, 0.0) * 1000.0) / 1000.0
 
-        val totalDelta = kotlin.math.round((sessionDelta + swipeDelta + bedtimeDelta + fatigueDelta + resistanceDelta).coerceIn(-0.40, 0.25) * 1000.0) / 1000.0
+        val totalDelta = kotlin.math.round((sessionDelta + swipeDelta + bedtimeDelta + fatigueDelta + contentSwitchDelta).coerceIn(-0.40, 0.25) * 1000.0) / 1000.0
         val eff = kotlin.math.round((s.probabilityThreshold + totalDelta).coerceIn(0.15, 0.95) * 1000.0) / 1000.0
-        return ThresholdAdjustment(sessionDelta, swipeDelta, phoneShareDelta, bedtimeDelta, fatigueDelta, resistanceDelta, totalDelta, eff)
+        return ThresholdAdjustment(
+            sessionDelta = sessionDelta,
+            swipeDelta = swipeDelta,
+            phoneShareDelta = phoneShareDelta,
+            bedtimeDelta = bedtimeDelta,
+            fatigueDelta = fatigueDelta,
+            longformSwitchDelta = longformSwitchDelta,
+            shortformSwipeCountDelta = shortformSwipeCountDelta,
+            contentSwitchDelta = contentSwitchDelta,
+            totalDelta = totalDelta,
+            effectiveThreshold = eff
+        )
     }
 
     /**
@@ -507,9 +526,16 @@ object JevCandidatePolicy {
             val contMin = "%.0f".format(c.continuousMs / 60000.0)
             factors.add("연속피로 ${contMin}분 (${"%.0f".format(adj.fatigueDelta * 100)}%p)")
         }
-        if (kotlin.math.abs(adj.resistanceDelta) >= 0.005) {
-            val tag = if (c.lastInterventionOutcome == "LATER") "나중에미룸" else "무응답시청지속"
-            factors.add("$tag (${"%.0f".format(adj.resistanceDelta * 100)}%p)")
+        if (kotlin.math.abs(adj.contentSwitchDelta) >= 0.005) {
+            val deltaStr = "${"%.0f".format(adj.contentSwitchDelta * 100)}%p"
+            when {
+                adj.longformSwitchDelta < 0.0 && adj.shortformSwipeCountDelta < 0.0 ->
+                    factors.add("롱폼전환 ${c.consecutiveLongformChainCount}회·스와이프 ${c.shortformSwipeCount}회 ($deltaStr)")
+                adj.longformSwitchDelta < 0.0 ->
+                    factors.add("롱폼 영상전환 ${c.consecutiveLongformChainCount}회 ($deltaStr)")
+                else ->
+                    factors.add("숏폼 스와이프 ${c.shortformSwipeCount}회 ($deltaStr)")
+            }
         }
         return if (kotlin.math.abs(diffPct) >= 0.5 || factors.isNotEmpty()) {
             val sign = if (diffPct > 0) "+" else ""
@@ -569,7 +595,7 @@ class JevSessionTracker(private val newId: () -> String) {
         val delta = if (before == null) 0 else now - before
         val contiguous = before != null && delta in 1..1500
         if (coverageStart == null || !contiguous || pkg == null) coverageStart = now
-        val inspectingItv = pkg == "com.team.itv" || pkg == "com.example.itv"
+        val inspectingItv = pkg != null && (pkg.startsWith("com.team.itv") || pkg.startsWith("com.example.itv"))
         val isTargetPkg = pkg != null && pkg != "LOCKED" && pkg != "GUARD_BLOCKED" && !inspectingItv &&
             !JevSettings.isLauncherPackage(pkg) && !JevSettings.isExcludedSystemPackage(pkg)
 

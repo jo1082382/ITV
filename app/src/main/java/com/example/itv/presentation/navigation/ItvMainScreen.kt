@@ -4,9 +4,6 @@ import com.example.itv.domain.goals.HomeGoalRow
 
 import com.example.itv.presentation.usage.SleepEstimationTabContent
 import android.content.Intent
-import android.net.Uri
-import android.os.Build
-import android.provider.Settings
 import android.widget.Toast
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -25,6 +22,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.semantics.Role
@@ -52,6 +50,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.Image
 import androidx.compose.ui.res.painterResource
@@ -121,8 +120,8 @@ fun ItvMainScreen(
     var morningCheckTick by remember { mutableIntStateOf(0) }
     var checkingMorningRitual by remember { mutableStateOf(false) }
 
-    // Root coordinates + live calendar day cell coordinates stored via onPlaced (0 scroll callbacks!)
-    var overlayRootCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    // Root coordinates + live calendar day cell coordinates stored via onPlaced (0 scroll & 0 recomposition overhead!)
+    val overlayRootCoordsRef = remember { arrayOfNulls<LayoutCoordinates>(1) }
     val dayCellCoords = remember { mutableMapOf<LocalDate, LayoutCoordinates>() }
     fun LayoutCoordinates?.liveBounds(): Rect? =
         this?.takeIf { it.isAttached }?.boundsInRoot()?.takeUnless { it.isEmpty }
@@ -210,7 +209,7 @@ fun ItvMainScreen(
             var waitedMs = 0
             while (waitedMs < 4500) {
                 val candidate = dayCellCoords[yesterday].liveBounds()
-                val root = overlayRootCoords.liveBounds()
+                val root = overlayRootCoordsRef[0].liveBounds()
                 if (candidate != null &&
                     (root == null || (candidate.bottom > root.top && candidate.top < root.bottom))
                 ) {
@@ -245,32 +244,37 @@ fun ItvMainScreen(
     }
 
     // Outer MainActivity Scaffold already handles system bar insets.
-    Box(
+    ItvSeasonalBackground(
         modifier
             .fillMaxSize()
-            .onPlaced { overlayRootCoords = it }
+            .onPlaced { overlayRootCoordsRef[0] = it }
     ) {
     Scaffold(
         modifier = Modifier.fillMaxSize(),
+        containerColor = Color.Transparent,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             if (activeTab == "home") {
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     val isDark = LocalDarkTheme.current
                     val context = LocalContext.current
-                    Surface(
+                    ItvTactileButton(
                         onClick = { UserThemeStore.toggleDarkMode(context) },
-                        modifier = Modifier.size(64.dp),
+                        modifier = Modifier.size(68.dp),
                         shape = RoundedCornerShape(18.dp),
-                        color = ItvMint,
+                        containerColor = ItvCardSurface,
                         contentColor = if (isDark) Color(0xFFFFD54F) else ItvGreen,
-                        border = BorderStroke(1.dp, ItvLine)
+                        borderColor = ItvInkBorder,
+                        shadowColor = ItvInkShadow,
+                        borderWidth = 1.8.dp,
+                        shadowOffsetX = 1.5.dp,
+                        shadowOffsetY = 3.5.dp
                     ) {
                         Column(
                             Modifier.fillMaxSize(),
@@ -290,14 +294,23 @@ fun ItvMainScreen(
                         }
                     }
 
-                    // 홈 화면 중앙: 실시간 플로팅 HUD 키기 버튼 (야간모드 및 설정 버튼과 동일한 64dp 크기)
+                    // 홈 화면 중앙: 실시간 플로팅 HUD 버튼 (접근성 + 다른 앱 위에 표시 둘 다 켜져야 활성화)
+                    var hasHudPermissions by remember {
+                        mutableStateOf(
+                            com.example.itv.presentation.coaching.LongformDiagnosticHud.hasRequiredPermissions(context)
+                        )
+                    }
                     var isHudShowing by remember {
-                        mutableStateOf(com.example.itv.presentation.coaching.LongformDiagnosticHud.isShowing)
+                        mutableStateOf(
+                            com.example.itv.presentation.coaching.LongformDiagnosticHud.isShowing && hasHudPermissions
+                        )
                     }
                     val lifecycleOwner = LocalLifecycleOwner.current
                     DisposableEffect(lifecycleOwner) {
                         val observer = LifecycleEventObserver { _, event ->
                             if (event == Lifecycle.Event.ON_RESUME) {
+                                com.example.itv.presentation.coaching.LongformDiagnosticHud.hideIfPermissionsRevoked(context)
+                                hasHudPermissions = com.example.itv.presentation.coaching.LongformDiagnosticHud.hasRequiredPermissions(context)
                                 isHudShowing = com.example.itv.presentation.coaching.LongformDiagnosticHud.isShowing
                             }
                         }
@@ -305,57 +318,90 @@ fun ItvMainScreen(
                         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
                     }
 
-                    Surface(
+                    val hudDisabledBg = if (isDark) Color(0xFF111613) else Color(0xFFD7D0C5)
+                    val hudDisabledContent = if (isDark) Color(0xFF54635A) else Color(0xFF7A6F62)
+                    val hudDisabledBorder = if (isDark) Color(0xFF222D26) else Color(0xFFA99E8E)
+
+                    ItvTactileButton(
                         onClick = {
+                            if (!hasHudPermissions) return@ItvTactileButton
                             if (isHudShowing) {
                                 com.example.itv.presentation.coaching.LongformDiagnosticHud.hide()
                                 isHudShowing = false
                             } else {
-                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(context)) {
-                                    Toast.makeText(context, "다른 앱 위에 표시 권한을 허용해주세요.", Toast.LENGTH_SHORT).show()
-                                    val intent = Intent(
-                                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                                        Uri.parse("package:${context.packageName}")
-                                    )
-                                    context.startActivity(intent)
+                                val success = com.example.itv.presentation.coaching.LongformDiagnosticHud.show(context)
+                                if (success) {
+                                    isHudShowing = true
+                                    Toast.makeText(context, "실시간 플로팅 HUD가 활성화되었습니다.", Toast.LENGTH_SHORT).show()
                                 } else {
-                                    val success = com.example.itv.presentation.coaching.LongformDiagnosticHud.show(context)
-                                    if (success) {
-                                        isHudShowing = true
-                                        Toast.makeText(context, "실시간 플로팅 HUD가 활성화되었습니다.", Toast.LENGTH_SHORT).show()
-                                    }
+                                    hasHudPermissions = com.example.itv.presentation.coaching.LongformDiagnosticHud.hasRequiredPermissions(context)
                                 }
                             }
                         },
-                        modifier = Modifier.size(64.dp),
+                        enabled = hasHudPermissions,
+                        modifier = Modifier.size(68.dp),
                         shape = RoundedCornerShape(18.dp),
-                        color = if (isHudShowing) ItvGreen.copy(alpha = 0.15f) else ItvMint,
-                        contentColor = if (isHudShowing) ItvGreen else MaterialTheme.colorScheme.onSurfaceVariant,
-                        border = BorderStroke(if (isHudShowing) 1.5.dp else 1.dp, if (isHudShowing) ItvGreen else ItvLine)
+                        containerColor = when {
+                            !hasHudPermissions -> hudDisabledBg
+                            isHudShowing -> MaterialTheme.colorScheme.primaryContainer
+                            else -> ItvCardSurface
+                        },
+                        contentColor = when {
+                            !hasHudPermissions -> hudDisabledContent
+                            isHudShowing -> ItvGreen
+                            else -> MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        borderColor = when {
+                            !hasHudPermissions -> hudDisabledBorder
+                            isHudShowing -> ItvGreen
+                            else -> ItvInkBorder
+                        },
+                        shadowColor = when {
+                            !hasHudPermissions -> Color.Transparent
+                            isHudShowing -> ItvGreen
+                            else -> ItvInkShadow
+                        },
+                        borderWidth = if (!hasHudPermissions) 1.4.dp else 1.8.dp,
+                        shadowOffsetX = 1.5.dp,
+                        shadowOffsetY = 3.5.dp
                     ) {
                         Column(
-                            Modifier.fillMaxSize(),
+                            Modifier
+                                .fillMaxSize()
+                                .alpha(if (hasHudPermissions) 1f else 0.42f),
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.Center
                         ) {
                             PuppyFaceMascot(Modifier.size(28.dp))
                             Spacer(Modifier.height(2.dp))
                             Text(
-                                if (isHudShowing) "HUD ON" else "HUD",
+                                when {
+                                    !hasHudPermissions -> "HUD"
+                                    isHudShowing -> "HUD ON"
+                                    else -> "HUD"
+                                },
                                 style = MaterialTheme.typography.labelMedium,
                                 fontWeight = FontWeight.Bold,
-                                color = if (isHudShowing) ItvGreen else MaterialTheme.colorScheme.onSurfaceVariant
+                                color = when {
+                                    !hasHudPermissions -> hudDisabledContent
+                                    isHudShowing -> ItvGreen
+                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                }
                             )
                         }
                     }
 
-                    Surface(
+                    ItvTactileButton(
                         onClick = { settingsOpen = true },
-                        modifier = Modifier.size(64.dp),
+                        modifier = Modifier.size(68.dp),
                         shape = RoundedCornerShape(18.dp),
-                        color = ItvMint,
+                        containerColor = ItvCardSurface,
                         contentColor = ItvGreen,
-                        border = BorderStroke(1.dp, ItvLine)
+                        borderColor = ItvInkBorder,
+                        shadowColor = ItvInkShadow,
+                        borderWidth = 1.8.dp,
+                        shadowOffsetX = 1.5.dp,
+                        shadowOffsetY = 3.5.dp
                     ) {
                         Column(
                             Modifier.fillMaxSize(),
@@ -372,40 +418,69 @@ fun ItvMainScreen(
             }
         },
         bottomBar = {
-            Surface(color = MaterialTheme.colorScheme.surface, shadowElevation = 6.dp) {
-                Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 10.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+            val isDark = LocalDarkTheme.current
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 10.dp)
+            ) {
+                ItvTactileCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(26.dp),
+                    containerColor = if (isDark) Color(0xFF151E19) else Color.White,
+                    borderColor = ItvInkBorder,
+                    shadowColor = ItvInkShadow,
+                    borderWidth = 2.dp,
+                    shadowOffsetX = 2.dp,
+                    shadowOffsetY = 4.dp
                 ) {
-                    tabs.forEach { tab ->
-                        val selected = activeTab == tab.id
-                        Surface(
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(18.dp),
-                            color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
-                            border = BorderStroke(if (selected) 1.5.dp else 1.dp,
-                                if (selected) ItvGreen else ItvLine)
-                        ) {
-                            Column(
-                                Modifier.fillMaxWidth().clickable(role = Role.Tab) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 7.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        tabs.forEach { tab ->
+                            val selected = activeTab == tab.id
+                            ItvTactileButton(
+                                onClick = {
                                     showCoaching = false
                                     onSelectTab(tab.id)
-                                }.padding(horizontal = 2.dp, vertical = 10.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                                },
+                                modifier = Modifier.weight(1f),
+                                role = Role.Tab,
+                                shape = RoundedCornerShape(18.dp),
+                                containerColor = if (selected) {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                } else {
+                                    Color.Transparent
+                                },
+                                borderColor = if (selected) ItvInkBorder else Color.Transparent,
+                                shadowColor = if (selected) ItvInkShadow else Color.Transparent,
+                                borderWidth = if (selected) 1.6.dp else 0.dp,
+                                shadowOffsetX = if (selected) 1.dp else 0.dp,
+                                shadowOffsetY = if (selected) 2.5.dp else 0.dp
                             ) {
-                                when (tab.id) {
-                                    "records" -> SleepTabIcon(if (selected) ItvGreen else MaterialTheme.colorScheme.onSurfaceVariant)
-                                    "character" -> PuppyFaceMascot(Modifier.size(28.dp))
-                                    else -> Box(Modifier.size(28.dp), contentAlignment = Alignment.Center) {
-                                        Text(tab.mark, style = MaterialTheme.typography.titleLarge,
-                                            color = if (selected) ItvGreen else MaterialTheme.colorScheme.onSurfaceVariant)
+                                Column(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 2.dp, vertical = 8.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(3.dp)
+                                ) {
+                                    when (tab.id) {
+                                        "records" -> SleepTabIcon(if (selected) ItvGreen else MaterialTheme.colorScheme.onSurfaceVariant)
+                                        "character" -> PuppyFaceMascot(Modifier.size(28.dp))
+                                        else -> Box(Modifier.size(28.dp), contentAlignment = Alignment.Center) {
+                                            Text(tab.mark, style = MaterialTheme.typography.titleLarge,
+                                                color = if (selected) ItvGreen else MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
                                     }
+                                    Text(tab.label, style = MaterialTheme.typography.labelMedium,
+                                        textAlign = TextAlign.Center, maxLines = 1,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                        color = if (selected) ItvGreen else MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
-                                Text(tab.label, style = MaterialTheme.typography.labelMedium,
-                                    textAlign = TextAlign.Center, maxLines = 1,
-                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                                    color = if (selected) ItvGreen else MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
                     }
@@ -443,6 +518,8 @@ fun ItvMainScreen(
             }
         }
     }
+    // Piece 3: Subtle touch-passthrough foreground snow / petals / autumn leaves / summer sun glints
+    ItvSeasonalForegroundOverlay(modifier = Modifier.fillMaxSize())
     HomeSettingsDrawer(
         open = settingsOpen,
         onClose = { settingsOpen = false },
@@ -503,7 +580,7 @@ fun ItvMainScreen(
     activeStampRitual?.let { ritual ->
         DailyStampRitualOverlay(
             request = ritual,
-            overlayRootBounds = overlayRootCoords.liveBounds(),
+            overlayRootBounds = overlayRootCoordsRef[0].liveBounds(),
             resolveCellBounds = { date -> dayCellCoords[date].liveBounds() },
             onStampCommitted = {
                 if (!ritual.isTestPreview) {
@@ -639,6 +716,9 @@ private fun CharacterScreen(
                 val midSlotTop = (safeTop + safeHeight * 0.22f - slotSize / 2f).coerceAtLeast(safeTop)
                 val botSlotTop = (safeTop + safeHeight * 0.72f - slotSize / 2f).coerceAtLeast(midSlotTop + slotSize + 10.dp)
 
+                // Piece 4: Full illustrated seasonal trees & cozy ground hill behind the puppy
+                ItvCharacterSeasonalStageBackdrop(modifier = Modifier.fillMaxSize())
+
                 // 중앙 안전 무대: 5가지 표정/자세와 4초 모션이 코디 슬롯 영역 밖으로 겹치지 않도록 배치
                 Box(
                     modifier = Modifier
@@ -749,10 +829,15 @@ private fun CharacterScreen(
             Spacer(Modifier.height(8.dp))
 
             // 캐릭터 레벨 및 경험치 게이지
-            Surface(
-                shape = RoundedCornerShape(16.dp),
-                color = ItvMint,
-                border = BorderStroke(1.dp, ItvLine),
+            val isDarkExp = LocalDarkTheme.current
+            ItvTactileCard(
+                shape = RoundedCornerShape(18.dp),
+                containerColor = ItvCardSurface,
+                borderColor = ItvInkBorder,
+                shadowColor = ItvInkShadow,
+                borderWidth = 1.8.dp,
+                shadowOffsetX = 1.5.dp,
+                shadowOffsetY = 3.dp,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 20.dp)
@@ -803,7 +888,7 @@ private fun CharacterScreen(
                                 .height(6.dp)
                                 .clip(RoundedCornerShape(3.dp)),
                             color = ItvGreen,
-                            trackColor = Color.White.copy(alpha = 0.85f)
+                            trackColor = if (isDarkExp) Color(0xFF111814) else Color(0xFFE5DED2)
                         )
                     }
                 }
@@ -815,9 +900,9 @@ private fun CharacterScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(245.dp),
-            shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+            shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp),
             color = MaterialTheme.colorScheme.surface,
-            border = BorderStroke(1.dp, ItvLine),
+            border = BorderStroke(2.dp, ItvInkBorder),
             shadowElevation = 6.dp
         ) {
             Column(
@@ -984,8 +1069,8 @@ private fun CharacterScreen(
                                 modifier = Modifier
                                     .aspectRatio(1f)
                                     .clip(RoundedCornerShape(12.dp))
-                                    .background(MaterialTheme.colorScheme.surface)
-                                    .border(1.dp, ItvLine.copy(alpha = 0.5f), RoundedCornerShape(12.dp)),
+                                    .background(ItvInsetSurface)
+                                    .border(1.dp, ItvLine.copy(alpha = 0.65f), RoundedCornerShape(12.dp)),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
@@ -1022,23 +1107,28 @@ private fun PuppyMoodSelectorBar(
             val accent = stampInkColor(tier)
             val isSelected = mood == selectedMood
             val isYesterday = mood == yesterdayMood
-            val bgColor = when {
-                isSelected -> accent.copy(alpha = if (isDark) 0.24f else 0.14f)
-                else -> MaterialTheme.colorScheme.surface
+            val surfaceBase = ItvCardSurface
+            val bgColor = if (isSelected) {
+                accent.copy(alpha = if (isDark) 0.24f else 0.14f).compositeOver(surfaceBase)
+            } else {
+                surfaceBase
             }
             val borderColor = when {
                 isSelected -> accent
-                isYesterday -> accent.copy(alpha = 0.55f)
-                else -> ItvLine
+                isYesterday -> accent
+                else -> ItvInkBorder
             }
 
-            Surface(
+            ItvTactileButton(
                 onClick = { onSelectMood(mood) },
                 modifier = Modifier.weight(1f),
                 shape = RoundedCornerShape(14.dp),
-                color = bgColor,
-                border = BorderStroke(if (isSelected) 1.5.dp else 1.dp, borderColor),
-                shadowElevation = if (isSelected) 2.dp else 0.dp
+                containerColor = bgColor,
+                borderColor = borderColor,
+                shadowColor = if (isSelected) accent else ItvInkShadow,
+                borderWidth = if (isSelected) 1.8.dp else 1.3.dp,
+                shadowOffsetX = 1.dp,
+                shadowOffsetY = if (isSelected) 3.dp else 2.dp
             ) {
                 Box(
                     modifier = Modifier
@@ -1096,16 +1186,16 @@ private fun EquipSlotCard(
     isSelected: Boolean,
     onClick: () -> Unit
 ) {
-    Surface(
+    ItvTactileButton(
         onClick = onClick,
-        modifier = Modifier.size(54.dp, 54.dp),
+        modifier = Modifier.size(56.dp, 56.dp),
         shape = RoundedCornerShape(14.dp),
-        color = if (isSelected) ItvMint else MaterialTheme.colorScheme.surface,
-        border = BorderStroke(
-            if (isSelected) 2.dp else 1.2.dp,
-            if (isSelected) ItvGreen else (if (equippedItem != null) ItvGreen.copy(alpha = 0.6f) else ItvLine)
-        ),
-        shadowElevation = if (isSelected) 3.dp else 1.dp
+        containerColor = if (isSelected) ItvMint else MaterialTheme.colorScheme.surface,
+        borderColor = if (isSelected) ItvGreen else ItvInkBorder,
+        shadowColor = if (isSelected) ItvGreen else ItvInkShadow,
+        borderWidth = if (isSelected) 2.dp else 1.5.dp,
+        shadowOffsetX = 1.dp,
+        shadowOffsetY = 2.5.dp
     ) {
         Box(
             modifier = Modifier.fillMaxSize().padding(4.dp),
@@ -1208,17 +1298,17 @@ private fun HomeSettingsDrawer(
             exit = slideOutHorizontally(tween(240)) { it }) {
             Surface(Modifier.width(panelWidth).fillMaxHeight(),
                 shape = RoundedCornerShape(topStart = 26.dp, bottomStart = 26.dp),
-                color = ItvMint, border = BorderStroke(1.dp, ItvLine), shadowElevation = 4.dp) {
+                color = MaterialTheme.colorScheme.background, border = BorderStroke(2.dp, ItvInkBorder), shadowElevation = 8.dp) {
                 Column(Modifier.fillMaxSize().clickable(
                     interactionSource = remember { MutableInteractionSource() }, indication = null
                 ) {}.verticalScroll(rememberScrollState()).padding(20.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    verticalArrangement = Arrangement.spacedBy(14.dp)) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Text("설정", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.Bold, color = ItvGreen)
-                        TextButton(onClick = onClose) { Text("닫기", color = ItvGreen) }
+                        TextButton(onClick = onClose) { Text("닫기", color = ItvGreen, fontWeight = FontWeight.Bold) }
                     }
-                    HorizontalDivider(color = ItvLine)
+                    HorizontalDivider(thickness = 1.5.dp, color = ItvInkBorder.copy(alpha = 0.35f))
                     DrawerSettingItem("계정 관리", "로그인 상태 확인, 소셜 연동, 계정 삭제") {
                         onClose()
                         onOpenAccountSettings()
@@ -1233,6 +1323,14 @@ private fun HomeSettingsDrawer(
                         if (isDarkThemeActive) "현재 어두운 화면 사용 중 · 탭하여 라이트 모드로 전환" else "현재 밝은 화면 사용 중 · 탭하여 다크 모드로 전환"
                     ) {
                         UserThemeStore.toggleDarkMode(context)
+                    }
+                    val currentSeasonMode = UserThemeStore.rememberSeasonMode()
+                    val resolvedSeason = UserThemeStore.resolveActiveSeason(currentSeasonMode)
+                    DrawerSettingItem(
+                        "계절 배경: ${currentSeasonMode.label} (${resolvedSeason.emoji})",
+                        "현재 ${resolvedSeason.label} 분위기 적용 중 · 탭하여 계절 전환"
+                    ) {
+                        UserThemeStore.cycleSeasonMode(context)
                     }
                     if (com.example.itv.infrastructure.jev.JevFeature.available()) DrawerSettingItem("Jev 공동 테스트", "임계값·수동 요청·판단 기록·평가") {
                         onClose()
@@ -1261,16 +1359,23 @@ private fun HomeSettingsDrawer(
 
 @Composable
 private fun DrawerSettingItem(title: String, detail: String, onClick: () -> Unit) {
-    Surface(onClick = onClick, modifier = Modifier.fillMaxWidth(),
+    ItvTactileButton(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.75f),
-        border = BorderStroke(1.dp, ItvLine)) {
-        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+        containerColor = ItvCardSurface,
+        borderColor = ItvInkBorder,
+        shadowColor = ItvInkShadow,
+        borderWidth = 1.6.dp,
+        shadowOffsetX = 1.5.dp,
+        shadowOffsetY = 3.dp
+    ) {
+        Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                 Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = ItvGreen)
                 Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Text("›", style = MaterialTheme.typography.titleLarge, color = ItvGreen)
+            Text("›", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = ItvGreen)
         }
     }
 }

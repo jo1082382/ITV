@@ -85,6 +85,12 @@ internal object ReelsProbe {
     fun sample(): Set<String>? =
         latest.takeIf { it.isNotEmpty() && SystemClock.elapsedRealtime() - latestAt < 60_000L }
 
+    fun resetSwipeCounts() {
+        candidates = 0
+        lastRunCandidates = 0
+        SwipeDynamicsTracker.reset(ShortformApp.INSTAGRAM)
+    }
+
     fun reset() {
         frameKnown = false
         frameAt = 0L

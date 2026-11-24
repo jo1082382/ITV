@@ -18,8 +18,11 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import com.example.itv.R
 import com.example.itv.domain.coaching.UserPosture
+import com.example.itv.domain.jev.JevCandidatePolicy
 import com.example.itv.domain.jev.JevSettings
+import com.example.itv.infrastructure.jev.JevFeature
 import com.example.itv.infrastructure.jev.JevObservationHub
+import com.example.itv.infrastructure.jev.JevRuntime
 import com.example.itv.infrastructure.observation.AudioPipelineKind
 import com.example.itv.infrastructure.observation.GeneralAppTracker
 import com.example.itv.infrastructure.observation.InferredAppCategory
@@ -30,14 +33,19 @@ import com.example.itv.infrastructure.observation.instagram.InstagramScreenMode
 import com.example.itv.infrastructure.observation.instagram.InstagramTracker
 import com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker
 import com.example.itv.infrastructure.observation.youtube.YoutubeWatchMode
+import com.example.itv.presentation.components.PuppyMood
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /**
  * YouTube, Instagram 및 휴대폰의 모든 앱 화면 위에서 실시간 감지 상태
@@ -68,7 +76,13 @@ object LongformDiagnosticHud {
     private var basisText: TextView? = null
     private var timerText: TextView? = null
     private var eligibilityText: TextView? = null
+    private var jevProbText: TextView? = null
     private var eventText: TextView? = null
+
+    private var lastAppliedIconKey: String? = null
+
+    var previewMoodOverride: PuppyMood? = null
+        private set
 
     var isShowing: Boolean = false
         private set
@@ -79,11 +93,26 @@ object LongformDiagnosticHud {
     var isSleeping: Boolean = false
         private set
 
+    var currentProbabilityMood: PuppyMood? = null
+        private set
+
+    /**
+     * 테스트/미리보기용으로 5단계 표정을 강제 지정하거나 해제(null)합니다.
+     */
+    fun setPreviewMoodOverride(context: Context, mood: PuppyMood?) {
+        previewMoodOverride = mood
+        lastAppliedIconKey = null
+        if (isShowing) {
+            renderHud(context.applicationContext)
+        }
+    }
+
     /**
      * 야간 연속 사용 예산 초과 시 눈 감은 강아지(수면) 얼굴로 아이콘 및 테마를 전환합니다.
      */
     fun setSleepingState(sleeping: Boolean) {
         isSleeping = sleeping
+        lastAppliedIconKey = null
         val icon = collapsedIconImageView
         val mini = miniIconImageView
         val statusDot = collapsedStatusDotDrawable
@@ -92,6 +121,7 @@ object LongformDiagnosticHud {
         if (sleeping) {
             icon?.setImageResource(R.drawable.itv_motion_sleep)
             mini?.setImageResource(R.drawable.itv_motion_sleep)
+            lastAppliedIconKey = "SLEEP"
             val sleepColor = Color.parseColor("#B197FC")
             statusDot?.setColor(sleepColor)
             border?.setStroke((2.5f * density).toInt(), sleepColor)
@@ -100,12 +130,23 @@ object LongformDiagnosticHud {
                 modeText?.setTextColor(sleepColor)
             }
         } else {
-            if (defaultAppIconDrawable != null) {
+            val ctx = rootContainer?.context?.applicationContext
+            if (ctx != null && isShowing) {
+                renderHud(ctx)
+            } else if (ctx != null) {
+                val fallbackMood = previewMoodOverride ?: PuppyMood.BRIGHT
+                val bmp = HudPuppyFaceRenderer.getFaceBitmap(ctx, fallbackMood)
+                icon?.setImageBitmap(bmp)
+                mini?.setImageBitmap(bmp)
+                lastAppliedIconKey = "MOOD_${fallbackMood.name}"
+            } else if (defaultAppIconDrawable != null) {
                 icon?.setImageDrawable(defaultAppIconDrawable)
                 mini?.setImageDrawable(defaultAppIconDrawable)
+                lastAppliedIconKey = "DEFAULT"
             } else {
                 icon?.setImageResource(R.drawable.itv_puppy_face)
                 mini?.setImageResource(R.drawable.itv_puppy_face)
+                lastAppliedIconKey = "DEFAULT"
             }
         }
     }
@@ -121,10 +162,60 @@ object LongformDiagnosticHud {
         UserPosture.UNKNOWN -> "측정중"
     }
 
+    fun isOverlayPermissionGranted(context: Context): Boolean =
+        Settings.canDrawOverlays(context)
+
+    fun isAccessibilityPermissionGranted(context: Context): Boolean {
+        return try {
+            val enabled = Settings.Secure.getInt(
+                context.contentResolver,
+                Settings.Secure.ACCESSIBILITY_ENABLED,
+                0
+            ) == 1
+            if (!enabled) return false
+            val services = Settings.Secure.getString(
+                context.contentResolver,
+                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+            )
+            if (services != null) {
+                services.contains(context.packageName)
+            } else {
+                WritingGuard.connected
+            }
+        } catch (_: Exception) {
+            WritingGuard.connected
+        }
+    }
+
+    fun hasRequiredPermissions(context: Context): Boolean =
+        isOverlayPermissionGranted(context) && isAccessibilityPermissionGranted(context)
+
+    fun missingPermissionSummary(context: Context): String {
+        val overlayOk = isOverlayPermissionGranted(context)
+        val accessOk = isAccessibilityPermissionGranted(context)
+        return when {
+            !overlayOk && !accessOk -> "접근성 서비스와 다른 앱 위에 표시 권한을 모두 켜야 HUD를 사용할 수 있습니다."
+            !accessOk -> "접근성 서비스 권한을 켜야 HUD를 사용할 수 있습니다."
+            !overlayOk -> "다른 앱 위에 표시 권한을 켜야 HUD를 사용할 수 있습니다."
+            else -> ""
+        }
+    }
+
+    fun hideIfPermissionsRevoked(context: Context): Boolean {
+        if (isShowing && !hasRequiredPermissions(context)) {
+            hide()
+            return true
+        }
+        return false
+    }
+
     @SuppressLint("ClickableViewAccessibility", "SetTextI18n")
     fun show(context: Context): Boolean {
+        if (!hasRequiredPermissions(context)) {
+            if (isShowing) hide()
+            return false
+        }
         if (isShowing) return true
-        if (!Settings.canDrawOverlays(context)) return false
 
         val appCtx = context.applicationContext
         val wm = appCtx.getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: return false
@@ -179,13 +270,14 @@ object LongformDiagnosticHud {
             }
             outlineProvider = ViewOutlineProvider.BACKGROUND
             clipToOutline = true
-            scaleType = ImageView.ScaleType.FIT_CENTER
+            scaleType = ImageView.ScaleType.CENTER_CROP
             if (isSleeping) {
                 setImageResource(R.drawable.itv_motion_sleep)
-            } else if (appIconDrawable != null) {
-                setImageDrawable(appIconDrawable)
+                lastAppliedIconKey = "SLEEP"
             } else {
-                setImageResource(R.drawable.itv_puppy_face)
+                val initialMood = previewMoodOverride ?: PuppyMood.BRIGHT
+                setImageBitmap(HudPuppyFaceRenderer.getFaceBitmap(appCtx, initialMood))
+                lastAppliedIconKey = "MOOD_${initialMood.name}"
             }
         }
         collapsedIconImageView = iconImage
@@ -255,16 +347,21 @@ object LongformDiagnosticHud {
         }
 
         val miniIcon = ImageView(appCtx).apply {
-            layoutParams = LinearLayout.LayoutParams(18.dp(), 18.dp()).apply {
+            layoutParams = LinearLayout.LayoutParams(20.dp(), 20.dp()).apply {
                 rightMargin = 6.dp()
             }
-            scaleType = ImageView.ScaleType.FIT_CENTER
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.parseColor("#EAF5EF"))
+            }
+            outlineProvider = ViewOutlineProvider.BACKGROUND
+            clipToOutline = true
+            scaleType = ImageView.ScaleType.CENTER_CROP
             if (isSleeping) {
                 setImageResource(R.drawable.itv_motion_sleep)
-            } else if (appIconDrawable != null) {
-                setImageDrawable(appIconDrawable)
             } else {
-                setImageResource(R.drawable.itv_puppy_face)
+                val initialMood = previewMoodOverride ?: PuppyMood.BRIGHT
+                setImageBitmap(HudPuppyFaceRenderer.getFaceBitmap(appCtx, initialMood))
             }
         }
         miniIconImageView = miniIcon
@@ -347,6 +444,18 @@ object LongformDiagnosticHud {
             setPadding(0, 1.dp(), 0, 2.dp())
         }
         card.addView(eligibilityText)
+
+        // 2-5b. Jev 확률 vs 우리 앱 기준 확률 차이 및 5단계 표정 상태 줄
+        jevProbText = TextView(appCtx).apply {
+            textSize = 10.5f
+            setTextColor(Color.parseColor("#B0BEC5"))
+            text = ""
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(0, 1.dp(), 0, 2.dp())
+            visibility = View.GONE
+        }
+        card.addView(jevProbText)
 
         // 2-6. 최근 전환 이벤트 한 줄 요약
         eventText = TextView(appCtx).apply {
@@ -468,9 +577,29 @@ object LongformDiagnosticHud {
         scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
         scope?.launch {
             while (isActive) {
+                if (!hasRequiredPermissions(appCtx)) {
+                    hide()
+                    break
+                }
                 renderHud(appCtx)
                 // 아이콘으로 접혀 있을 때는 갱신 주기를 800ms로 늦춰 더욱 가볍게 유지
                 delay(if (isExpanded) 400L else 800L)
+            }
+        }
+        // 실제 Jev 호출로 새 확률이 도착하면 주기 대기 없이 즉시(0ms 지연) 표정·퍼센트 갱신
+        scope?.launch {
+            try {
+                JevRuntime.get(appCtx).state
+                    .map { it.probability }
+                    .drop(1)
+                    .distinctUntilChanged()
+                    .collect {
+                        if (isShowing) {
+                            renderHud(appCtx)
+                        }
+                    }
+            } catch (_: Exception) {
+                // JevRuntime 미초기화 환경 무시
             }
         }
 
@@ -555,13 +684,87 @@ object LongformDiagnosticHud {
         collapsedBorderDrawable?.setStroke((2.5f * dp).toInt(), statusColor)
         collapsedStatusDotDrawable?.setColor(statusColor)
 
+        // Jev 확률 vs 우리 앱 보정 기준 확률 차이에 따른 5단계 표정 계산 (순수 인메모리 StateFlow 조회)
+        val jevRuntime = if (JevFeature.available()) runCatching { JevRuntime.get(appCtx) }.getOrNull() else null
+        val jevEnabled = jevRuntime?.enabled == true
+        val jevState = jevRuntime?.state?.value
+        val jevSettings = jevRuntime?.store?.settings?.value
+        val jevProb = jevState?.probability
+        val effThreshold = jevSettings?.let {
+            JevCandidatePolicy.effectiveThreshold(it, jevState?.context ?: jevRuntime.lastObservedContext)
+        }
+        val liveProbabilityMood = if (jevEnabled && jevProb != null && effThreshold != null) {
+            resolveHudMoodForProbabilityGap(jevProb, effThreshold)
+        } else {
+            null
+        }
+        // 기본 표정은 1단계 해맑(BRIGHT)으로 시작하고, Jev 확률이 측정되면 차이에 따라 5단계 자동 전환
+        val activeMood = previewMoodOverride ?: liveProbabilityMood ?: PuppyMood.BRIGHT
+        currentProbabilityMood = activeMood
+
+        // 아이콘 우선순위: 1) 야간 수면 대기(isSleeping) -> 2) 5단계 표정(기본 BRIGHT / 실시간 Jev 차이 / 테스트)
         if (isSleeping) {
-            collapsedIconImageView?.setImageResource(R.drawable.itv_motion_sleep)
-            miniIconImageView?.setImageResource(R.drawable.itv_motion_sleep)
+            if (lastAppliedIconKey != "SLEEP") {
+                collapsedIconImageView?.setImageResource(R.drawable.itv_motion_sleep)
+                miniIconImageView?.setImageResource(R.drawable.itv_motion_sleep)
+                lastAppliedIconKey = "SLEEP"
+            }
+        } else {
+            val key = "MOOD_${activeMood.name}"
+            if (lastAppliedIconKey != key) {
+                val faceBitmap = HudPuppyFaceRenderer.getFaceBitmap(appCtx, activeMood)
+                collapsedIconImageView?.setImageBitmap(faceBitmap)
+                miniIconImageView?.setImageBitmap(faceBitmap)
+                lastAppliedIconKey = key
+            }
         }
 
         // 아이콘으로 접혀 있는 상태라면 텍스트 뷰 렌더링 생략 (배터리 절약)
         if (!isExpanded) return
+
+        // 펼침 카드 내 Jev 확률 vs 우리 앱 기준 확률 차이 표시 갱신
+        when {
+            previewMoodOverride != null -> {
+                val m = previewMoodOverride!!
+                jevProbText?.visibility = View.VISIBLE
+                jevProbText?.text = "🐾 HUD 테스트: ${HudPuppyFaceRenderer.stageLabel(m)} (${HudPuppyFaceRenderer.gapRangeLabel(m)})"
+                jevProbText?.setTextColor(HudPuppyFaceRenderer.accentColorInt(m))
+            }
+            jevEnabled && jevProb != null && effThreshold != null && liveProbabilityMood != null -> {
+                val jevPct = (jevProb * 100.0).roundToInt()
+                val thrPct = (effThreshold * 100.0).roundToInt()
+                val gapPct = ((effThreshold - jevProb) * 100.0).roundToInt()
+                val gapDesc = when {
+                    gapPct > 0 -> "여유 $gapPct%p"
+                    gapPct == 0 -> "기준 도달 0%p"
+                    else -> "초과 +${-gapPct}%p"
+                }
+                jevProbText?.visibility = View.VISIBLE
+                jevProbText?.text = "🐾 ${HudPuppyFaceRenderer.stageLabel(liveProbabilityMood)} · Jev $jevPct% vs 기준 $thrPct% ($gapDesc)"
+                jevProbText?.setTextColor(HudPuppyFaceRenderer.accentColorInt(liveProbabilityMood))
+            }
+            jevEnabled && effThreshold != null -> {
+                val thrPct = (effThreshold * 100.0).roundToInt()
+                val tokenConfigured = jevRuntime.store.tokenConfigured.value
+                val consentGranted = jevSettings.collectionConsent
+                val liveStatus = jevState?.status.orEmpty()
+                val statusHint = when {
+                    !tokenConfigured -> "테스트 토큰 미등록 (Jev 테스트 > 연결에서 입력 필요)"
+                    !consentGranted -> "외부 전송 동의 필요"
+                    CoachingAutoStart.testModeEnabled(appCtx) -> "30초 테스트 모드 켜짐 (Jev 자동 호출 일시 중지)"
+                    liveStatus.isNotBlank() && liveStatus != "Jev 꺼짐" -> liveStatus
+                    else -> "첫 Jev 확률 측정 전"
+                }
+                val isBlockedHint = !tokenConfigured || !consentGranted || CoachingAutoStart.testModeEnabled(appCtx) ||
+                    liveStatus.contains("보류")
+                jevProbText?.visibility = View.VISIBLE
+                jevProbText?.text = "🐾 기준 $thrPct% · $statusHint"
+                jevProbText?.setTextColor(Color.parseColor(if (isBlockedHint) "#FFD166" else "#B0BEC5"))
+            }
+            else -> {
+                jevProbText?.visibility = View.GONE
+            }
+        }
 
         val ambient = try {
             LightAndBrightnessTracker.getInstance(appCtx).snapshot.value
@@ -790,6 +993,9 @@ object LongformDiagnosticHud {
         collapsedIconImageView = null
         miniIconImageView = null
         defaultAppIconDrawable = null
+        lastAppliedIconKey = null
+        currentProbabilityMood = null
+        previewMoodOverride = null
         isSleeping = false
         expandedView = null
         layoutParams = null
@@ -799,6 +1005,7 @@ object LongformDiagnosticHud {
         basisText = null
         timerText = null
         eligibilityText = null
+        jevProbText = null
         eventText = null
         isExpanded = false
         isShowing = false

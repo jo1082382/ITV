@@ -1,0 +1,288 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default deny everything unless explicitly matched and validated below.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Authentication & Authorization Helpers
+    // -------------------------------------------------------------------------
+    function isAuthenticated() {
+      return request.auth != null
+        && request.auth.uid is string
+        && request.auth.uid.size() > 0
+        && request.auth.uid.size() <= 128;
+    }
+
+    // Guest (anonymous) sessions stay strictly on-device until linked to Google/Kakao/Naver.
+    function isSocialUser() {
+      return isAuthenticated()
+        && request.auth.token.firebase.sign_in_provider != 'anonymous';
+    }
+
+    function isOwner(userId) {
+      return isSocialUser() && request.auth.uid == userId;
+    }
+
+    function isValidEpochMs(val) {
+      return val is int && val >= 1577836800000 && val <= 4102444800000;
+    }
+
+    function isValidOptionalString(val, maxLen) {
+      return val == null || (val is string && val.size() <= maxLen);
+    }
+
+    function isValidOptionalInt(val, minVal, maxVal) {
+      return val == null || (val is int && val >= minVal && val <= maxVal);
+    }
+
+    function isValidYearMonthId(ym) {
+      return ym is string && ym.matches('^[0-9]{4}-(0[1-9]|1[0-2])$');
+    }
+
+    // -------------------------------------------------------------------------
+    // Domain Schema Validators (called on BOTH create AND update)
+    // -------------------------------------------------------------------------
+    function isValidUserRoot(data) {
+      return data.keys().hasOnly([
+          'provider',
+          'displayName',
+          'email',
+          'schemaVersion',
+          'createdAt',
+          'updatedAt',
+          'lastBackupAt'
+        ])
+        && data.keys().hasAll([
+          'provider',
+          'displayName',
+          'email',
+          'schemaVersion',
+          'createdAt',
+          'updatedAt',
+          'lastBackupAt'
+        ])
+        && data.provider is string
+        && data.provider in ['GOOGLE', 'KAKAO', 'NAVER']
+        && isValidOptionalString(data.displayName, 100)
+        && isValidOptionalString(data.email, 254)
+        && data.schemaVersion is int
+        && data.schemaVersion >= 1 && data.schemaVersion <= 10
+        && isValidEpochMs(data.createdAt)
+        && isValidEpochMs(data.updatedAt)
+        && isValidEpochMs(data.lastBackupAt);
+    }
+
+    function isValidProfileState(data) {
+      return data.keys().hasOnly([
+          'schemaVersion',
+          'updatedAt',
+          'rewardTotalExp',
+          'rewardPoints',
+          'rewardTotalMissions',
+          'equippedSlotsJson',
+          'stampedDatesJson',
+          'selectedCharacterId',
+          'darkMode',
+          'coachingInterventionType',
+          'coachingIntensity',
+          'characterIntensity',
+          'coachingTone',
+          'bedtimeCareEnabled',
+          'customBedtimeHour',
+          'customBedtimeMinute',
+          'goalsJson',
+          'sleepConfirmationsJson',
+          'bedtimeMemoContent',
+          'bedtimeMemoSavedAt',
+          'bedtimeMemoPending'
+        ])
+        && data.keys().hasAll([
+          'schemaVersion',
+          'updatedAt',
+          'rewardTotalExp',
+          'rewardPoints',
+          'rewardTotalMissions',
+          'equippedSlotsJson',
+          'stampedDatesJson',
+          'selectedCharacterId',
+          'darkMode',
+          'coachingInterventionType',
+          'coachingIntensity',
+          'characterIntensity',
+          'coachingTone',
+          'bedtimeCareEnabled',
+          'customBedtimeHour',
+          'customBedtimeMinute',
+          'goalsJson',
+          'sleepConfirmationsJson',
+          'bedtimeMemoContent',
+          'bedtimeMemoSavedAt',
+          'bedtimeMemoPending'
+        ])
+        && data.schemaVersion is int
+        && data.schemaVersion >= 1 && data.schemaVersion <= 10
+        && isValidEpochMs(data.updatedAt)
+        && data.rewardTotalExp is int
+        && data.rewardTotalExp >= 0 && data.rewardTotalExp <= 100000000
+        && data.rewardPoints is int
+        && data.rewardPoints >= 0 && data.rewardPoints <= 100000000
+        && data.rewardTotalMissions is int
+        && data.rewardTotalMissions >= 0 && data.rewardTotalMissions <= 1000000
+        && data.equippedSlotsJson is string && data.equippedSlotsJson.size() <= 2048
+        && data.stampedDatesJson is string && data.stampedDatesJson.size() <= 4096
+        && data.selectedCharacterId is string && data.selectedCharacterId.size() <= 64
+        && data.darkMode is bool
+        && data.coachingInterventionType is string && data.coachingInterventionType.size() <= 40
+        && data.coachingIntensity is string && data.coachingIntensity.size() <= 40
+        && data.characterIntensity is string && data.characterIntensity.size() <= 40
+        && data.coachingTone is string && data.coachingTone.size() <= 40
+        && data.bedtimeCareEnabled is bool
+        && isValidOptionalInt(data.customBedtimeHour, 0, 23)
+        && isValidOptionalInt(data.customBedtimeMinute, 0, 59)
+        && data.goalsJson is string && data.goalsJson.size() <= 16384
+        && data.sleepConfirmationsJson is string && data.sleepConfirmationsJson.size() <= 65536
+        && isValidOptionalString(data.bedtimeMemoContent, 2000)
+        && (data.bedtimeMemoSavedAt == null || (data.bedtimeMemoSavedAt is int && data.bedtimeMemoSavedAt >= 0 && data.bedtimeMemoSavedAt <= 4102444800000))
+        && data.bedtimeMemoPending is bool;
+    }
+
+    function isValidMonthlyArchive(yearMonth, data) {
+      return isValidYearMonthId(yearMonth)
+        && data.keys().hasOnly([
+          'yearMonth',
+          'schemaVersion',
+          'updatedAt',
+          'activeDays',
+          'totalPhoneMs',
+          'shortformTotalMs',
+          'dailyRecordsJson'
+        ])
+        && data.keys().hasAll([
+          'yearMonth',
+          'schemaVersion',
+          'updatedAt',
+          'activeDays',
+          'totalPhoneMs',
+          'shortformTotalMs',
+          'dailyRecordsJson'
+        ])
+        && data.yearMonth == yearMonth
+        && data.schemaVersion is int
+        && data.schemaVersion >= 1 && data.schemaVersion <= 10
+        && isValidEpochMs(data.updatedAt)
+        && data.activeDays is int && data.activeDays >= 0 && data.activeDays <= 31
+        && data.totalPhoneMs is int && data.totalPhoneMs >= 0 && data.totalPhoneMs <= 2678400000
+        && data.shortformTotalMs is int && data.shortformTotalMs >= 0 && data.shortformTotalMs <= 2678400000
+        && data.dailyRecordsJson is string && data.dailyRecordsJson.size() <= 400000;
+    }
+
+    function isValidShortformSessions(yearMonth, data) {
+      return isValidYearMonthId(yearMonth)
+        && data.keys().hasOnly([
+          'yearMonth',
+          'schemaVersion',
+          'updatedAt',
+          'sessionCount',
+          'sessionsJson'
+        ])
+        && data.keys().hasAll([
+          'yearMonth',
+          'schemaVersion',
+          'updatedAt',
+          'sessionCount',
+          'sessionsJson'
+        ])
+        && data.yearMonth == yearMonth
+        && data.schemaVersion is int
+        && data.schemaVersion >= 1 && data.schemaVersion <= 10
+        && isValidEpochMs(data.updatedAt)
+        && data.sessionCount is int && data.sessionCount >= 0 && data.sessionCount <= 1500
+        && data.sessionsJson is string && data.sessionsJson.size() <= 400000;
+    }
+
+    function isValidShortformDaily(yearMonth, data) {
+      return isValidYearMonthId(yearMonth)
+        && data.keys().hasOnly([
+          'yearMonth',
+          'schemaVersion',
+          'updatedAt',
+          'recordCount',
+          'recordsJson'
+        ])
+        && data.keys().hasAll([
+          'yearMonth',
+          'schemaVersion',
+          'updatedAt',
+          'recordCount',
+          'recordsJson'
+        ])
+        && data.yearMonth == yearMonth
+        && data.schemaVersion is int
+        && data.schemaVersion >= 1 && data.schemaVersion <= 10
+        && isValidEpochMs(data.updatedAt)
+        && data.recordCount is int && data.recordCount >= 0 && data.recordCount <= 500
+        && data.recordsJson is string && data.recordsJson.size() <= 200000;
+    }
+
+    // -------------------------------------------------------------------------
+    // User Data Tree (Strict per-user isolation, no cross-user access)
+    // -------------------------------------------------------------------------
+    match /users/{userId} {
+      // Allow get only (never list all users)
+      allow get: if isOwner(userId);
+      allow list: if false;
+      allow create: if isOwner(userId) && isValidUserRoot(request.resource.data);
+      allow update: if isOwner(userId)
+        && isValidUserRoot(request.resource.data)
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.provider == resource.data.provider;
+      allow delete: if isOwner(userId);
+
+      match /profile/{profileId} {
+        allow read: if isOwner(userId) && profileId == 'state';
+        allow create: if isOwner(userId)
+          && profileId == 'state'
+          && isValidProfileState(request.resource.data);
+        allow update: if isOwner(userId)
+          && profileId == 'state'
+          && isValidProfileState(request.resource.data);
+        allow delete: if isOwner(userId) && profileId == 'state';
+      }
+
+      match /monthly_archives/{yearMonth} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId)
+          && isValidMonthlyArchive(yearMonth, request.resource.data);
+        allow update: if isOwner(userId)
+          && isValidMonthlyArchive(yearMonth, request.resource.data)
+          && request.resource.data.yearMonth == resource.data.yearMonth;
+        allow delete: if isOwner(userId);
+      }
+
+      match /shortform_sessions/{yearMonth} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId)
+          && isValidShortformSessions(yearMonth, request.resource.data);
+        allow update: if isOwner(userId)
+          && isValidShortformSessions(yearMonth, request.resource.data)
+          && request.resource.data.yearMonth == resource.data.yearMonth;
+        allow delete: if isOwner(userId);
+      }
+
+      match /shortform_daily/{yearMonth} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId)
+          && isValidShortformDaily(yearMonth, request.resource.data);
+        allow update: if isOwner(userId)
+          && isValidShortformDaily(yearMonth, request.resource.data)
+          && request.resource.data.yearMonth == resource.data.yearMonth;
+        allow delete: if isOwner(userId);
+      }
+    }
+  }
+}

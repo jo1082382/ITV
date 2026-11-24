@@ -9,6 +9,8 @@ import androidx.compose.ui.platform.LocalContext
 import com.example.itv.MainActivity
 import androidx.lifecycle.ViewModelProvider
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -21,9 +23,12 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.itv.domain.coaching.RestMissionCatalog
@@ -77,7 +82,7 @@ private fun JevTestScreen(vm: JevTestViewModel,onBack: ()->Unit,modifier: Modifi
         Text("Jev 공동 테스트",Modifier.padding(horizontal=20.dp),style=MaterialTheme.typography.headlineSmall,
             fontWeight=FontWeight.Bold,color=ItvGreen)
         PrimaryScrollableTabRow(selectedTabIndex=page,edgePadding=12.dp) {
-            listOf("연결","판단 설정","개입 기록","실시간 측정 테스트","파지 각도·목 부담 감지").forEachIndexed { i,title ->
+            listOf("연결","판단 설정","개입 기록","실시간 측정 테스트","카테고리 확률 테스트","파지 각도·목 부담 감지").forEachIndexed { i,title ->
                 Tab(selected=page==i,onClick={page=i},text={Text(title)})
             }
         }
@@ -93,6 +98,7 @@ private fun JevTestScreen(vm: JevTestViewModel,onBack: ()->Unit,modifier: Modifi
                     1 -> SettingsPage(vm,s,busy)
                     2 -> InterventionHistoryPage()
                     3 -> ObservationTestPage(vm,busy)
+                    4 -> CategoryProbabilityTestPage(vm,s,busy)
                     else -> PostureTestPage(busy)
                 }
             }
@@ -100,7 +106,7 @@ private fun JevTestScreen(vm: JevTestViewModel,onBack: ()->Unit,modifier: Modifi
     }
 }
 @Composable
-private fun TestSection(title: String,content: @Composable ColumnScope.()->Unit) {
+internal fun TestSection(title: String,content: @Composable ColumnScope.()->Unit) {
     Card(Modifier.fillMaxWidth(),shape=RoundedCornerShape(20.dp),border=BorderStroke(1.dp,ItvLine),
         colors=CardDefaults.cardColors(containerColor=ItvMint)) {
         Column(Modifier.padding(18.dp),verticalArrangement=Arrangement.spacedBy(10.dp)) {
@@ -110,7 +116,7 @@ private fun TestSection(title: String,content: @Composable ColumnScope.()->Unit)
     }
 }
 @Composable
-private fun CompactCheckGroup(title: String, content: @Composable ColumnScope.() -> Unit) {
+internal fun CompactCheckGroup(title: String, content: @Composable ColumnScope.() -> Unit) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(14.dp),
@@ -127,7 +133,7 @@ private fun CompactCheckGroup(title: String, content: @Composable ColumnScope.()
     }
 }
 @Composable
-private fun CompactCheckRow(label: String, value: String, highlight: Boolean = false) {
+internal fun CompactCheckRow(label: String, value: String, highlight: Boolean = false) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -304,110 +310,120 @@ private fun SettingsPage(vm: JevTestViewModel,s: JevSettings,busy: Boolean) {
 
 /** Frozen measurement used for the probability check; changes only when the user presses refresh. */
 private data class ProbabilitySnapshot(
-    val app: String, val sessionId: String, val totalMs: Long,
-    val continuousMs: Long, val continuousLive: Boolean,
-    val swipes: Int, val swipesLive: Boolean,
-    val returns: Int, val bedtime: Int?, val takenAt: Long,
+    val sessionId: String,
+    val totalMs: Long,
+    val continuousMs: Long,
+    val continuousLive: Boolean,
+    val swipes: Int,
+    val returns: Int,
+    val bedtime: Int?,
+    val takenAt: Long,
     val enrichedContext: JevContext,
-    val liveProbability: Double?, val latestTrialProbability: Double?, val latestTrialSource: String?,
-    val latestLiveProbability: Double?, val latestLiveCreatedAt: Long?,
+    val liveProbability: Double?,
+    val latestTrialProbability: Double?,
+    val latestTrialSource: String?,
+    val latestLiveProbability: Double?,
+    val latestLiveCreatedAt: Long?,
     val latestLiveTrial: JevTrial?,
-    val displayBlockingReason: String?
+    val displayBlockingReason: String?,
+    val ambientSnapshot: com.example.itv.infrastructure.observation.AmbientSnapshot,
+    val bedtimeCareEnabled: Boolean,
+    val appSuppression: JevAppSuppressionInfo,
+    val additionalViewingNeededSeconds: Long,
+    val tokenConfigured: Boolean,
+    val isTestModeOn: Boolean,
+    val canDrawOverlays: Boolean
 ) {
     fun context() = enrichedContext
 }
 
-private fun takeProbabilitySnapshot(vm: JevTestViewModel, app: String, trials: List<JevTrial>): ProbabilitySnapshot {
-    val isAll = app == "ALL"
+private fun takeProbabilitySnapshot(
+    context: android.content.Context,
+    vm: JevTestViewModel,
+    trials: List<JevTrial>
+): ProbabilitySnapshot {
     val allSession = vm.runtime.sessionState("ALL")
-    val session = if (isAll) allSession else vm.runtime.sessionState(app)
     val ytSession = vm.runtime.sessionState(JevSettings.YOUTUBE)
     val igSession = vm.runtime.sessionState(JevSettings.INSTAGRAM)
     val devStatus = com.example.itv.domain.coaching.DeveloperStatus.value
 
-    val swipesNow = when (app) {
-        JevSettings.YOUTUBE -> YoutubeProbe.candidates
-        JevSettings.INSTAGRAM -> ReelsProbe.candidates
-        else -> YoutubeProbe.candidates + ReelsProbe.candidates
-    }
-    val swipesLast = when (app) {
-        JevSettings.YOUTUBE -> YoutubeProbe.lastRunCandidates
-        JevSettings.INSTAGRAM -> ReelsProbe.lastRunCandidates
-        else -> YoutubeProbe.lastRunCandidates + ReelsProbe.lastRunCandidates
-    }
-    val continuousUnified = devStatus.usedMs
+    val swipesNow = YoutubeProbe.candidates + ReelsProbe.candidates
+    val swipesLast = YoutubeProbe.lastRunCandidates + ReelsProbe.lastRunCandidates
+
     val allC = allSession?.continuousMs ?: 0L
     val sumC = (ytSession?.continuousMs ?: 0L) + (igSession?.continuousMs ?: 0L)
-    val continuousNow = when (app) {
-        JevSettings.YOUTUBE -> ytSession?.continuousMs ?: 0L
-        JevSettings.INSTAGRAM -> igSession?.continuousMs ?: 0L
-        "ALL" -> maxOf(allC, maxOf(continuousUnified, sumC))
-        else -> session?.continuousMs ?: allC
-    }
+    val continuousNow = maxOf(allC, maxOf(devStatus.usedMs, sumC))
+
     val allLast = allSession?.lastRunContinuousMs ?: 0L
     val sumLast = (ytSession?.lastRunContinuousMs ?: 0L) + (igSession?.lastRunContinuousMs ?: 0L)
-    val continuousLast = when (app) {
-        JevSettings.YOUTUBE -> ytSession?.lastRunContinuousMs ?: 0L
-        JevSettings.INSTAGRAM -> igSession?.lastRunContinuousMs ?: 0L
-        "ALL" -> maxOf(allLast, maxOf(continuousUnified, sumLast))
-        else -> session?.lastRunContinuousMs ?: allLast
-    }
+    val continuousLast = maxOf(allLast, maxOf(devStatus.usedMs, sumLast))
+
     val latestTrial = trials.firstOrNull { it.probability != null }
     val latestLiveTrial = trials.firstOrNull { it.source == "LIVE" && it.probability != null }
-    val sessionId = if (isAll) (allSession?.id ?: ytSession?.id ?: igSession?.id ?: UUID.randomUUID().toString()) else (session?.id ?: UUID.randomUUID().toString())
+    val sessionId = allSession?.id ?: ytSession?.id ?: igSession?.id ?: UUID.randomUUID().toString()
+
     val allTotal = allSession?.totalMs ?: 0L
     val sumTotal = (ytSession?.totalMs ?: 0L) + (igSession?.totalMs ?: 0L)
-    val totalMs = if (isAll) {
-        maxOf(allTotal, maxOf(devStatus.usedMs, sumTotal))
-    } else {
-        session?.totalMs ?: 0L
-    }
+    val totalMs = maxOf(allTotal, maxOf(devStatus.usedMs, sumTotal))
     val continuousMs = if (continuousNow > 0L) continuousNow else continuousLast
-    val returns = if (isAll) {
-        allSession?.returns?.size ?: ((ytSession?.returns?.size ?: 0) + (igSession?.returns?.size ?: 0))
-    } else {
-        session?.returns?.size ?: 0
-    }
-    val rawShortformMs = if (isAll) {
-        val allSf = allSession?.rawShortformMs ?: 0L
-        val sumSf = (ytSession?.rawShortformMs ?: 0L) + (igSession?.rawShortformMs ?: 0L)
-        maxOf(allSf, sumSf)
-    } else {
-        session?.rawShortformMs ?: 0L
-    }
-    val rawGeneralMs = if (isAll) {
-        val allGen = allSession?.rawGeneralMs ?: 0L
-        val sumGen = (ytSession?.rawGeneralMs ?: 0L) + (igSession?.rawGeneralMs ?: 0L)
-        maxOf(allGen, maxOf(devStatus.usedMs, sumGen))
-    } else {
-        session?.rawGeneralMs ?: 0L
-    }
-    val bedtime = vm.runtime.lastObservedContext?.let { if (isAll || it.packageName == app) it.bedtimePassedMinutes else null }
+    val returns = allSession?.returns?.size ?: ((ytSession?.returns?.size ?: 0) + (igSession?.returns?.size ?: 0))
+
+    val rawShortformMs = maxOf(
+        allSession?.rawShortformMs ?: 0L,
+        (ytSession?.rawShortformMs ?: 0L) + (igSession?.rawShortformMs ?: 0L)
+    )
+    val rawGeneralMs = maxOf(
+        allSession?.rawGeneralMs ?: 0L,
+        (ytSession?.rawGeneralMs ?: 0L) + (igSession?.rawGeneralMs ?: 0L)
+    )
+
+    val bedtime = vm.runtime.lastObservedContext?.bedtimePassedMinutes
     val takenAt = System.currentTimeMillis()
-    val baseContext = JevContext(sessionId, app, totalMs, continuousMs, returns, 600, bedtime, takenAt,
-        rawShortformMs = rawShortformMs, rawGeneralMs = rawGeneralMs)
-    val enriched = vm.runtime.enrichContext(baseContext)
-    val blockingReason = vm.runtime.displayBlockingReason()
+    val baseContext = JevContext(
+        sessionId = sessionId,
+        packageName = "ALL",
+        sessionMs = totalMs,
+        continuousMs = continuousMs,
+        returns10m = returns,
+        returnsObservedSeconds = 600,
+        bedtimePassedMinutes = bedtime,
+        observedAt = takenAt,
+        rawShortformMs = rawShortformMs,
+        rawGeneralMs = rawGeneralMs
+    )
+    val enrichedRaw = vm.runtime.enrichContext(baseContext)
+    val snapshotSwipes = if (swipesNow > 0) swipesNow else swipesLast
+    val enriched = enrichedRaw.copy(
+        shortformSwipeCount = maxOf(enrichedRaw.shortformSwipeCount, snapshotSwipes)
+    )
+    val runtimeState = vm.runtime.state.value
+    val suppression = vm.runtime.latestSuppressionInfo()
+    val ambient = LightAndBrightnessTracker.getInstance(context).snapshot.value
+    val bedtimeCare = com.example.itv.infrastructure.coaching.UserCoachingSettingsStore.getInstance(context).loadSettings().bedtimeCareEnabled
     return ProbabilitySnapshot(
-        app = app,
         sessionId = sessionId,
         totalMs = totalMs,
-        // Keep the latest run's value even after the idle reset so the probability can still be checked.
         continuousMs = continuousMs,
         continuousLive = continuousNow > 0L,
         swipes = if (swipesNow > 0) swipesNow else swipesLast,
-        swipesLive = swipesNow > 0,
         returns = returns,
         bedtime = bedtime,
         takenAt = takenAt,
         enrichedContext = enriched,
-        liveProbability = vm.runtime.state.value.probability,
+        liveProbability = runtimeState.probability,
         latestTrialProbability = latestTrial?.probability,
         latestTrialSource = latestTrial?.source,
-        latestLiveProbability = vm.runtime.state.value.probability ?: latestLiveTrial?.probability,
+        latestLiveProbability = runtimeState.probability ?: latestLiveTrial?.probability,
         latestLiveCreatedAt = latestLiveTrial?.createdAt,
         latestLiveTrial = latestLiveTrial,
-        displayBlockingReason = blockingReason
+        displayBlockingReason = vm.runtime.displayBlockingReason(),
+        ambientSnapshot = ambient,
+        bedtimeCareEnabled = bedtimeCare,
+        appSuppression = suppression,
+        additionalViewingNeededSeconds = runtimeState.additionalViewingNeededSeconds ?: 0L,
+        tokenConfigured = vm.store.tokenConfigured.value,
+        isTestModeOn = com.example.itv.presentation.coaching.CoachingAutoStart.testModeEnabled(context),
+        canDrawOverlays = android.provider.Settings.canDrawOverlays(context)
     )
 }
 
@@ -448,64 +464,316 @@ private fun resolveNotShownReason(
 }
 
 @Composable
+private fun LiveContinuousUsageCard(
+    vm: JevTestViewModel,
+    targetSeconds: Int,
+    continuousEnabled: Boolean,
+    fallbackMs: Long,
+    snapshotTotalMs: Long,
+    snapshotReturns: Int,
+    rawShortformMs: Long,
+    rawGeneralMs: Long
+) {
+    var liveContinuousMs by remember(fallbackMs) { mutableLongStateOf(fallbackMs) }
+
+    LaunchedEffect(vm, fallbackMs) {
+        while (true) {
+            val allC = vm.runtime.sessionState("ALL")?.continuousMs ?: 0L
+            val devMs = com.example.itv.domain.coaching.DeveloperStatus.value.usedMs
+            val current = maxOf(allC, devMs)
+            liveContinuousMs = if (current > 0L) current else fallbackMs
+            kotlinx.coroutines.delay(1.seconds)
+        }
+    }
+
+    val liveSec = liveContinuousMs / 1000.0
+    val progress = if (continuousEnabled && targetSeconds > 0) {
+        (liveSec / targetSeconds.toDouble()).toFloat().coerceIn(0f, 1f)
+    } else 0f
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+        border = BorderStroke(1.dp, ItvLine)
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "실시간 연속 사용 (전체 통합)",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = ItvGreen
+                )
+                Text(
+                    text = "${"%.1f".format(liveSec)}초 / ${if (continuousEnabled) "${targetSeconds}초" else "꺼짐"}",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = if (continuousEnabled && liveSec >= targetSeconds) ItvGreen else MaterialTheme.colorScheme.onSurface
+                )
+            }
+            if (continuousEnabled) {
+                LinearProgressIndicator(
+                    progress = { progress },
+                    modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
+                    color = ItvGreen,
+                    trackColor = ItvLine
+                )
+            }
+            Text(
+                text = "숏폼 1초/초 · 일반 앱 1/3초/초 · ITV 앱 일시정지",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                text = "갱신 시점: 숏폼 ${"%.1f".format(rawShortformMs / 1000.0)}초 + 일반 ${"%.1f".format(rawGeneralMs / 1000.0)}초 · 누적 ${"%.1f".format(snapshotTotalMs / 1000.0)}초 · 재진입 ${snapshotReturns}회",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+internal fun ProbabilityGaugeBar(
+    probabilityPct: Double?,
+    baseThresholdPct: Double,
+    effectiveThresholdPct: Double,
+    passed: Boolean
+) {
+    val probFrac = ((probabilityPct ?: 0.0) / 100.0).toFloat().coerceIn(0f, 1f)
+    val baseFrac = (baseThresholdPct / 100.0).toFloat().coerceIn(0f, 1f)
+    val effFrac = (effectiveThresholdPct / 100.0).toFloat().coerceIn(0f, 1f)
+    val fillColor = when {
+        probabilityPct == null -> MaterialTheme.colorScheme.outlineVariant
+        passed -> ItvGreen
+        else -> Color(0xFFD97706)
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(22.dp)
+        ) {
+            val w = maxWidth
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .fillMaxWidth()
+                    .height(10.dp)
+                    .clip(RoundedCornerShape(5.dp))
+                    .background(ItvLine)
+            )
+            if (probabilityPct != null && probFrac > 0f) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .fillMaxWidth(probFrac)
+                        .height(10.dp)
+                        .clip(RoundedCornerShape(5.dp))
+                        .background(fillColor)
+                )
+            }
+            // Base threshold marker (muted)
+            if (kotlin.math.abs(baseThresholdPct - effectiveThresholdPct) >= 0.5) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .offset(x = (w * baseFrac - 1.dp).coerceIn(0.dp, w - 2.dp))
+                        .width(2.dp)
+                        .height(16.dp)
+                        .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.65f))
+                )
+            }
+            // Effective threshold marker (bold)
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .offset(x = (w * effFrac - 1.5.dp).coerceIn(0.dp, w - 3.dp))
+                    .width(3.dp)
+                    .height(22.dp)
+                    .clip(RoundedCornerShape(1.5.dp))
+                    .background(MaterialTheme.colorScheme.onSurface)
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text("0%", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            val baseLabel = if (kotlin.math.abs(baseThresholdPct - effectiveThresholdPct) >= 0.5) {
+                "기본 ${"%.0f".format(baseThresholdPct)}% → 적용 기준 ${"%.0f".format(effectiveThresholdPct)}%"
+            } else {
+                "적용 기준 ${"%.0f".format(effectiveThresholdPct)}%"
+            }
+            Text(baseLabel, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+            Text("100%", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun DeltaFactorRow(
+    title: String,
+    rangeHint: String,
+    detail: String,
+    deltaPct: Double,
+    excluded: Boolean = false
+) {
+    val isNeg = deltaPct <= -0.5
+    val isPos = deltaPct >= 0.5
+    val chipBg = when {
+        excluded -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+        isNeg -> Color(0xFFFEE2E2)
+        isPos -> Color(0xFFDBEAFE)
+        else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
+    }
+    val chipFg = when {
+        excluded -> MaterialTheme.colorScheme.onSurfaceVariant
+        isNeg -> Color(0xFFB91C1C)
+        isPos -> Color(0xFF1D4ED8)
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val deltaText = when {
+        excluded -> "제외"
+        isPos -> "+${"%.0f".format(deltaPct)}%p"
+        isNeg -> "${"%.0f".format(deltaPct)}%p"
+        else -> "0%p"
+    }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                Text(rangeHint, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Surface(
+            shape = RoundedCornerShape(8.dp),
+            color = chipBg
+        ) {
+            Text(
+                text = deltaText,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+                color = chipFg
+            )
+        }
+    }
+}
+
+@Composable
+private fun DynamicTierRow(
+    tierLabel: String,
+    gapRange: String,
+    intervalText: String,
+    active: Boolean
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(10.dp),
+        color = if (active) ItvGreen.copy(alpha = 0.14f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+        border = BorderStroke(if (active) 1.5.dp else 1.dp, if (active) ItvGreen else ItvLine)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 7.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = tierLabel,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+                    color = if (active) ItvGreen else MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = gapRange,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = intervalText,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.Bold,
+                    color = if (active) ItvGreen else MaterialTheme.colorScheme.onSurface
+                )
+                if (active) {
+                    Surface(shape = RoundedCornerShape(6.dp), color = ItvGreen) {
+                        Text(
+                            text = "현재",
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
     val s by vm.store.settings.collectAsState()
     val answer by vm.manualAnswer.collectAsState()
     val trials by vm.store.dao.trials().collectAsState(initial = emptyList())
-    val context = androidx.compose.ui.platform.LocalContext.current
-    var refreshTick by remember { mutableLongStateOf(0L) }
-    var targetApp by rememberSaveable { mutableStateOf("ALL") }
+    val context = LocalContext.current
     var snapshot by remember { mutableStateOf<ProbabilitySnapshot?>(null) }
+    var showDetails by rememberSaveable { mutableStateOf(false) }
 
-    LaunchedEffect(Unit) {
-        while (true) {
-            kotlinx.coroutines.delay(1.seconds)
-            refreshTick = android.os.SystemClock.elapsedRealtime()
-        }
-    }
-    // First entry / app switch takes one snapshot; also updates if trials initially load when snapshot had no trial probability yet.
-    LaunchedEffect(targetApp, trials.size) {
-        if (snapshot == null || snapshot?.app != targetApp || (snapshot?.latestLiveProbability == null && trials.isNotEmpty())) {
-            snapshot = takeProbabilitySnapshot(vm, targetApp, trials)
+    // Initial load takes one snapshot; subsequent updates happen only when pressing the refresh button.
+    LaunchedEffect(trials.size) {
+        if (snapshot == null || (snapshot?.latestLiveProbability == null && trials.isNotEmpty())) {
+            snapshot = takeProbabilitySnapshot(context, vm, trials)
         }
     }
 
-    TestSection("판단 설정 기준 및 개입 확률 확인") {
+    TestSection("실시간 측정 테스트 (전체 통합)") {
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            FilterChip(
-                selected = targetApp == "ALL",
-                onClick = { targetApp = "ALL" },
-                label = { Text("전체") },
-                enabled = !busy
-            )
-            FilterChip(
-                selected = targetApp == JevSettings.YOUTUBE,
-                onClick = { targetApp = JevSettings.YOUTUBE },
-                label = { Text("YouTube") },
-                enabled = !busy
-            )
-            FilterChip(
-                selected = targetApp == JevSettings.INSTAGRAM,
-                onClick = { targetApp = JevSettings.INSTAGRAM },
-                label = { Text("Instagram") },
-                enabled = !busy
-            )
-            Spacer(Modifier.weight(1f))
+            Surface(shape = RoundedCornerShape(8.dp), color = ItvGreen.copy(alpha = 0.14f)) {
+                Text(
+                    text = "전체 통합 기준",
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = ItvGreen
+                )
+            }
             snapshot?.let {
                 val takenAt = Instant.ofEpochMilli(it.takenAt).atZone(ZoneId.systemDefault())
                     .format(DateTimeFormatter.ofPattern("HH:mm:ss"))
-                Text("갱신 $takenAt", style = MaterialTheme.typography.labelSmall)
+                Text(
+                    text = "마지막 갱신 $takenAt",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
+
         OutlinedButton(
-            onClick = {
-                snapshot = takeProbabilitySnapshot(vm, targetApp, trials)
-                refreshTick = android.os.SystemClock.elapsedRealtime()
-            },
+            onClick = { snapshot = takeProbabilitySnapshot(context, vm, trials) },
             modifier = Modifier.fillMaxWidth()
         ) {
             Text("측정값 갱신 (토큰 사용 없음)")
@@ -516,8 +784,11 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
             Text("갱신 버튼을 눌러 측정값을 불러오세요.")
         } else {
             val ctx = snap.context()
+            val adj = JevCandidatePolicy.computeThresholdAdjustment(s, ctx)
+            val baseThresholdPct = s.probabilityThreshold * 100.0
+            val effThresholdPct = adj.effectiveThreshold * 100.0
+            val totalDeltaPct = effThresholdPct - baseThresholdPct
             val matchedReasons = JevCandidatePolicy.reasons(ctx, s)
-            val effThresholdPct = JevCandidatePolicy.effectiveThreshold(s, ctx) * 100.0
             val reasonKor = matchedReasons.map { r ->
                 when (r) {
                     "CONTINUOUS" -> "연속시청"
@@ -526,363 +797,510 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
                     "PERSONAL_SESSION_EXCEEDED" -> "평균세션초과"
                     "RAPID_SWIPE_OVERHEAT" -> "스와이프과열"
                     "PRE_BEDTIME_DARK_USAGE" -> "취침전암실사용"
-                    "CONTINUOUS_FATIGUE" -> "연속시청피로누적"
-                    "LONGFORM_BINGE_CHAIN" -> "추천영상연속시청(앱로컬)"
-                    "INTERVENTION_RESISTANCE" -> "직전개입미룸·시청지속"
+                    "CONTINUOUS_FATIGUE" -> "연속피로누적"
+                    "LONGFORM_BINGE_CHAIN" -> "롱폼영상연속전환"
+                    "SHORTFORM_SWIPE_COUNT" -> "숏폼누적스와이프"
                     else -> r
                 }
             }
-            val ambientSnapshot = remember(refreshTick) {
-                com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(context).snapshot.value
-            }
-            val ytSession = vm.runtime.sessionState(JevSettings.YOUTUBE)
-            val igSession = vm.runtime.sessionState(JevSettings.INSTAGRAM)
-            val allSession = vm.runtime.sessionState("ALL")
-            val devStatus = com.example.itv.domain.coaching.DeveloperStatus.value
 
-            val liveContinuousMs = remember(refreshTick, targetApp, snap) {
-                when (targetApp) {
-                    JevSettings.YOUTUBE -> {
-                        val c = ytSession?.continuousMs ?: 0L
-                        if (c > 0L) c else snap.continuousMs
-                    }
-                    JevSettings.INSTAGRAM -> {
-                        val c = igSession?.continuousMs ?: 0L
-                        if (c > 0L) c else snap.continuousMs
-                    }
-                    "ALL" -> {
-                        val allC = allSession?.continuousMs ?: 0L
-                        val unified = devStatus.usedMs
-                        val sum = (ytSession?.continuousMs ?: 0L) + (igSession?.continuousMs ?: 0L)
-                        val c = maxOf(allC, maxOf(unified, sum))
-                        if (c > 0L) c else snap.continuousMs
-                    }
-                    else -> {
-                        val appC = vm.runtime.sessionState(targetApp)?.continuousMs ?: 0L
-                        if (appC > 0L) appC else snap.continuousMs
-                    }
-                }
+            val callBlocker = when {
+                !s.enabled -> "Jev 테스트 꺼짐 (판단 설정 탭에서 켜기 필요)"
+                snap.isTestModeOn -> "30초 테스트 모드 켜짐 (끄면 Jev 자동 호출)"
+                !s.collectionConsent -> "외부 전송 미동의 (연결 탭에서 동의 필요)"
+                !snap.tokenConfigured -> "테스트 토큰 미등록 (연결 탭에서 저장 필요)"
+                else -> null
             }
-            val liveTotalMs = remember(refreshTick, targetApp, snap) {
-                when (targetApp) {
-                    JevSettings.YOUTUBE -> ytSession?.totalMs ?: snap.totalMs
-                    JevSettings.INSTAGRAM -> igSession?.totalMs ?: snap.totalMs
-                    "ALL" -> allSession?.totalMs ?: (((ytSession?.totalMs ?: 0L) + (igSession?.totalMs ?: 0L)).takeIf { it > 0L } ?: snap.totalMs)
-                    else -> vm.runtime.sessionState(targetApp)?.totalMs ?: snap.totalMs
-                }
-            }
-
-            // 1. 시청 & 재진입 요약 박스
-            CompactCheckGroup("1. 시청 시간 · 재진입") {
-                val contLabel = if (snap.app == "ALL") "통합 연속 사용" else "연속 시청"
-                val contDetail = if (snap.app == "ALL") " (숏폼 1.0x + 일반 1/3x)" else ""
-                CompactCheckRow(
-                    label = contLabel,
-                    value = "${"%.1f".format(liveContinuousMs / 1000.0)}초$contDetail / 기준 ${if (s.continuousEnabled) "${s.continuousSeconds}초" else "꺼짐"}"
-                )
-                CompactCheckRow(
-                    label = "구간 누적 · 재진입",
-                    value = "누적 ${"%.1f".format(liveTotalMs / 1000.0)}초 · 재진입 ${snap.returns}회 (기준 ${if (s.returnsEnabled) "${s.returnsThreshold}회" else "꺼짐"})"
-                )
-                val rawSf = snap.enrichedContext?.rawShortformMs ?: 0L
-                val rawGen = snap.enrichedContext?.rawGeneralMs ?: 0L
-                val rawPhysicalMs = rawSf + rawGen
-                if (snap.app == "ALL" || rawPhysicalMs > 0L) {
-                    val sfRatio = if (rawPhysicalMs > 0L) (rawSf.toDouble() / rawPhysicalMs.toDouble()) * 100.0 else 0.0
-                    val weightedMs = rawSf + (rawGen / 3L)
-                    CompactCheckRow(
-                        label = "물리 세션 (휴대폰 전체)",
-                        value = "${"%.1f".format(rawPhysicalMs / 1000.0)}초 (숏폼 ${"%.1f".format(rawSf / 1000.0)}초 + 일반 ${"%.1f".format(rawGen / 1000.0)}초)"
-                    )
-                    CompactCheckRow(
-                        label = "숏폼 비율 / 환산 세션",
-                        value = "숏폼 비중 ${"%.1f".format(sfRatio)}% · 환산 ${"%.1f".format(weightedMs / 1000.0)}초 (1.0x+1/3x)"
-                    )
-                }
-                if (snap.app == JevSettings.YOUTUBE || snap.app == "ALL") {
-                    val lfTotalSec = ctx.longformWatchMs / 1000.0
-                    val lfCurSec = ctx.currentVideoWatchMs / 1000.0
-                    val lfModeStr = ctx.youtubeWatchMode ?: "대기"
-                    CompactCheckRow(
-                        label = "롱폼 시청 분석",
-                        value = "세션 롱폼 ${"%.0f".format(lfTotalSec)}초 · 현재영상 ${"%.0f".format(lfCurSec)}초 · 완료 ${ctx.completedLongformCount}편 ($lfModeStr)",
-                        highlight = ctx.longformWatchMs > 0L
-                    )
-                    CompactCheckRow(
-                        label = "추천 영상 연속 전환",
-                        value = "연속 ${ctx.consecutiveLongformChainCount}회 전환 (상황 분석 전용)",
-                        highlight = ctx.consecutiveLongformChainCount >= 2
+            if (callBlocker != null) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.4f))
+                ) {
+                    Text(
+                        text = "호출 차단: $callBlocker",
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onErrorContainer
                     )
                 }
             }
 
-            // 2. 개인화 비율 & 스와이프 요약 박스
-            CompactCheckGroup("2. 개인화 비율 · 스와이프 · 피로도 · 취침환경") {
-                val adj = JevCandidatePolicy.computeThresholdAdjustment(s, ctx)
-                val sessionRatioStr = ctx.sessionVsAvgRatio?.let { "${(it * 100).roundToInt()}%" } ?: "집계 중"
-                val avgSessionStr = ctx.personalAvgSessionMinutes?.let {
-                    val totalSec = (it * 60).roundToInt()
-                    val min = totalSec / 60
-                    val sec = totalSec % 60
-                    if (sec > 0) "기준 ${min}분 ${sec}초" else "기준 ${min}분"
-                } ?: "기준 수집 중"
-                val sessionDeltaStr = if (adj.sessionDelta != 0.0) " (${if (adj.sessionDelta > 0) "+" else ""}${"%.0f".format(adj.sessionDelta * 100)}%p)" else ""
-                CompactCheckRow(
-                    label = "세션 과몰입 비율",
-                    value = "$sessionRatioStr ($avgSessionStr)$sessionDeltaStr",
-                    highlight = adj.sessionDelta < 0
-                )
-                val fatigueMin = (liveContinuousMs / 60000.0)
-                val fatigueDeltaStr = if (adj.fatigueDelta < 0) " (${"%.0f".format(adj.fatigueDelta * 100)}%p)" else ""
-                val fatigueDesc = when {
-                    fatigueMin >= 30.0 -> "고위험 (${"%.1f".format(fatigueMin)}분 연속)"
-                    fatigueMin >= 15.0 -> "주의 (${"%.1f".format(fatigueMin)}분 연속)"
-                    else -> "정상 (${"%.1f".format(fatigueMin)}분 연속)"
-                }
-                CompactCheckRow(
-                    label = "연속 시청 피로도",
-                    value = "$fatigueDesc$fatigueDeltaStr",
-                    highlight = adj.fatigueDelta < 0
-                )
-                val resistanceDeltaStr = if (adj.resistanceDelta < 0) " (${"%.0f".format(adj.resistanceDelta * 100)}%p)" else ""
-                val resistanceDesc = when {
-                    ctx.lastInterventionOutcome == "LATER" -> "나중에 선택 후 시청 지속 (${ctx.resistanceStreak}회)"
-                    ctx.lastInterventionOutcome == "NO_RESPONSE" && ctx.postInterventionActivity -> "무응답 무시 후 스와이프 지속 (${ctx.resistanceStreak}회)"
-                    ctx.lastInterventionOutcome != null -> "${ctx.lastInterventionOutcome} (정상 대기)"
-                    else -> "최근 개입 없음 (정상)"
-                }
-                CompactCheckRow(
-                    label = "직전 개입 반응",
-                    value = "$resistanceDesc$resistanceDeltaStr",
-                    highlight = adj.resistanceDelta < 0
-                )
-                val isAllApp = snap.app == "ALL"
-                val spmStr = if (isAllApp) "전체 사용 모드 (스와이프 제외)" else "분당 ${ctx.effectiveSpm1m ?: 0.0}회 (평소 ${ctx.personalAvgSpm ?: 0.0})"
-                val swipeDeltaStr = if (isAllApp) " · 제외 (0%p)" else if (adj.swipeDelta < 0) " · 과열(${"%.0f".format(adj.swipeDelta * 100)}%p)" else " · 정상"
-                CompactCheckRow(
-                    label = if (isAllApp) "스와이프 (적용 제외)" else "스와이프 (${snap.swipes}회)",
-                    value = "$spmStr$swipeDeltaStr",
-                    highlight = adj.swipeDelta < 0
-                )
-                val bedtimeDeltaStr = if (adj.bedtimeDelta != 0.0) " (${if (adj.bedtimeDelta > 0) "+" else ""}${"%.0f".format(adj.bedtimeDelta * 100)}%p)" else ""
-                val bedtimeStatusStr = when {
-                    ctx.isNearOrOccluded -> "센서 가림 감지 (0cm 근접)"
-                    adj.bedtimeDelta < 0 -> {
-                        val distStr = ctx.bedtimeDistanceMinutes?.let { if (it < 0) "취침 ${-it}분 전" else "취침 ${it}분 경과" } ?: "취침임박"
-                        "취침 전 암실 시청 · $distStr (${ctx.ambientLux?.toInt() ?: 0}lx / 화면 ${ctx.screenBrightness ?: 0})"
+            // 연속 사용 초만 실시간으로 증가 표시 (나머지 지표는 갱신 버튼 기준 고정)
+            LiveContinuousUsageCard(
+                vm = vm,
+                targetSeconds = s.continuousSeconds,
+                continuousEnabled = s.continuousEnabled,
+                fallbackMs = snap.continuousMs,
+                snapshotTotalMs = snap.totalMs,
+                snapshotReturns = snap.returns,
+                rawShortformMs = ctx.rawShortformMs,
+                rawGeneralMs = ctx.rawGeneralMs
+            )
+
+            // 1. 개입 판단 확률 (한눈에 보는 판정 카드)
+            val evalProb = answer?.probability ?: snap.latestLiveProbability ?: snap.latestTrialProbability
+            val evalProbPct = evalProb?.times(100.0)
+            val probSourceLabel = when {
+                answer != null -> "방금 수동 요청 (${answer!!.trial.latencyMs}ms)"
+                snap.latestLiveProbability != null -> {
+                    val t = snap.latestLiveCreatedAt?.let {
+                        Instant.ofEpochMilli(it).atZone(ZoneId.systemDefault())
+                            .format(DateTimeFormatter.ofPattern("HH:mm:ss"))
                     }
-                    adj.bedtimeDelta > 0 -> "주간/밝은 환경 (${ctx.ambientLux?.toInt() ?: 0}lx / 화면 ${ctx.screenBrightness ?: 0})"
-                    else -> "일반 실내 조명 (${ctx.ambientLux?.toInt() ?: 0}lx / 화면 ${ctx.screenBrightness ?: 0})"
+                    if (t != null) "LIVE · $t" else "LIVE 최신"
                 }
-                CompactCheckRow(
-                    label = "취침환경 · 조도",
-                    value = "$bedtimeStatusStr$bedtimeDeltaStr",
-                    highlight = adj.bedtimeDelta < 0
-                )
-                val postureStr = when (ambientSnapshot.posture) {
-                    com.example.itv.domain.coaching.UserPosture.LYING_DOWN -> "수평/하향 각도 (전면 ${ambientSnapshot.pitchDegrees?.toInt() ?: 0}° · 경추 고하중 🐢)"
-                    com.example.itv.domain.coaching.UserPosture.SITTING_OR_STANDING -> "정면 파지 각도 (전면 ${ambientSnapshot.pitchDegrees?.toInt() ?: 0}° · 어깨/허리 긴장 🙆)"
-                    com.example.itv.domain.coaching.UserPosture.TABLE_OR_DESK -> "테이블 거치 각도 (전면 ${ambientSnapshot.pitchDegrees?.toInt() ?: 0}° · 고개숙임 🍽️)"
-                    com.example.itv.domain.coaching.UserPosture.FACEDOWN -> "스마트폰 엎어둠 (완전 차단 🛑)"
-                    else -> "각도 측정 중 (기울기 ${ambientSnapshot.pitchDegrees?.toInt() ?: 0}°)"
-                }
-                CompactCheckRow(
-                    label = "파지 각도 및 하중",
-                    value = postureStr,
-                    highlight = ambientSnapshot.posture == com.example.itv.domain.coaching.UserPosture.LYING_DOWN
-                )
+                snap.latestTrialProbability != null -> "최근 요청 (${snap.latestTrialSource ?: "기록"})"
+                else -> "아직 기록 없음"
             }
+            val passed = evalProb != null && JevCandidatePolicy.passes(evalProb, s, ctx)
+            val diffPct = evalProbPct?.minus(effThresholdPct)
 
-            // 2-1. 취침 전 환경 및 점수 판정 (Bedtime Score)
-            CompactCheckGroup("취침 전 환경 및 점수 판정 (Bedtime Score)") {
-                val score = ambientSnapshot.bedtimeScore
-                val isCandidate = ambientSnapshot.isBedtimeCandidate
-                CompactCheckRow(
-                    label = "취침 확신도 점수 (60점 이상)",
-                    value = "${score}점 / 100점 · ${if (isCandidate) "취침 케어 개입 대상 확정 ✅" else "일상 활동 상태 (미대상) ❌"}",
-                    highlight = isCandidate
-                )
-                CompactCheckRow(
-                    label = "점수 계산 내역",
-                    value = ambientSnapshot.bedtimeScoreBreakdown
-                )
-                val chargingText = when (ambientSnapshot.isCharging) {
-                    true -> "충전기 연결됨 (+15점) 🔌"
-                    false -> "미연결 (0점)"
-                    else -> "확인 대기 (0점)"
+            CompactCheckGroup("1. 개입 판단 확률") {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Surface(
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(10.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Text("Jev 판단 확률", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                text = evalProbPct?.let { "${"%.1f".format(it)}%" } ?: "--%",
+                                style = MaterialTheme.typography.headlineSmall,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = when {
+                                    evalProbPct == null -> MaterialTheme.colorScheme.onSurfaceVariant
+                                    passed -> ItvGreen
+                                    else -> Color(0xFFD97706)
+                                }
+                            )
+                            Text(
+                                text = probSourceLabel,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
+                    Surface(
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(10.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Text("적용 개입 기준", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                text = "${"%.0f".format(effThresholdPct)}%",
+                                style = MaterialTheme.typography.headlineSmall,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            val deltaCaption = if (!s.personalizedEnabled) {
+                                "보정 꺼짐"
+                            } else if (kotlin.math.abs(totalDeltaPct) >= 0.5) {
+                                "기본 ${"%.0f".format(baseThresholdPct)}% (${if (totalDeltaPct > 0) "+" else ""}${"%.0f".format(totalDeltaPct)}%p)"
+                            } else {
+                                "기본 ${"%.0f".format(baseThresholdPct)}% (변동 없음)"
+                            }
+                            Text(
+                                text = deltaCaption,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
                 }
-                val wifiText = when (ambientSnapshot.isWifiConnected) {
-                    true -> "Wi-Fi 연결됨 (+10점) 📶"
-                    false -> "모바일 데이터/미연결 (0점)"
-                    else -> "확인 대기 (0점)"
-                }
-                CompactCheckRow(
-                    label = "소프트 맥락 (배터리·네트워크)",
-                    value = "$chargingText · $wifiText"
-                )
-                val bedtimeCareEnabled = com.example.itv.infrastructure.coaching.UserCoachingSettingsStore.getInstance(context).loadSettings().bedtimeCareEnabled
-                CompactCheckRow(
-                    label = "숏폼 진입 시 동작",
-                    value = if (isCandidate && bedtimeCareEnabled) "취침 3분기 케어(마음비우기/흑백모드/ASMR) 화면 발동" else if (isCandidate) "취침 후보 시간대이나 취침 개입 설정 OFF (일반 모델 적용)" else "일반 숏폼 피로도/과열 개입 모델 적용",
-                    highlight = isCandidate && bedtimeCareEnabled
-                )
-            }
 
-            // 3. 개입 확률 기준 & 판정 결과 박스
-            CompactCheckGroup("3. 개입 기준 · 확률 결과") {
-                CompactCheckRow(
-                    label = "적용 개입 기준",
-                    value = "${"%.0f".format(effThresholdPct)}% 이상 · ${JevCandidatePolicy.thresholdBreakdown(s, ctx)}",
-                    highlight = kotlin.math.abs(effThresholdPct - s.probabilityThreshold * 100.0) >= 0.1
+                // 판정 요약 배너
+                val verdictBg = when {
+                    diffPct == null -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+                    passed -> ItvGreen.copy(alpha = 0.16f)
+                    else -> Color(0xFFFEF3C7)
+                }
+                val verdictFg = when {
+                    diffPct == null -> MaterialTheme.colorScheme.onSurfaceVariant
+                    passed -> ItvGreen
+                    else -> Color(0xFFB45309)
+                }
+                val verdictText = when {
+                    diffPct == null -> "확률 산출 대기 · 호출 조건 ${if (reasonKor.isNotEmpty()) "충족 (${reasonKor.joinToString(", ")})" else "미충족"}"
+                    passed -> "개입 기준 통과 (+${"%.1f".format(diffPct)}%p 초과) · 개입 대상"
+                    else -> "개입 기준 미달 (${"%.1f".format(diffPct)}%p 부족) · 미개입"
+                }
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    color = verdictBg
+                ) {
+                    Text(
+                        text = verdictText,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Bold,
+                        color = verdictFg,
+                        textAlign = TextAlign.Center
+                    )
+                }
+
+                ProbabilityGaugeBar(
+                    probabilityPct = evalProbPct,
+                    baseThresholdPct = baseThresholdPct,
+                    effectiveThresholdPct = effThresholdPct,
+                    passed = passed
                 )
+
                 CompactCheckRow(
                     label = "호출 조건",
                     value = if (reasonKor.isNotEmpty()) "충족 (${reasonKor.joinToString(", ")})" else "미충족",
                     highlight = reasonKor.isNotEmpty()
                 )
 
-                val evalProb = answer?.probability
-                    ?: snap.latestLiveProbability
-                    ?: snap.latestTrialProbability
-
-                if (evalProb != null) {
-                    val passed = JevCandidatePolicy.passes(evalProb, s, ctx)
-                    val diff = (evalProb * 100.0) - effThresholdPct
-                    val diffStr = if (diff >= 0) "+${"%.1f".format(diff)}%p 초과" else "${"%.1f".format(diff)}%p 미달"
+                val displayTrial = answer?.trial ?: snap.latestLiveTrial
+                if (passed && displayTrial != null) {
+                    val displayedAt = displayTrial.displayedAt
+                    val isDisplayed = displayedAt != null
+                    val displayText = if (isDisplayed) {
+                        val dispTime = Instant.ofEpochMilli(displayedAt)
+                            .atZone(ZoneId.systemDefault())
+                            .format(DateTimeFormatter.ofPattern("HH:mm:ss"))
+                        "표시 완료 ($dispTime)"
+                    } else {
+                        val reason = snap.displayBlockingReason ?: resolveNotShownReason(
+                            trial = displayTrial,
+                            isActualIntervention = s.actualIntervention,
+                            isTestMode = snap.isTestModeOn,
+                            isJevEnabled = s.enabled,
+                            canDrawOverlays = snap.canDrawOverlays
+                        )
+                        "미표시 · $reason"
+                    }
                     CompactCheckRow(
-                        label = "적용 개입 기준 판정",
-                        value = "${"%.1f".format(evalProb * 100)}% vs 기준 ${"%.0f".format(effThresholdPct)}% → ${if (passed) "기준 통과 ✅ (개입 대상)" else "기준 미달 ❌ (미개입)"} ($diffStr)",
-                        highlight = passed
-                    )
-                } else {
-                    CompactCheckRow(
-                        label = "적용 개입 기준 판정",
-                        value = "확률 산출 대기 (적용 기준 ${"%.0f".format(effThresholdPct)}%)"
+                        label = "개입 표시 상태",
+                        value = displayText,
+                        highlight = !isDisplayed
                     )
                 }
+            }
 
-                val liveProb = snap.latestLiveProbability
-                val latestLiveTrial = snap.latestLiveTrial
-                if (liveProb != null) {
-                    val passed = JevCandidatePolicy.passes(liveProb, s, ctx)
-                    val timeLabel = snap.latestLiveCreatedAt?.let {
-                        " · " + Instant.ofEpochMilli(it).atZone(ZoneId.systemDefault())
-                            .format(DateTimeFormatter.ofPattern("HH:mm:ss"))
-                    }.orEmpty()
-                    CompactCheckRow(
-                        label = "최근 LIVE 확률",
-                        value = "${"%.1f".format(liveProb * 100)}% (${if (passed) "기준 통과" else "기준 미달"}$timeLabel)",
-                        highlight = passed
-                    )
-
-                    if (passed) {
-                        val displayedAt = latestLiveTrial?.displayedAt
-                        val isDisplayed = displayedAt != null
-                        val displayStatusText = if (isDisplayed) {
-                            val dispTime = Instant.ofEpochMilli(displayedAt)
-                                .atZone(ZoneId.systemDefault())
-                                .format(DateTimeFormatter.ofPattern("HH:mm:ss"))
-                            "화면에 표시 완료 ($dispTime)"
-                        } else {
-                            "미표시 (화면에 뜨지 않음)"
-                        }
-
-                        CompactCheckRow(
-                            label = "개입 표시 여부",
-                            value = displayStatusText,
-                            highlight = !isDisplayed
+            // 2. 개입 기준 확률 변동 (보정 내역 한눈에 보기)
+            CompactCheckGroup("2. 개입 기준 확률 변동") {
+                val totalSign = if (totalDeltaPct > 0) "+" else ""
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Text(
+                            text = if (s.personalizedEnabled) {
+                                "기본 ${"%.0f".format(baseThresholdPct)}%  ${totalSign}${"%.0f".format(totalDeltaPct)}%p  →  적용 ${"%.0f".format(effThresholdPct)}%"
+                            } else {
+                                "기본 ${"%.0f".format(baseThresholdPct)}% 고정 (개인화 동적 보정 꺼짐)"
+                            },
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = if (totalDeltaPct <= -0.5) Color(0xFFB91C1C) else if (totalDeltaPct >= 0.5) Color(0xFF1D4ED8) else MaterialTheme.colorScheme.onSurface
                         )
+                        Text(
+                            text = "마이너스(-%p)일수록 개입이 더 빨라지고, 플러스(+%p)일수록 기준이 완화됩니다. (총 보정 -40~+25%p)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
 
-                        if (!isDisplayed) {
-                            val notShownReason = snap.displayBlockingReason ?: resolveNotShownReason(
-                                trial = latestLiveTrial,
-                                isActualIntervention = s.actualIntervention,
-                                isTestMode = com.example.itv.presentation.coaching.CoachingAutoStart.testModeEnabled(context),
-                                isJevEnabled = s.enabled,
-                                canDrawOverlays = android.provider.Settings.canDrawOverlays(context)
+                val sessionRatioStr = ctx.sessionVsAvgRatio?.let { "평균 대비 ${(it * 100).roundToInt()}%" } ?: "집계 중"
+                val avgSessionStr = ctx.personalAvgSessionMinutes?.let {
+                    val totalSec = (it * 60).roundToInt()
+                    val m = totalSec / 60
+                    val sec = totalSec % 60
+                    if (sec > 0) "기준 ${m}분 ${sec}초" else "기준 ${m}분"
+                } ?: "기준 수집 중"
+                DeltaFactorRow(
+                    title = "세션 과몰입",
+                    rangeHint = "±10%p",
+                    detail = "$sessionRatioStr ($avgSessionStr)",
+                    deltaPct = adj.sessionDelta * 100.0
+                )
+
+                HorizontalDivider(color = ItvLine.copy(alpha = 0.6f))
+                val bedtimeDetail = when {
+                    ctx.isNearOrOccluded -> "센서 가림 감지 (0cm 근접 · 보정 제외)"
+                    adj.bedtimeDelta < 0 -> {
+                        val distStr = ctx.bedtimeDistanceMinutes?.let { if (it < 0) "취침 ${-it}분 전" else "취침 ${it}분 경과" } ?: "취침 임박"
+                        "암실 시청 · $distStr (${ctx.ambientLux?.toInt() ?: 0}lx · 밝기 ${ctx.screenBrightness ?: 0})"
+                    }
+                    adj.bedtimeDelta > 0 -> "주간/밝은 환경 (${ctx.ambientLux?.toInt() ?: 0}lx · 밝기 ${ctx.screenBrightness ?: 0})"
+                    else -> "일반 실내 조명 (${ctx.ambientLux?.toInt() ?: 0}lx · 밝기 ${ctx.screenBrightness ?: 0})"
+                }
+                DeltaFactorRow(
+                    title = "취침환경 · 조도",
+                    rangeHint = "±15%p",
+                    detail = bedtimeDetail,
+                    deltaPct = adj.bedtimeDelta * 100.0
+                )
+
+                HorizontalDivider(color = ItvLine.copy(alpha = 0.6f))
+                val fatigueMin = ctx.continuousMs / 60000.0
+                val fatigueDetail = when {
+                    fatigueMin >= 30.0 -> "고위험 (${"%.1f".format(fatigueMin)}분 연속)"
+                    fatigueMin >= 15.0 -> "주의 (${"%.1f".format(fatigueMin)}분 연속)"
+                    else -> "정상 (${"%.1f".format(fatigueMin)}분 연속 · 15분 미만 0%p)"
+                }
+                DeltaFactorRow(
+                    title = "연속 시청 피로",
+                    rangeHint = "0~-4%p",
+                    detail = fatigueDetail,
+                    deltaPct = adj.fatigueDelta * 100.0
+                )
+
+                HorizontalDivider(color = ItvLine.copy(alpha = 0.6f))
+                val lfSwitchStr = if (adj.longformSwitchDelta < 0.0) {
+                    "전환 ${ctx.consecutiveLongformChainCount}회 (${"%.1f".format(adj.longformSwitchDelta * 100)}%p)"
+                } else {
+                    "전환 ${ctx.consecutiveLongformChainCount}회 (2회+ 적용)"
+                }
+                val sfSwipeStr = if (adj.shortformSwipeCountDelta < 0.0) {
+                    "스와이프 ${ctx.shortformSwipeCount}회 (${"%.1f".format(adj.shortformSwipeCountDelta * 100)}%p)"
+                } else {
+                    "스와이프 ${ctx.shortformSwipeCount}회 (11회+ 적용)"
+                }
+                DeltaFactorRow(
+                    title = "롱폼 전환 · 숏폼 스와이프",
+                    rangeHint = "0~-10%p",
+                    detail = "유튜브 롱폼 $lfSwitchStr · 숏폼 $sfSwipeStr",
+                    deltaPct = adj.contentSwitchDelta * 100.0
+                )
+            }
+
+            // 3. 동적 재평가 확률 변동 (격차에 따른 재평가 간격 변화 한눈에 보기)
+            val appSuppression = snap.appSuppression
+            val isLongformOrAll = ctx.rawGeneralMs >= ctx.rawShortformMs
+            val activeGap = when {
+                evalProb != null -> ((effThresholdPct / 100.0) - evalProb).coerceAtLeast(0.0)
+                appSuppression.isAsked && appSuppression.lastProbabilityGap != null -> appSuppression.lastProbabilityGap
+                else -> null
+            }
+            val effectiveIntervalSec = when {
+                answer != null -> JevCandidatePolicy.calculateDynamicInterval(effThresholdPct / 100.0, answer!!.probability, isLongformOrAll)
+                appSuppression.isAsked -> appSuppression.dynamicIntervalSeconds
+                evalProb != null -> JevCandidatePolicy.calculateDynamicInterval(effThresholdPct / 100.0, evalProb, isLongformOrAll)
+                else -> appSuppression.dynamicIntervalSeconds
+            }
+            val nextInSec = appSuppression.nextEvaluationInSeconds ?: 0L
+            val addSec = snap.additionalViewingNeededSeconds
+
+            CompactCheckGroup("3. 동적 재평가 확률 변동") {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "재평가 간격 ${effectiveIntervalSec}초",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = ItvGreen
                             )
-                            CompactCheckRow(
-                                label = "미표시 사유",
-                                value = notShownReason,
-                                highlight = true
+                            Text(
+                                text = if (isLongformOrAll) "일반 환산 약 ${"%.1f".format(effectiveIntervalSec * 3.0 / 60.0)}분" else "숏폼 약 ${"%.1f".format(effectiveIntervalSec / 60.0)}분",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        val gapSummary = when {
+                            activeGap != null && evalProb != null && evalProb * 100.0 >= effThresholdPct ->
+                                "기준 통과 상태 (격차 0.0%p) → 최소 간격 ${effectiveIntervalSec}초 적용"
+                            activeGap != null ->
+                                "기준과 격차 -${"%.1f".format(activeGap * 100.0)}%p → 선형 보간 ${effectiveIntervalSec}초 적용"
+                            else ->
+                                "첫 실시간 평가 전 기본값 ${effectiveIntervalSec}초 (평가 후 격차에 따라 자동 변동)"
+                        }
+                        Text(
+                            text = gapSummary,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Surface(
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                        border = BorderStroke(1.dp, ItvLine)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Text("다음 재평가 대기", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                text = if (nextInSec > 0) "${nextInSec}초 남음" else "대기 충족",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = if (nextInSec > 0) MaterialTheme.colorScheme.onSurface else ItvGreen
                             )
                         }
                     }
-                } else if (snap.latestTrialProbability != null) {
-                    val p = snap.latestTrialProbability
-                    val passed = JevCandidatePolicy.passes(p, s, ctx)
-                    CompactCheckRow(
-                        label = "최근 요청 확률",
-                        value = "${"%.1f".format(p * 100)}% (${if (passed) "기준 통과" else "기준 미달"})",
-                        highlight = passed
-                    )
-                } else {
-                    CompactCheckRow(label = "최근 개입 확률", value = "아직 기록 없음")
+                    Surface(
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                        border = BorderStroke(1.dp, ItvLine)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Text("필요 추가 시청", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                text = if (addSec > 0) "${addSec}초 남음" else "시청량 충족",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = if (addSec > 0) MaterialTheme.colorScheme.onSurface else ItvGreen
+                            )
+                        }
+                    }
                 }
-            }
 
-            val liveState by vm.runtime.state.collectAsState()
-            val appSuppression = remember(refreshTick, targetApp) {
-                if (targetApp == "ALL") {
-                    val ytSup = vm.runtime.getAppSuppressionInfo(JevSettings.YOUTUBE)
-                    val igSup = vm.runtime.getAppSuppressionInfo(JevSettings.INSTAGRAM)
-                    if (ytSup.isAsked) ytSup else igSup
-                } else {
-                    vm.runtime.getAppSuppressionInfo(targetApp)
-                }
-            }
-            val dynInterval = appSuppression.dynamicIntervalSeconds
-            val lastGap = appSuppression.lastProbabilityGap
-            val nextInSec = appSuppression.nextEvaluationInSeconds ?: 0L
-            val addSec = if (liveState.context?.packageName == targetApp || (targetApp == "ALL" && liveState.context?.packageName in listOf(JevSettings.YOUTUBE, JevSettings.INSTAGRAM))) {
-                liveState.additionalViewingNeededSeconds ?: 0L
-            } else 0L
-            val snapProb = snap.latestLiveProbability
-            val isLongformOrAll = targetApp == "ALL" || (snap.enrichedContext?.rawGeneralMs ?: 0L) > (snap.enrichedContext?.rawShortformMs ?: 0L)
-            val expInterval = snapProb?.let { JevCandidatePolicy.calculateDynamicInterval(effThresholdPct / 100.0, it, isLongformOrAll) }
-            val expGap = snapProb?.let { ((effThresholdPct / 100.0) - it).coerceAtLeast(0.0) }
-            val intervalDesc = when {
-                appSuppression.isAsked && lastGap != null ->
-                    "${dynInterval}초 (실시간 반영 · 격차 -${"%.1f".format(lastGap * 100)}%p${if (isLongformOrAll) " · 실사용 약 ${dynInterval * 3 / 60}분" else ""})"
-                expInterval != null && expGap != null ->
-                    "${dynInterval}초 (최근 확률 예상: ${expInterval}초, 격차 -${"%.1f".format(expGap * 100)}%p${if (isLongformOrAll) " · 실사용 약 ${expInterval * 3 / 60}분" else ""})"
-                else -> "${dynInterval}초 (기본값 · 첫 실시간 평가 대기)"
-            }
-            CompactCheckGroup("4. 동적 재평가 · 추가 시청") {
-                CompactCheckRow(
-                    label = if (isLongformOrAll) "동적 간격 (60~360초 · 실사용 3~18분)" else "동적 간격 (30~360초 · 실사용 0.5~6분)",
-                    value = intervalDesc
-                )
-                CompactCheckRow(
-                    label = "다음 재평가 대기",
-                    value = if (nextInSec > 0) "${nextInSec}초 남음" else "대기 시간 충족"
-                )
-                CompactCheckRow(
-                    label = "필요 추가 시청",
-                    value = if (addSec > 0) "${addSec}초 남음" else "시청량 충족"
-                )
-            }
-        }
+                val activeTier = activeGap?.let { g ->
+                    when {
+                        g <= 0.0 -> 0
+                        g <= 0.15 -> 1
+                        g <= 0.30 -> 2
+                        else -> 3
+                    }
+                } ?: -1
 
-        answer?.let { a ->
-            val passed = JevCandidatePolicy.passes(a.probability, s, snap?.context())
-            Column(
-                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp)
-            ) {
-                Text(
-                    "방금 요청 결과: ${"%.1f".format(a.probability * 100)}% (${if (passed) "개입 기준 통과" else "기준 미달"} · ${a.trial.latencyMs}ms)",
-                    fontWeight = FontWeight.Bold,
-                    color = if (passed) ItvGreen else MaterialTheme.colorScheme.error
-                )
-                if (passed) {
-                    val disp = a.trial.displayedAt != null
-                    val r = if (disp) "화면에 표시 완료" else (snap?.displayBlockingReason ?: resolveNotShownReason(a.trial, s.actualIntervention, com.example.itv.presentation.coaching.CoachingAutoStart.testModeEnabled(context), s.enabled, android.provider.Settings.canDrawOverlays(context)))
+                Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
                     Text(
-                        "• 개입 표시: ${if (disp) "표시됨" else "미표시"} ($r)",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (disp) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                        text = if (isLongformOrAll) "확률 격차별 재평가 변동표 (일반/통합 1:3 기준)" else "확률 격차별 재평가 변동표 (숏폼 1:1 기준)",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    DynamicTierRow(
+                        tierLabel = "통과/초과",
+                        gapRange = "격차 0%p",
+                        intervalText = if (isLongformOrAll) "60초 (실사용 3분)" else "30초 (0.5분)",
+                        active = activeTier == 0
+                    )
+                    DynamicTierRow(
+                        tierLabel = "근접",
+                        gapRange = "0 ~ 15%p",
+                        intervalText = if (isLongformOrAll) "60~120초 (3~6분)" else "30~90초 (0.5~1.5분)",
+                        active = activeTier == 1
+                    )
+                    DynamicTierRow(
+                        tierLabel = "중간",
+                        gapRange = "15 ~ 30%p",
+                        intervalText = if (isLongformOrAll) "120~240초 (6~12분)" else "90~210초 (1.5~3.5분)",
+                        active = activeTier == 2
+                    )
+                    DynamicTierRow(
+                        tierLabel = "원거리",
+                        gapRange = "30%p 이상",
+                        intervalText = if (isLongformOrAll) "240~360초 (12~18분)" else "210~360초 (3.5~6분)",
+                        active = activeTier == 3
+                    )
+                }
+            }
+
+            // 4. 세부 관측 맥락 (접기/펼치기 - 갱신 시점 고정)
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
+                border = BorderStroke(1.dp, ItvLine)
+            ) {
+                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { showDetails = !showDetails },
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "세부 관측 맥락 (물리 시간 · 롱폼 · 취침 점수 · 각도)",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = ItvGreen
+                        )
+                        Text(
+                            text = if (showDetails) "접기 ▴" else "펼치기 ▾",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    if (showDetails) {
+                        val rawPhysicalMs = ctx.rawShortformMs + ctx.rawGeneralMs
+                        val sfRatio = if (rawPhysicalMs > 0L) (ctx.rawShortformMs.toDouble() / rawPhysicalMs.toDouble()) * 100.0 else 0.0
+                        val weightedMs = ctx.rawShortformMs + (ctx.rawGeneralMs / 3L)
+                        CompactCheckRow(
+                            label = "물리 사용 시간",
+                            value = "${"%.1f".format(rawPhysicalMs / 1000.0)}초 (숏폼 ${"%.1f".format(ctx.rawShortformMs / 1000.0)}초 + 일반 ${"%.1f".format(ctx.rawGeneralMs / 1000.0)}초)"
+                        )
+                        CompactCheckRow(
+                            label = "숏폼 비중 / 환산",
+                            value = "${"%.1f".format(sfRatio)}% · 환산 ${"%.1f".format(weightedMs / 1000.0)}초 (1x + 1/3x)"
+                        )
+                        CompactCheckRow(
+                            label = "롱폼 시청 분석",
+                            value = "롱폼 ${"%.0f".format(ctx.longformWatchMs / 1000.0)}초 · 현재영상 ${"%.0f".format(ctx.currentVideoWatchMs / 1000.0)}초 · 완료 ${ctx.completedLongformCount}편 (${ctx.youtubeWatchMode ?: "대기"})"
+                        )
+                        val amb = snap.ambientSnapshot
+                        CompactCheckRow(
+                            label = "취침 점수 (60점+)",
+                            value = "${amb.bedtimeScore}점 / 100점 · ${if (amb.isBedtimeCandidate) "취침 케어 대상" else "일상 활동"} (${if (snap.bedtimeCareEnabled) "설정 ON" else "설정 OFF"})",
+                            highlight = amb.isBedtimeCandidate
+                        )
+                        CompactCheckRow(
+                            label = "취침 점수 내역",
+                            value = amb.bedtimeScoreBreakdown
+                        )
+                        val postureStr = when (amb.posture) {
+                            UserPosture.LYING_DOWN -> "수평/하향 (${amb.pitchDegrees?.toInt() ?: 0}° · 경추 고하중)"
+                            UserPosture.SITTING_OR_STANDING -> "정면 파지 (${amb.pitchDegrees?.toInt() ?: 0}° · 어깨/허리)"
+                            UserPosture.TABLE_OR_DESK -> "테이블 거치 (${amb.pitchDegrees?.toInt() ?: 0}° · 고개 숙임)"
+                            UserPosture.FACEDOWN -> "엎어둠 (완전 차단)"
+                            else -> "각도 측정 중 (${amb.pitchDegrees?.toInt() ?: 0}°)"
+                        }
+                        CompactCheckRow(label = "파지 각도", value = postureStr)
+                    }
                 }
             }
         }
@@ -892,7 +1310,7 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
             onClick = { snap?.let { vm.manual(it.context()) } },
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text(if (targetApp == "ALL") "현재 통합 측정값으로 Jev 확률 요청 (토큰 1회)" else "현재 측정값으로 Jev 확률 요청 (토큰 1회)")
+            Text("현재 전체 측정값으로 Jev 확률 요청 (토큰 1회)")
         }
     }
 }
@@ -1337,12 +1755,19 @@ private fun LongformObservationPage() {
     val lastSession = com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.lastWatchedSession
     val lastIgSession = com.example.itv.infrastructure.observation.instagram.InstagramTracker.lastSessionEvent
     val lastGenSession = com.example.itv.infrastructure.observation.GeneralAppTracker.lastExternalAppSession
-    var hudShowing by remember { mutableStateOf(com.example.itv.presentation.coaching.LongformDiagnosticHud.isShowing) }
+    var hasHudPermissions by remember {
+        mutableStateOf(com.example.itv.presentation.coaching.LongformDiagnosticHud.hasRequiredPermissions(context))
+    }
+    var hudShowing by remember {
+        mutableStateOf(com.example.itv.presentation.coaching.LongformDiagnosticHud.isShowing && hasHudPermissions)
+    }
 
     LaunchedEffect(Unit) {
         while (true) {
             kotlinx.coroutines.delay(1000L)
             refreshTick = android.os.SystemClock.elapsedRealtime()
+            com.example.itv.presentation.coaching.LongformDiagnosticHud.hideIfPermissionsRevoked(context)
+            hasHudPermissions = com.example.itv.presentation.coaching.LongformDiagnosticHud.hasRequiredPermissions(context)
             hudShowing = com.example.itv.presentation.coaching.LongformDiagnosticHud.isShowing
         }
     }
@@ -1355,32 +1780,44 @@ private fun LongformObservationPage() {
 
         Button(
             onClick = {
+                if (!hasHudPermissions) return@Button
                 if (hudShowing) {
                     com.example.itv.presentation.coaching.LongformDiagnosticHud.hide()
                     hudShowing = false
                 } else {
-                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M && !android.provider.Settings.canDrawOverlays(context)) {
-                        android.widget.Toast.makeText(context, "다른 앱 위에 표시 권한을 허용해주세요.", android.widget.Toast.LENGTH_LONG).show()
-                        val intent = android.content.Intent(
-                            android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                            android.net.Uri.parse("package:${context.packageName}")
-                        )
-                        context.startActivity(intent)
+                    val success = com.example.itv.presentation.coaching.LongformDiagnosticHud.show(context)
+                    if (success) {
+                        hudShowing = true
+                        android.widget.Toast.makeText(context, "실시간 플로팅 HUD가 활성화되었습니다. 다른 앱을 실행해보세요!", android.widget.Toast.LENGTH_SHORT).show()
                     } else {
-                        val success = com.example.itv.presentation.coaching.LongformDiagnosticHud.show(context)
-                        if (success) {
-                            hudShowing = true
-                            android.widget.Toast.makeText(context, "실시간 플로팅 HUD가 활성화되었습니다. 다른 앱을 실행해보세요!", android.widget.Toast.LENGTH_SHORT).show()
-                        }
+                        hasHudPermissions = com.example.itv.presentation.coaching.LongformDiagnosticHud.hasRequiredPermissions(context)
                     }
                 }
             },
+            enabled = hasHudPermissions,
             modifier = Modifier.fillMaxWidth(),
             colors = ButtonDefaults.buttonColors(
-                containerColor = if (hudShowing) MaterialTheme.colorScheme.error else ItvGreen
+                containerColor = if (hudShowing) MaterialTheme.colorScheme.error else ItvGreen,
+                disabledContainerColor = androidx.compose.ui.graphics.Color(0xFF4B5563),
+                disabledContentColor = androidx.compose.ui.graphics.Color(0xFF9CA3AF)
             )
         ) {
-            Text(if (hudShowing) "실시간 플로팅 HUD 끄기" else "통합 실시간 플로팅 HUD 켜기", fontWeight = FontWeight.Bold)
+            Text(
+                when {
+                    !hasHudPermissions -> "플로팅 HUD 사용 불가 (권한 필요)"
+                    hudShowing -> "실시간 플로팅 HUD 끄기"
+                    else -> "통합 실시간 플로팅 HUD 켜기"
+                },
+                fontWeight = FontWeight.Bold
+            )
+        }
+
+        if (!hasHudPermissions) {
+            Text(
+                text = com.example.itv.presentation.coaching.LongformDiagnosticHud.missingPermissionSummary(context),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error
+            )
         }
 
         Row(
@@ -1398,17 +1835,81 @@ private fun LongformObservationPage() {
             }
             Button(
                 onClick = {
+                    if (!hasHudPermissions) return@Button
                     val hud = com.example.itv.presentation.coaching.LongformDiagnosticHud
                     if (!hud.isShowing) {
                         hud.show(context)
-                        hudShowing = true
+                        hudShowing = hud.isShowing
                     }
-                    hud.setSleepingState(!hud.isSleeping)
+                    if (hud.isShowing) {
+                        hud.setSleepingState(!hud.isSleeping)
+                    }
                 },
+                enabled = hasHudPermissions,
                 modifier = Modifier.weight(1f),
-                colors = ButtonDefaults.buttonColors(containerColor = androidx.compose.ui.graphics.Color(0xFF7C3AED))
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = androidx.compose.ui.graphics.Color(0xFF7C3AED),
+                    disabledContainerColor = androidx.compose.ui.graphics.Color(0xFF4B5563),
+                    disabledContentColor = androidx.compose.ui.graphics.Color(0xFF9CA3AF)
+                )
             ) {
                 Text("💤 HUD 수면 토글", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+
+        // Jev 확률 vs 앱 기준 확률 차이 5단계 HUD 표정 미리보기
+        var previewMood by remember { mutableStateOf<com.example.itv.presentation.components.PuppyMood?>(null) }
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                "🐾 HUD 5단계 표정 미리보기 (실제 실행 중에는 Jev 확률과 기준 확률 차이에 따라 자동 변경)",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            val moodItems = listOf<Pair<String, com.example.itv.presentation.components.PuppyMood?>>(
+                "자동" to null,
+                "해맑" to com.example.itv.presentation.components.PuppyMood.BRIGHT,
+                "웃음" to com.example.itv.presentation.components.PuppyMood.SMILE,
+                "슬픔" to com.example.itv.presentation.components.PuppyMood.SAD,
+                "화남" to com.example.itv.presentation.components.PuppyMood.ANGRY,
+                "아픔" to com.example.itv.presentation.components.PuppyMood.SICK
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                moodItems.forEach { (label, mood) ->
+                    val selected = previewMood == mood
+                    OutlinedButton(
+                        onClick = {
+                            if (!hasHudPermissions) return@OutlinedButton
+                            val hud = com.example.itv.presentation.coaching.LongformDiagnosticHud
+                            if (!hud.isShowing) {
+                                hud.show(context)
+                                hudShowing = hud.isShowing
+                            }
+                            if (hud.isShowing) {
+                                if (mood != null && hud.isSleeping) {
+                                    hud.setSleepingState(false)
+                                }
+                                previewMood = mood
+                                hud.setPreviewMoodOverride(context, mood)
+                            }
+                        },
+                        enabled = hasHudPermissions,
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 6.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else androidx.compose.ui.graphics.Color.Transparent
+                        )
+                    ) {
+                        Text(
+                            label,
+                            fontSize = 11.sp,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                            maxLines = 1
+                        )
+                    }
+                }
             }
         }
 

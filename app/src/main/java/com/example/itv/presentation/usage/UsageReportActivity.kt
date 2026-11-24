@@ -57,23 +57,23 @@ import com.example.itv.presentation.components.LocalDarkTheme
 
 private val ChartSurface: Color
     @Composable
-    get() = if (LocalDarkTheme.current) Color(0xFF161C18) else Color(0xFFFDFDFF)
+    get() = if (LocalDarkTheme.current) Color(0xFF131B16) else Color(0xFFF5F1E9)
 
 internal val RecordContentGreen: Color
     @Composable
-    get() = if (LocalDarkTheme.current) Color(0xFF1E2620) else Color(0xFFEAF4D8)
+    get() = if (LocalDarkTheme.current) Color(0xFF1D2721) else Color(0xFFFFFFFF)
 
 private val ChartInk: Color
     @Composable
-    get() = if (LocalDarkTheme.current) Color(0xFFE2EBE4) else Color(0xFF1E2433)
+    get() = if (LocalDarkTheme.current) Color(0xFFE6EFE8) else Color(0xFF241E19)
 
 private val ChartSecondary: Color
     @Composable
-    get() = if (LocalDarkTheme.current) Color(0xFFA6B7A9) else Color(0xFF505A74)
+    get() = if (LocalDarkTheme.current) Color(0xFFA8BCAE) else Color(0xFF61564B)
 
 private val ChartGrid: Color
     @Composable
-    get() = if (LocalDarkTheme.current) Color(0xFF35463A) else Color(0xFFE2E6F0)
+    get() = if (LocalDarkTheme.current) Color(0xFF34483B) else Color(0xFFD9D0C3)
 private fun periodColor(days: Int): Color = when (days) {
     1 -> Color(0xFF1751D0)
     7 -> Color(0xFFE2661E)

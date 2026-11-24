@@ -3,7 +3,6 @@ package com.example.itv.presentation.home
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -54,9 +53,16 @@ internal fun HomeUsageLayout(
 @Composable
 private fun PlatformUsageCard(title: String, packageName: String, fallback: String,
     accent: Color, total: String, shortName: String, shortTime: String, transitions: String) {
-    Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp),
-        border = BorderStroke(1.dp, ItvLine),
-        colors = CardDefaults.cardColors(containerColor = ItvMint)) {
+    ItvTactileCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
+        containerColor = ItvCardSurface,
+        borderColor = ItvInkBorder,
+        shadowColor = ItvInkShadow,
+        borderWidth = 1.8.dp,
+        shadowOffsetX = 2.dp,
+        shadowOffsetY = 4.dp
+    ) {
         Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp)) {

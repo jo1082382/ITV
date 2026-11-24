@@ -20,8 +20,14 @@ internal class RestUsageClock(private val requiredRestMs: Long) {
 
     /**
      * @param isShortform true이면 숏폼(1.0 가중치), false이면 일반 폰 사용(1:3 비율 중 1/3 가중치 적용: 3초당 1초 환산)
+     * @param paused true이면 우리 앱(ITV) 확인 또는 비측정 시스템 화면 체류 중으로, 사용량과 휴식 시간을 모두 보존(일시정지)
      */
-    fun observe(now: Long, using: Boolean, isShortform: Boolean = false): Boolean {
+    fun observe(now: Long, using: Boolean, isShortform: Boolean = false, paused: Boolean = false): Boolean {
+        if (paused) {
+            lastAt = now
+            lastUsing = null
+            return false
+        }
         val before = lastAt
         val previous = lastUsing
         val delta = if (before == null) 0L else now - before

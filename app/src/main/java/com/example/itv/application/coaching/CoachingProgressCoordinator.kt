@@ -26,8 +26,14 @@ internal class CoachingProgressCoordinator(
         responseController.suppressed = false
         effects.hideOffer()
     }
-    fun observe(now: Long, using: Boolean, offerVisible: Boolean, isShortform: Boolean = false): Boolean {
-        if (usageClock.observe(now, using, isShortform)) reset()
+    fun observe(
+        now: Long,
+        using: Boolean,
+        offerVisible: Boolean,
+        isShortform: Boolean = false,
+        paused: Boolean = false
+    ): Boolean {
+        if (usageClock.observe(now, using, isShortform, paused)) reset()
         if (!using) {
             safeSince = null
             if (offerVisible) { effects.hideOffer(); responseController.offered = false }

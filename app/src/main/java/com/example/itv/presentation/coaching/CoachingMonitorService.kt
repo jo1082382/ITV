@@ -576,13 +576,30 @@ class CoachingMonitorService : Service() {
     private fun unlocked() = observer.unlocked()
     private fun resetOfferState() { progress.reset() }
     private fun observeUsage(): Boolean {
-        val isActiveVideo = YoutubeProbe.screenState() == 1 ||
-            ReelsProbe.screenState() == 1 ||
-            com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.isActivelyInShortsOrComments() ||
-            com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.isActivelyWatchingLongform() ||
-            com.example.itv.infrastructure.observation.instagram.InstagramTracker.isActivelyInReelsCommentsOrStory() ||
-            com.example.itv.infrastructure.observation.GeneralAppTracker.isInterventionDeferredOrBlocked(JevObservationHub.foregroundPackage)
-        return progress.observe(SystemClock.elapsedRealtime(), unlocked(), overlay != null, isActiveVideo)
+        val isUnlocked = unlocked()
+        val nowElapsed = SystemClock.elapsedRealtime()
+        val rawFgPkg = JevObservationHub.foregroundPackage
+        val fgPkg = rawFgPkg.takeIf { nowElapsed - JevObservationHub.checkedAt in 0..3000 }
+        val activePkg = fgPkg ?: rawFgPkg
+        val isOwnApp = activePkg != null && (
+            activePkg == packageName ||
+            activePkg.startsWith("com.team.itv") ||
+            activePkg.startsWith("com.example.itv")
+        )
+        val isNonCountedSystem = fgPkg != null && (
+            JevSettings.isLauncherPackage(fgPkg) ||
+            JevSettings.isExcludedSystemPackage(fgPkg)
+        )
+        // 1.0x(1초당 1초)는 실제 숏폼(YouTube 쇼츠 / Instagram 릴스) 시청 중에만 적용하고,
+        // 롱폼 영상·일반 앱·게임 등은 모두 1:3 비율(1초당 1/3초)로 환산한다.
+        val isShortform = isUnlocked && !isOwnApp && !isNonCountedSystem && when (fgPkg) {
+            JevSettings.YOUTUBE -> YoutubeProbe.screenState() == 1
+            JevSettings.INSTAGRAM -> ReelsProbe.screenState() == 1
+            else -> false
+        }
+        // 우리 앱(ITV)이나 홈 런처·시스템 UI 체류 중에는 사용 시간 증가를 일시정지하고 기존 누적값을 보존한다.
+        val paused = isUnlocked && (isOwnApp || isNonCountedSystem)
+        return progress.observe(nowElapsed, isUnlocked, overlay != null, isShortform = isShortform, paused = paused)
     }
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -750,7 +767,8 @@ class CoachingMonitorService : Service() {
         val now = SystemClock.elapsedRealtime()
         if (jevMode()) {
             val sample = jev.state.value
-            val liveContinuous = usageClock.usedMs
+            val allContinuous = jev.sessionState("ALL")?.continuousMs ?: 0L
+            val liveContinuous = if (allContinuous > 0L) allContinuous else usageClock.usedMs
             val displayedPkg = sample.context?.packageName ?: if (YoutubeProbe.screenState() == 1) "YouTube 쇼츠" else if (YoutubeProbe.screenState() == 0) "YouTube" else if (ReelsProbe.screenState() == 1) "Instagram 릴스" else "스마트폰 일반 사용"
             DeveloperStatus.value = DeveloperSnapshot(now, running, liveContinuous, usageClock.restMs,
                 jev.store.settings.value.continuousSeconds * 1000L, TestCoachingPolicy.naturalRestMs(jevMode()),

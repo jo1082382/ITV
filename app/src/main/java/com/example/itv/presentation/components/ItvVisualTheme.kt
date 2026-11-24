@@ -24,14 +24,20 @@ import com.example.itv.infrastructure.theme.UserThemeStore
 
 val LocalDarkTheme = compositionLocalOf { false }
 
-val ItvGreenLight = Color(0xFF2D8050)
+val ItvGreenLight = Color(0xFF237A4B)
 val ItvGreenDark = Color(0xFF5ED38C)
 
-val ItvMintLight = Color(0xFFF2F9F2)
-val ItvMintDark = Color(0xFF1E2620)
+val ItvMintLight = Color(0xFFF3EFE7)
+val ItvMintDark = Color(0xFF26342C)
 
-val ItvLineLight = Color(0xFFBFDDC4)
-val ItvLineDark = Color(0xFF35463A)
+val ItvLineLight = Color(0xFFCFC5B6)
+val ItvLineDark = Color(0xFF3E5446)
+
+val ItvCardLight = Color(0xFFFFFFFF)
+val ItvCardDark = Color(0xFF1D2721)
+
+val ItvInsetLight = Color(0xFFF5F1E9)
+val ItvInsetDark = Color(0xFF141C17)
 
 val ItvGreen: Color
     @Composable
@@ -48,36 +54,48 @@ val ItvLine: Color
     @ReadOnlyComposable
     get() = if (LocalDarkTheme.current) ItvLineDark else ItvLineLight
 
+val ItvCardSurface: Color
+    @Composable
+    @ReadOnlyComposable
+    get() = if (LocalDarkTheme.current) ItvCardDark else ItvCardLight
+
+val ItvInsetSurface: Color
+    @Composable
+    @ReadOnlyComposable
+    get() = if (LocalDarkTheme.current) ItvInsetDark else ItvInsetLight
+
 private val LightColorScheme = lightColorScheme(
     primary = ItvGreenLight,
     onPrimary = Color.White,
-    secondary = Color(0xFF54765B),
+    secondary = Color(0xFF4B6D54),
     onSecondary = Color.White,
-    background = Color.White,
-    onBackground = Color(0xFF26392D),
-    surface = Color.White,
-    onSurface = Color(0xFF26392D),
+    background = Color(0xFFEAE4DA),
+    onBackground = Color(0xFF241E19),
+    surface = ItvCardLight,
+    onSurface = Color(0xFF241E19),
     surfaceVariant = ItvMintLight,
-    onSurfaceVariant = Color(0xFF596C5D),
+    onSurfaceVariant = Color(0xFF61564B),
     outline = ItvLineLight,
-    primaryContainer = Color(0xFFDFF1DF),
-    onPrimaryContainer = Color(0xFF16472A)
+    outlineVariant = Color(0xFFDED6C8),
+    primaryContainer = Color(0xFFDCF0E2),
+    onPrimaryContainer = Color(0xFF134025)
 )
 
 private val DarkColorScheme = darkColorScheme(
     primary = ItvGreenDark,
-    onPrimary = Color(0xFF0D2214),
+    onPrimary = Color(0xFF0A1F12),
     secondary = Color(0xFF90B598),
     onSecondary = Color(0xFF003816),
-    background = Color(0xFF121513),
-    onBackground = Color(0xFFE2EBE4),
-    surface = Color(0xFF1A211D),
-    onSurface = Color(0xFFE2EBE4),
+    background = Color(0xFF0B0F0D),
+    onBackground = Color(0xFFE6EFE8),
+    surface = ItvCardDark,
+    onSurface = Color(0xFFE6EFE8),
     surfaceVariant = ItvMintDark,
-    onSurfaceVariant = Color(0xFFBFCFBF),
+    onSurfaceVariant = Color(0xFFB5C7BA),
     outline = ItvLineDark,
+    outlineVariant = Color(0xFF314438),
     primaryContainer = Color(0xFF1D472D),
-    onPrimaryContainer = Color(0xFF9FF5BA)
+    onPrimaryContainer = Color(0xFFA8F7C0)
 )
 
 @Composable

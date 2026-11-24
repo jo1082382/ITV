@@ -7,15 +7,20 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.Settings
+import android.view.Gravity
 import android.view.View
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import com.example.itv.domain.coaching.CharacterIntensity
 import com.example.itv.domain.coaching.InterventionReasonResolver
 import com.example.itv.domain.coaching.RestMissionCatalog
@@ -24,6 +29,9 @@ import com.example.itv.domain.coaching.UserPosture
 import com.example.itv.infrastructure.coaching.UserCoachingSettingsStore
 import com.example.itv.infrastructure.observation.LightAndBrightnessTracker
 import com.example.itv.presentation.coaching.CoachingOverlayFactory
+import com.example.itv.presentation.coaching.HudPuppyFaceRenderer
+import com.example.itv.presentation.coaching.LongformDiagnosticHud
+import com.example.itv.presentation.components.PuppyMood
 import com.example.itv.presentation.sleep.BedtimeCareController
 
 /**
@@ -38,6 +46,10 @@ class CompanionPreviewActivity : Activity() {
     private lateinit var statusText: TextView
     private lateinit var rewardText: TextView
     private lateinit var tracker: LightAndBrightnessTracker
+    private lateinit var hudTestStatusText: TextView
+    private lateinit var hudPowerBtn: Button
+    private lateinit var hudLiveBtn: Button
+    private val hudMoodButtons = mutableListOf<Pair<PuppyMood, Button>>()
 
     private var current: View? = null
     private var selected = false
@@ -202,60 +214,122 @@ class CompanionPreviewActivity : Activity() {
         }
         column.addView(nightBar)
 
-        // 야간 비침해 배너 알림 및 실시간 HUD 수면 모드 미리보기 제어 바
-        val gentleBar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(dp(6), dp(3), dp(6), dp(3))
+        // 플로팅 HUD 5단계 표정 테스트 제어 바
+        val hudTestPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(8), dp(6), dp(8), dp(6))
             setBackgroundColor(Color.parseColor("#0F172A"))
         }
-        fun gentleButton(text: String, bgColor: Int, action: () -> Unit) {
-            val btn = Button(this).apply {
-                this.text = text
-                textSize = 11f
-                setTextColor(Color.WHITE)
-                setBackgroundColor(bgColor)
-                setPadding(dp(2), dp(2), dp(2), dp(2))
-                setOnClickListener { action() }
-            }
-            gentleBar.addView(btn, LinearLayout.LayoutParams(0, dp(40), 1f).apply {
-                setMargins(dp(2), 0, dp(2), 0)
-            })
+
+        val hudTopRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
         }
-        gentleButton("🔔 비침해 배너(30초)", Color.parseColor("#4338CA")) {
-            val success = com.example.itv.presentation.sleep.NightGentleAlertController.showGentleBanner(this, isTestMode = true)
-            if (!success && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M && !android.provider.Settings.canDrawOverlays(this)) {
-                android.widget.Toast.makeText(this, "다른 앱 위에 표시 권한을 허용해주세요.", android.widget.Toast.LENGTH_SHORT).show()
-                val intent = android.content.Intent(
-                    android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    android.net.Uri.parse("package:$packageName")
-                )
-                startActivity(intent)
+        hudTestStatusText = TextView(this).apply {
+            textSize = 11.5f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.parseColor("#E2E8F0"))
+            maxLines = 1
+        }
+        hudTopRow.addView(
+            hudTestStatusText,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = dp(6)
+            }
+        )
+
+        hudLiveBtn = Button(this).apply {
+            text = "실시간"
+            textSize = 11f
+            isAllCaps = false
+            setPadding(dp(8), 0, dp(8), 0)
+            minWidth = 0
+            minimumWidth = 0
+            minHeight = 0
+            minimumHeight = 0
+            setOnClickListener {
+                if (!ensureHudReady()) return@setOnClickListener
+                if (LongformDiagnosticHud.isSleeping) {
+                    LongformDiagnosticHud.setSleepingState(false)
+                }
+                LongformDiagnosticHud.setPreviewMoodOverride(this@CompanionPreviewActivity, null)
+                refreshHudTestControls()
             }
         }
-        gentleButton("🐶 HUD 토글", Color.parseColor("#4F46E5")) {
-            if (com.example.itv.presentation.coaching.LongformDiagnosticHud.isShowing) {
-                com.example.itv.presentation.coaching.LongformDiagnosticHud.hide()
-            } else {
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M && !android.provider.Settings.canDrawOverlays(this)) {
-                    android.widget.Toast.makeText(this, "다른 앱 위에 표시 권한을 허용해주세요.", android.widget.Toast.LENGTH_SHORT).show()
-                    val intent = android.content.Intent(
-                        android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                        android.net.Uri.parse("package:$packageName")
-                    )
-                    startActivity(intent)
+        hudTopRow.addView(
+            hudLiveBtn,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(32)).apply {
+                marginEnd = dp(4)
+            }
+        )
+
+        hudPowerBtn = Button(this).apply {
+            textSize = 11f
+            isAllCaps = false
+            setPadding(dp(10), 0, dp(10), 0)
+            minWidth = 0
+            minimumWidth = 0
+            minHeight = 0
+            minimumHeight = 0
+            setOnClickListener {
+                if (LongformDiagnosticHud.isShowing) {
+                    LongformDiagnosticHud.setPreviewMoodOverride(this@CompanionPreviewActivity, null)
+                    LongformDiagnosticHud.hide()
                 } else {
-                    com.example.itv.presentation.coaching.LongformDiagnosticHud.show(this)
+                    ensureHudReady()
+                }
+                refreshHudTestControls()
+            }
+        }
+        hudTopRow.addView(
+            hudPowerBtn,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(32))
+        )
+        hudTestPanel.addView(hudTopRow)
+
+        val hudMoodRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(5), 0, 0)
+        }
+        val moodDefs = listOf(
+            PuppyMood.BRIGHT to "해맑\n≥30%p",
+            PuppyMood.SMILE to "웃음\n15~30",
+            PuppyMood.SAD to "슬픔\n5~15",
+            PuppyMood.ANGRY to "화남\n0~5",
+            PuppyMood.SICK to "아픔\n≤0%p"
+        )
+        hudMoodButtons.clear()
+        moodDefs.forEach { (mood, label) ->
+            val btn = Button(this).apply {
+                text = label
+                textSize = 10.5f
+                isAllCaps = false
+                setLineSpacing(0f, 0.92f)
+                setPadding(dp(2), dp(2), dp(2), dp(2))
+                minWidth = 0
+                minimumWidth = 0
+                minHeight = 0
+                minimumHeight = 0
+                setOnClickListener {
+                    if (!ensureHudReady()) return@setOnClickListener
+                    if (LongformDiagnosticHud.isSleeping) {
+                        LongformDiagnosticHud.setSleepingState(false)
+                    }
+                    LongformDiagnosticHud.setPreviewMoodOverride(this@CompanionPreviewActivity, mood)
+                    refreshHudTestControls()
                 }
             }
+            hudMoodButtons += mood to btn
+            hudMoodRow.addView(
+                btn,
+                LinearLayout.LayoutParams(0, dp(38), 1f).apply {
+                    setMargins(dp(2), 0, dp(2), 0)
+                }
+            )
         }
-        gentleButton("💤 HUD 수면 전환", Color.parseColor("#6D28D9")) {
-            val hud = com.example.itv.presentation.coaching.LongformDiagnosticHud
-            if (!hud.isShowing) {
-                hud.show(this)
-            }
-            hud.setSleepingState(!hud.isSleeping)
-        }
-        column.addView(gentleBar)
+        hudTestPanel.addView(hudMoodRow)
+        column.addView(hudTestPanel)
+        refreshHudTestControls()
 
         // 3. Companion display host area
         host = FrameLayout(this).apply {
@@ -272,10 +346,82 @@ class CompanionPreviewActivity : Activity() {
         }
     }
 
+    private fun makeChipBg(fillColor: Int, strokeColor: Int): GradientDrawable =
+        GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(8).toFloat()
+            setColor(fillColor)
+            setStroke(dp(1), strokeColor)
+        }
+
+    private fun ensureHudReady(): Boolean {
+        if (!LongformDiagnosticHud.hasRequiredPermissions(this)) {
+            val summary = LongformDiagnosticHud.missingPermissionSummary(this)
+            Toast.makeText(this, summary, Toast.LENGTH_SHORT).show()
+            if (!Settings.canDrawOverlays(this)) {
+                runCatching {
+                    startActivity(
+                        Intent(
+                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                            Uri.parse("package:$packageName")
+                        )
+                    )
+                }
+            }
+            return false
+        }
+        if (!LongformDiagnosticHud.isShowing) {
+            LongformDiagnosticHud.show(this)
+        }
+        return LongformDiagnosticHud.isShowing
+    }
+
+    private fun refreshHudTestControls() {
+        val hasPerms = LongformDiagnosticHud.hasRequiredPermissions(this)
+        val showing = LongformDiagnosticHud.isShowing
+        val overrideMood = LongformDiagnosticHud.previewMoodOverride
+
+        hudTestStatusText.text = when {
+            !hasPerms -> "🐾 HUD 테스트 · 권한 필요"
+            !showing -> "🐾 HUD 테스트 · 5단계 표정 선택 시 HUD 표시"
+            overrideMood != null -> "🐾 HUD 테스트 · ${HudPuppyFaceRenderer.stageLabel(overrideMood)} (${HudPuppyFaceRenderer.gapRangeLabel(overrideMood)})"
+            else -> "🐾 HUD 테스트 · Jev 확률차 실시간 연동"
+        }
+
+        hudPowerBtn.text = if (showing) "HUD 끄기" else "HUD 켜기"
+        hudPowerBtn.alpha = if (hasPerms) 1f else 0.55f
+        hudPowerBtn.setTextColor(Color.WHITE)
+        hudPowerBtn.background = makeChipBg(
+            fillColor = if (showing) Color.parseColor("#DC2626") else Color.parseColor("#2563EB"),
+            strokeColor = Color.TRANSPARENT
+        )
+
+        val liveSelected = showing && overrideMood == null && !LongformDiagnosticHud.isSleeping
+        hudLiveBtn.alpha = if (hasPerms) 1f else 0.55f
+        hudLiveBtn.setTextColor(if (liveSelected) Color.parseColor("#0F172A") else Color.parseColor("#E2E8F0"))
+        hudLiveBtn.background = makeChipBg(
+            fillColor = if (liveSelected) Color.parseColor("#38BDF8") else Color.parseColor("#1E293B"),
+            strokeColor = if (liveSelected) Color.parseColor("#38BDF8") else Color.parseColor("#475569")
+        )
+
+        hudMoodButtons.forEach { (mood, btn) ->
+            val selected = showing && overrideMood == mood
+            val accent = HudPuppyFaceRenderer.accentColorInt(mood)
+            btn.alpha = if (hasPerms) 1f else 0.55f
+            btn.setTextColor(if (selected) Color.parseColor("#0F172A") else Color.parseColor("#E2E8F0"))
+            btn.typeface = if (selected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+            btn.background = makeChipBg(
+                fillColor = if (selected) accent else Color.parseColor("#1E293B"),
+                strokeColor = if (selected) accent else Color.parseColor("#334155")
+            )
+        }
+    }
+
     override fun onResume() {
         super.onResume()
         tracker.start()
         tracker.startContinuousPostureListening()
+        refreshHudTestControls()
         handler.removeCallbacks(sensorUpdater)
         handler.post(sensorUpdater)
         if (missionActive && missionOffAt > 0L) {

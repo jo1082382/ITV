@@ -4,7 +4,6 @@ import android.content.Context
 import android.content.ContextWrapper
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -12,6 +11,8 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -21,9 +22,11 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -38,8 +41,16 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.example.itv.composition.queryNightReport
 import com.example.itv.domain.records.*
 import com.example.itv.infrastructure.storage.MonthlyUsageArchiveStore
+import com.example.itv.presentation.components.ItvCardSurface
 import com.example.itv.presentation.components.ItvGreen
+import com.example.itv.presentation.components.ItvInkBorder
+import com.example.itv.presentation.components.ItvInkShadow
+import com.example.itv.presentation.components.ItvInsetSurface
 import com.example.itv.presentation.components.ItvLine
+import com.example.itv.presentation.components.ItvSeasonalCalendarBanner
+import com.example.itv.presentation.components.ItvSeasonalRoofTopAccent
+import com.example.itv.presentation.components.ItvTactileButton
+import com.example.itv.presentation.components.ItvTactileCard
 import com.example.itv.presentation.components.LocalDarkTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -50,6 +61,16 @@ import kotlin.math.cos
 import kotlin.math.roundToLong
 import kotlin.math.sin
 import kotlin.time.Duration.Companion.seconds
+
+private val SLEEP_DAYS_OF_WEEK = listOf(
+    DayOfWeek.MONDAY to "월",
+    DayOfWeek.TUESDAY to "화",
+    DayOfWeek.WEDNESDAY to "수",
+    DayOfWeek.THURSDAY to "목",
+    DayOfWeek.FRIDAY to "금",
+    DayOfWeek.SATURDAY to "토",
+    DayOfWeek.SUNDAY to "일"
+)
 
 private fun Context.findHostActivity(): ComponentActivity? = when (this) {
     is ComponentActivity -> this
@@ -69,7 +90,7 @@ fun SleepEstimationTabContent(
 ) {
     val context = LocalContext.current
     val isDark = LocalDarkTheme.current
-    val inkColor = if (isDark) Color(0xFFE2EBE4) else Color(0xFF1E2433)
+    val inkColor = if (isDark) Color(0xFFE2EBE4) else Color(0xFF241E19)
     var nights by remember { mutableStateOf<NightReport?>(null) }
     var nightError by remember { mutableStateOf<String?>(null) }
     var revision by remember { mutableIntStateOf(0) }
@@ -132,7 +153,7 @@ fun SleepEstimationTabContent(
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 28.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        item(key = "sleep_tab_header") {
+        item(key = "sleep_tab_header", contentType = "sleep_tab_header") {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -145,17 +166,20 @@ fun SleepEstimationTabContent(
                     color = inkColor,
                     modifier = Modifier.align(Alignment.Center)
                 )
-                Surface(
+                ItvTactileButton(
+                    onClick = { showOverviewHelp = true },
                     shape = CircleShape,
-                    color = if (isDark) Color(0xFF28362B) else Color.White,
-                    border = BorderStroke(1.dp, if (isDark) ItvLine.copy(alpha = 0.5f) else ItvLine),
+                    containerColor = if (isDark) Color(0xFF28362B) else Color.White,
+                    borderColor = ItvInkBorder,
+                    shadowColor = ItvInkShadow,
+                    borderWidth = 1.6.dp,
+                    shadowOffsetX = 1.dp,
+                    shadowOffsetY = 2.dp,
                     modifier = Modifier
                         .align(Alignment.CenterEnd)
-                        .size(30.dp)
-                        .clip(CircleShape)
-                        .clickable { showOverviewHelp = true }
+                        .size(34.dp)
                 ) {
-                    Box(contentAlignment = Alignment.Center) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Text(
                             text = "?",
                             fontSize = 14.sp,
@@ -167,64 +191,85 @@ fun SleepEstimationTabContent(
             }
         }
 
-        item(key = "sleep_month_navigator") {
-            val navCardBg = if (isDark) Color(0xFF202B22) else RecordContentGreen
-            val navBtnBg = if (isDark) Color(0xFF2C392F) else Color.White
-            OutlinedCard(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.outlinedCardColors(
-                    containerColor = navCardBg,
-                    contentColor = inkColor
-                ),
-                border = BorderStroke(1.dp, if (isDark) Color(0xFF3E5445) else ItvLine)
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+        item(key = "sleep_month_navigator", contentType = "sleep_month_navigator") {
+            val navBtnBg = if (isDark) Color(0xFF2B3B31) else Color.White
+            Column(modifier = Modifier.fillMaxWidth()) {
+                ItvSeasonalRoofTopAccent(modifier = Modifier.padding(horizontal = 4.dp))
+                ItvTactileCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(18.dp),
+                    containerColor = ItvCardSurface,
+                    contentColor = inkColor,
+                    borderColor = ItvInkBorder,
+                    shadowColor = ItvInkShadow,
+                    borderWidth = 1.8.dp,
+                    shadowOffsetX = 2.dp,
+                    shadowOffsetY = 3.5.dp
                 ) {
-                    FilledTonalIconButton(
-                        onClick = { selectedMonthStr = viewMonth.minusMonths(1).toString() },
-                        modifier = Modifier.size(36.dp),
-                        colors = IconButtonDefaults.filledTonalIconButtonColors(
-                            containerColor = navBtnBg
-                        )
-                    ) {
-                        Text("‹", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = inkColor)
-                    }
-
-                    Text(
-                        text = "${viewMonth.year}년 ${viewMonth.monthValue}월",
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = inkColor,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.weight(1f)
-                    )
-
-                    FilledTonalIconButton(
-                        onClick = {
-                            if (viewMonth < currentMonth) {
-                                selectedMonthStr = viewMonth.plusMonths(1).toString()
+                    ItvSeasonalCalendarBanner {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            ItvTactileButton(
+                                onClick = { selectedMonthStr = viewMonth.minusMonths(1).toString() },
+                                modifier = Modifier.size(38.dp),
+                                shape = CircleShape,
+                                containerColor = navBtnBg,
+                                borderColor = ItvInkBorder,
+                                shadowColor = ItvInkShadow,
+                                borderWidth = 1.5.dp,
+                                shadowOffsetX = 1.dp,
+                                shadowOffsetY = 2.dp
+                            ) {
+                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                    Text("‹", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = inkColor)
+                                }
                             }
-                        },
-                        enabled = viewMonth < currentMonth,
-                        modifier = Modifier.size(36.dp),
-                        colors = IconButtonDefaults.filledTonalIconButtonColors(
-                            containerColor = navBtnBg,
-                            disabledContainerColor = navBtnBg.copy(alpha = 0.4f)
-                        )
-                    ) {
-                        Text("›", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = inkColor)
+
+                            Text(
+                                text = "${viewMonth.year}년 ${viewMonth.monthValue}월",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = inkColor,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.weight(1f)
+                            )
+
+                            val canGoNext = viewMonth < currentMonth
+                            ItvTactileButton(
+                                onClick = {
+                                    if (canGoNext) {
+                                        selectedMonthStr = viewMonth.plusMonths(1).toString()
+                                    }
+                                },
+                                enabled = canGoNext,
+                                modifier = Modifier.size(38.dp),
+                                shape = CircleShape,
+                                containerColor = if (canGoNext) navBtnBg else navBtnBg.copy(alpha = 0.45f),
+                                borderColor = if (canGoNext) ItvInkBorder else ItvLine,
+                                shadowColor = ItvInkShadow,
+                                borderWidth = 1.5.dp,
+                                shadowOffsetX = 1.dp,
+                                shadowOffsetY = 2.dp
+                            ) {
+                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                    Text(
+                                        "›",
+                                        fontSize = 20.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (canGoNext) inkColor else inkColor.copy(alpha = 0.4f)
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
 
-        item(key = "sleep_estimation_body") {
+        item(key = "sleep_estimation_body", contentType = "sleep_estimation_body") {
             NightSummary(
                 report = nights,
                 error = nightError,
@@ -300,13 +345,17 @@ internal fun NightSummary(
     }
 
     val isDark = LocalDarkTheme.current
-    val cardContentColor = if (isDark) Color(0xFFE2EBE4) else Color(0xFF243025)
-    OutlinedCard(
-        Modifier.fillMaxWidth(),
-        colors = CardDefaults.outlinedCardColors(
-            containerColor = RecordContentGreen,
-            contentColor = cardContentColor
-        )
+    val cardContentColor = if (isDark) Color(0xFFE6EFE8) else Color(0xFF241E19)
+    ItvTactileCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
+        containerColor = ItvCardSurface,
+        contentColor = cardContentColor,
+        borderColor = ItvInkBorder,
+        shadowColor = ItvInkShadow,
+        borderWidth = 2.dp,
+        shadowOffsetX = 2.dp,
+        shadowOffsetY = 4.dp
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             var showSleepRhythmHelp by remember { mutableStateOf(false) }
@@ -340,8 +389,8 @@ internal fun NightSummary(
             // 1. 요일별 수면 리듬 & 내일 취침 예측 카드
             Surface(
                 shape = RoundedCornerShape(14.dp),
-                color = if (isDark) Color(0xFF202B22) else Color.White.copy(alpha = 0.90f),
-                border = BorderStroke(1.dp, if (isDark) Color(0xFF3E5445) else Color(0xFFB7D5AE)),
+                color = ItvInsetSurface,
+                border = BorderStroke(1.dp, ItvLine),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -359,8 +408,8 @@ internal fun NightSummary(
                     // Adaptive Target Highlight Banner (오늘 밤 목표 & 내일 기상)
                     Surface(
                         shape = RoundedCornerShape(10.dp),
-                        color = if (isDark) Color(0xFF28382C) else Color(0xFFE8F5E9),
-                        border = BorderStroke(1.dp, if (isDark) Color(0xFF4A6852) else Color(0xFFA5D6A7)),
+                        color = if (isDark) Color(0xFF22362B) else Color(0xFFE1F3E6),
+                        border = BorderStroke(1.dp, if (isDark) Color(0xFF4A735A) else Color(0xFF97CDA8)),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -411,27 +460,18 @@ internal fun NightSummary(
                             .horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        val daysOfWeek = listOf(
-                            DayOfWeek.MONDAY to "월",
-                            DayOfWeek.TUESDAY to "화",
-                            DayOfWeek.WEDNESDAY to "수",
-                            DayOfWeek.THURSDAY to "목",
-                            DayOfWeek.FRIDAY to "금",
-                            DayOfWeek.SATURDAY to "토",
-                            DayOfWeek.SUNDAY to "일"
-                        )
-                        daysOfWeek.forEach { (dow, dowName) ->
+                        SLEEP_DAYS_OF_WEEK.forEach { (dow, dowName) ->
                             val profile = weeklySleepProfile?.dayProfiles?.get(dow)
                             val isTargetTomorrow = dow == adaptiveTarget.targetWakeDayOfWeek
                             val chipBg = when {
-                                isTargetTomorrow -> if (isDark) Color(0xFF384E3F) else Color(0xFFC8E6C9)
-                                profile != null -> if (isDark) Color(0xFF253027) else Color(0xFFF1F8E9)
-                                else -> if (isDark) Color(0xFF1E2822) else Color(0xFFF5F5F5)
+                                isTargetTomorrow -> if (isDark) Color(0xFF2D4B3A) else Color(0xFFCBEBD5)
+                                profile != null -> if (isDark) Color(0xFF24332A) else Color.White
+                                else -> if (isDark) Color(0xFF1B241F) else Color(0xFFF1ECE3)
                             }
                             val chipBorder = when {
-                                isTargetTomorrow -> if (isDark) Color(0xFF5ED38C) else Color(0xFF2E7D32)
-                                profile != null -> if (isDark) Color(0xFF3E5445) else Color(0xFFC8DEC0)
-                                else -> if (isDark) Color(0xFF2C3930) else Color(0xFFE0E0E0)
+                                isTargetTomorrow -> if (isDark) Color(0xFF5ED38C) else Color(0xFF237A4B)
+                                profile != null -> if (isDark) Color(0xFF40594A) else Color(0xFFCFC5B6)
+                                else -> if (isDark) Color(0xFF2C3B32) else Color(0xFFDAD1C3)
                             }
 
                             Surface(
@@ -544,9 +584,9 @@ internal fun NightSummary(
             // 2. 평소 추정 취침 시각 (전체 평균)
             if (bedtimeEstimate != null) {
                 Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = if (isDark) Color(0xFF253027) else Color.White.copy(alpha = 0.85f),
-                    border = BorderStroke(1.dp, if (isDark) Color(0xFF3E5445) else Color(0xFFC8DEC0)),
+                    shape = RoundedCornerShape(14.dp),
+                    color = ItvInsetSurface,
+                    border = BorderStroke(1.dp, ItvLine),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -629,23 +669,37 @@ internal fun NightSummary(
                 HelpBadgeButton(isDark = isDark) { showSleepClockHelp = true }
             }
 
-            if (selectedMonth != null) {
-                val todayMonth = YearMonth.from(summaryToday)
-                val monthDates = when {
-                    selectedMonth.isAfter(todayMonth) -> emptyList()
-                    selectedMonth == todayMonth -> (1..summaryToday.dayOfMonth).map { selectedMonth.atDay(it) }
-                    else -> (1..selectedMonth.lengthOfMonth()).map { selectedMonth.atDay(it) }
+            val segmentsByDate = remember(mergedSleep) {
+                buildMap<LocalDate, NightSegment> {
+                    for (seg in mergedSleep.segments) {
+                        if (seg.end != null && !containsKey(seg.wakeDate)) {
+                            put(seg.wakeDate, seg)
+                        }
+                    }
                 }
-                val monthMinutes = monthDates.map { date ->
-                    SleepSummaryPolicy.minutes(
-                        date,
-                        mergedSleep.segments.firstOrNull { it.wakeDate == date && it.end != null }?.minutes,
-                        confirmations
+            }
+            val candidatesByDate = remember(mergedSleep) {
+                mergedSleep.candidates.filter { it.end != null }.groupBy { it.wakeDate }
+            }
+
+            if (selectedMonth != null) {
+                val monthStats = remember(selectedMonth, summaryToday, segmentsByDate, confirmations) {
+                    val todayMonth = YearMonth.from(summaryToday)
+                    val monthDates = when {
+                        selectedMonth.isAfter(todayMonth) -> emptyList()
+                        selectedMonth == todayMonth -> (1..summaryToday.dayOfMonth).map { selectedMonth.atDay(it) }
+                        else -> (1..selectedMonth.lengthOfMonth()).map { selectedMonth.atDay(it) }
+                    }
+                    val monthMinutes = monthDates.map { date ->
+                        SleepSummaryPolicy.minutes(date, segmentsByDate[date]?.minutes, confirmations)
+                    }
+                    Triple(
+                        SleepSummaryPolicy.average(monthMinutes)?.roundToLong(),
+                        monthMinutes.count { it != null },
+                        monthDates.size
                     )
                 }
-                val average = SleepSummaryPolicy.average(monthMinutes)
-                val averageRounded = average?.roundToLong()
-                val recordedCount = monthMinutes.count { it != null }
+                val (averageRounded, recordedCount, totalMonthDays) = monthStats
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -661,24 +715,21 @@ internal fun NightSummary(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "${recordedCount}/${monthDates.size}일",
+                        text = "${recordedCount}/${totalMonthDays}일",
                         style = MaterialTheme.typography.labelSmall,
                         color = if (isDark) Color(0xFFA5C4B5) else Color(0xFF52796F)
                     )
                 }
             } else if (days != 1) {
                 val averageDays = if (days == 30) 30 else 7
-                val recentMinutes = (1L..averageDays.toLong()).map { offset ->
-                    val date = summaryToday.minusDays(offset)
-                    SleepSummaryPolicy.minutes(
-                        date,
-                        mergedSleep.segments.firstOrNull { it.wakeDate == date && it.end != null }?.minutes,
-                        confirmations
-                    )
+                val recentStats = remember(averageDays, summaryToday, segmentsByDate, confirmations) {
+                    val recentMinutes = (1L..averageDays.toLong()).map { offset ->
+                        val date = summaryToday.minusDays(offset)
+                        SleepSummaryPolicy.minutes(date, segmentsByDate[date]?.minutes, confirmations)
+                    }
+                    SleepSummaryPolicy.average(recentMinutes)?.roundToLong() to recentMinutes.count { it != null }
                 }
-                val average = SleepSummaryPolicy.average(recentMinutes)
-                val averageRounded = average?.roundToLong()
-                val recordedCount = recentMinutes.count { it != null }
+                val (averageRounded, recordedCount) = recentStats
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -704,14 +755,16 @@ internal fun NightSummary(
             summaryError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
 
             val today = summaryToday
-            val rows = mergedSleep.segments.filter {
-                it.end != null && when {
-                    selectedMonth != null ->
-                        YearMonth.from(it.wakeDate) == selectedMonth && !it.wakeDate.isAfter(today)
-                    days == 1 -> it.wakeDate == today
-                    else -> it.wakeDate >= today.minusDays(days.toLong()) && it.wakeDate < today
-                }
-            }.sortedByDescending { it.wakeDate }
+            val rows = remember(mergedSleep, selectedMonth, days, today) {
+                mergedSleep.segments.filter {
+                    it.end != null && when {
+                        selectedMonth != null ->
+                            YearMonth.from(it.wakeDate) == selectedMonth && !it.wakeDate.isAfter(today)
+                        days == 1 -> it.wakeDate == today
+                        else -> it.wakeDate >= today.minusDays(days.toLong()) && it.wakeDate < today
+                    }
+                }.sortedByDescending { it.wakeDate }
+            }
 
             val showBarChart = selectedMonth != null || days != 1
             var selectedDateKey by rememberSaveable(days, selectedMonth?.toString()) { mutableStateOf<String?>(null) }
@@ -735,6 +788,13 @@ internal fun NightSummary(
                 )
                 else -> {
                     if (showBarChart) {
+                        val legendDirectColor = if (isDark) Color(0xFF5C7CFA) else Color(0xFF3B5BDB)
+                        val legendAutoColor = if (isDark) Color(0xFF34D399) else Color(0xFF059669)
+                        val legendUnselectedColor = if (isDark) Color(0xFF64748B) else Color(0xFF94A3B8)
+                        val chartBoxBg = ItvInsetSurface
+                        val gridColor = if (isDark) Color(0xFF314539) else Color(0xFFD9D0C3)
+                        val boxBorderColor = if (isDark) Color(0xFF2E4035) else Color(0xFFD6CEC0)
+
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -742,10 +802,6 @@ internal fun NightSummary(
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            val legendDirectColor = if (isDark) Color(0xFF5C7CFA) else Color(0xFF3B5BDB)
-                            val legendAutoColor = if (isDark) Color(0xFF34D399) else Color(0xFF059669)
-                            val legendUnselectedColor = if (isDark) Color(0xFF64748B) else Color(0xFF94A3B8)
-
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -779,20 +835,22 @@ internal fun NightSummary(
                                 }
                                 Text("시간", style = MaterialTheme.typography.labelSmall)
                             }
-                            Row(
-                                Modifier
-                                    .weight(1f)
-                                    .horizontalScroll(rememberScrollState()),
+                            LazyRow(
+                                modifier = Modifier.weight(1f),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                rows.forEach { row ->
+                                items(
+                                    items = rows,
+                                    key = { it.wakeDate.toString() },
+                                    contentType = { "sleep_bar" }
+                                ) { row ->
                                     val shownMinutes = SleepSummaryPolicy.minutes(row.wakeDate, row.minutes, confirmations) ?: row.minutes
                                     val conf = confirmations[row.wakeDate.toString()]
-                                    val dayCandidates = mergedSleep.candidates.filter { it.wakeDate == row.wakeDate && it.end != null }
+                                    val dayCandidateCount = candidatesByDate[row.wakeDate]?.size ?: 0
                                     val barColor = when {
-                                        conf?.choice == "SLEEP" -> if (isDark) Color(0xFF5C7CFA) else Color(0xFF3B5BDB)
-                                        conf == null && dayCandidates.size == 1 -> if (isDark) Color(0xFF34D399) else Color(0xFF059669)
-                                        else -> if (isDark) Color(0xFF64748B) else Color(0xFF94A3B8)
+                                        conf?.choice == "SLEEP" -> legendDirectColor
+                                        conf == null && dayCandidateCount == 1 -> legendAutoColor
+                                        else -> legendUnselectedColor
                                     }
                                     val isBarSelected = selected?.wakeDate == row.wakeDate
                                     Column(
@@ -802,28 +860,28 @@ internal fun NightSummary(
                                         },
                                         horizontalAlignment = Alignment.CenterHorizontally
                                     ) {
-                                        val chartBoxBg = if (isDark) Color(0xFF1E2822) else Color.White
-                                        val gridColor = if (isDark) Color(0xFF2E3E34) else Color(0xFFE2E5EA)
                                         Box(
                                             Modifier
                                                 .width(54.dp)
                                                 .height(200.dp)
-                                                .background(chartBoxBg, RoundedCornerShape(6.dp))
-                                                .then(
-                                                    if (isBarSelected) {
-                                                        Modifier.border(2.dp, ItvGreen, RoundedCornerShape(6.dp))
-                                                    } else {
-                                                        Modifier
+                                                .background(chartBoxBg, RoundedCornerShape(8.dp))
+                                                .border(
+                                                    width = if (isBarSelected) 2.dp else 1.dp,
+                                                    color = if (isBarSelected) ItvGreen else boxBorderColor,
+                                                    shape = RoundedCornerShape(8.dp)
+                                                )
+                                                .drawWithCache {
+                                                    val w = size.width
+                                                    val h = size.height
+                                                    onDrawBehind {
+                                                        for (tick in 0..5) {
+                                                            val y = h * tick / 5f
+                                                            drawLine(gridColor, Offset(0f, y), Offset(w, y))
+                                                        }
                                                     }
-                                                ),
+                                                },
                                             contentAlignment = Alignment.BottomCenter
                                         ) {
-                                            Canvas(Modifier.fillMaxSize()) {
-                                                for (tick in 0..5) {
-                                                    val y = size.height * tick / 5f
-                                                    drawLine(gridColor, Offset(0f, y), Offset(size.width, y))
-                                                }
-                                            }
                                             Box(
                                                 Modifier
                                                     .width(22.dp)
@@ -831,8 +889,9 @@ internal fun NightSummary(
                                                     .background(barColor, RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp))
                                             )
                                         }
+                                        val roundedMins = shownMinutes.roundToLong()
                                         Text(
-                                            "${shownMinutes.roundToLong() / 60}시간 ${shownMinutes.roundToLong() % 60}분",
+                                            "${roundedMins / 60}시간 ${roundedMins % 60}분",
                                             style = MaterialTheme.typography.labelSmall,
                                             fontWeight = if (isBarSelected) FontWeight.Bold else FontWeight.Normal
                                         )
@@ -861,10 +920,11 @@ internal fun NightSummary(
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
-                        val otherCandidates = mergedSleep.candidates.filter {
-                            it.wakeDate == row.wakeDate && it.end != null &&
-                                !(it.start == row.start && it.end == row.end)
-                        }.sortedBy { it.start }
+                        val otherCandidates = remember(candidatesByDate, row) {
+                            candidatesByDate[row.wakeDate].orEmpty()
+                                .filter { !(it.start == row.start && it.end == row.end) }
+                                .sortedBy { it.start }
+                        }
                         val confirmation = confirmations[row.wakeDate.toString()]
                         val displayRow = if (confirmation?.choice == "SLEEP" && confirmation.startMs != null && confirmation.endMs != null) {
                             row.copy(
@@ -1040,9 +1100,70 @@ internal fun SleepClock(
                     }
                 }
             }
-            Canvas(
+            val clockBorderColor = if (isDark) Color(0xFF3B5344) else Color(0xFF2A3B31)
+            val otherArcSpecs = remember(others, zone) {
+                others.map { candidate ->
+                    val candidateStart = Instant.ofEpochMilli(candidate.start).atZone(zone)
+                    val minute = candidateStart.hour * 60 + candidateStart.minute + candidateStart.second / 60f
+                    val candidateStartAngle = minute / 1440f * 360f - 90f
+                    val candidateSweep = (candidate.minutes / 1440.0 * 360.0).coerceIn(0.0, 360.0).toFloat()
+                    candidateStartAngle to candidateSweep
+                }
+            }
+            Box(
                 Modifier
                     .fillMaxSize()
+                    .graphicsLayer()
+                    .drawWithCache {
+                        val diameter = size.minDimension * 0.78f
+                        val radius = diameter / 2f
+                        val borderRadius = radius + 8.dp.toPx()
+                        val arcTopLeft = Offset((size.width - diameter) / 2f, (size.height - diameter) / 2f)
+                        val arcSize = Size(diameter, diameter)
+                        val centerPt = Offset(size.width / 2f, size.height / 2f)
+                        val tickStrokePx = 2.dp.toPx()
+                        val outerR = radius - 5.dp.toPx()
+                        val majorInnerR = outerR - 10.dp.toPx()
+                        val minorInnerR = outerR - 4.dp.toPx()
+                        val tickLines = List(24) { hour ->
+                            val angle = Math.toRadians(hour * 15.0 - 90.0)
+                            val c = cos(angle).toFloat()
+                            val s = sin(angle).toFloat()
+                            val innerR = if (hour % 6 == 0) majorInnerR else minorInnerR
+                            Offset(centerPt.x + c * innerR, centerPt.y + s * innerR) to
+                                Offset(centerPt.x + c * outerR, centerPt.y + s * outerR)
+                        }
+                        onDrawBehind {
+                            drawCircle(clockBorderColor, radius = borderRadius, center = centerPt)
+                            drawCircle(Color(0xFF66B978), radius = radius, center = centerPt)
+                            // All candidates share the end date; draw alternatives first, main last.
+                            for (i in otherArcSpecs.indices) {
+                                val (cStart, cSweep) = otherArcSpecs[i]
+                                drawArc(
+                                    Color(0xFFF39A38),
+                                    cStart,
+                                    cSweep,
+                                    true,
+                                    topLeft = arcTopLeft,
+                                    size = arcSize
+                                )
+                            }
+                            if (showMain) {
+                                drawArc(
+                                    Color(0xFFE35D62),
+                                    startAngle,
+                                    sweep,
+                                    true,
+                                    topLeft = arcTopLeft,
+                                    size = arcSize
+                                )
+                            }
+                            for (i in tickLines.indices) {
+                                val (p0, p1) = tickLines[i]
+                                drawLine(Color.White, p0, p1, tickStrokePx)
+                            }
+                        }
+                    }
                     .pointerInput(row.start, row.end, zone, others, showMain, confirmed, onPick) {
                         detectTapGestures { point ->
                             val dx = point.x - size.width / 2f
@@ -1082,49 +1203,7 @@ internal fun SleepClock(
                             }
                         }
                     }
-            ) {
-                val diameter = size.minDimension * 0.78f
-                val left = (size.width - diameter) / 2
-                val top = (size.height - diameter) / 2
-                val clockBorderColor = if (isDark) Color(0xFF161C18) else Color(0xFF35443B)
-                drawCircle(clockBorderColor, radius = diameter / 2 + 8.dp.toPx())
-                drawCircle(Color(0xFF66B978), radius = diameter / 2)
-                // All candidates share the end date; draw alternatives first, main last.
-                others.forEach { candidate ->
-                    val candidateStart = Instant.ofEpochMilli(candidate.start).atZone(zone)
-                    val minute = candidateStart.hour * 60 + candidateStart.minute + candidateStart.second / 60f
-                    val candidateSweep = (candidate.minutes / 1440.0 * 360).coerceIn(0.0, 360.0).toFloat()
-                    drawArc(
-                        Color(0xFFF39A38),
-                        minute / 1440f * 360 - 90,
-                        candidateSweep,
-                        true,
-                        topLeft = Offset(left, top),
-                        size = Size(diameter, diameter)
-                    )
-                }
-                if (showMain) {
-                    drawArc(
-                        Color(0xFFE35D62),
-                        startAngle,
-                        sweep,
-                        true,
-                        topLeft = Offset(left, top),
-                        size = Size(diameter, diameter)
-                    )
-                }
-                for (hour in 0 until 24) {
-                    val angle = Math.toRadians(hour * 15.0 - 90)
-                    val outer = diameter / 2 - 5.dp.toPx()
-                    val inner = outer - if (hour % 6 == 0) 10.dp.toPx() else 4.dp.toPx()
-                    drawLine(
-                        Color.White,
-                        Offset(center.x + cos(angle).toFloat() * inner, center.y + sin(angle).toFloat() * inner),
-                        Offset(center.x + cos(angle).toFloat() * outer, center.y + sin(angle).toFloat() * outer),
-                        2.dp.toPx()
-                    )
-                }
-            }
+            )
             Text("00", Modifier.align(Alignment.TopCenter), style = MaterialTheme.typography.labelMedium)
             Text("06", Modifier.align(Alignment.CenterEnd), style = MaterialTheme.typography.labelMedium)
             Text("12", Modifier.align(Alignment.BottomCenter), style = MaterialTheme.typography.labelMedium)

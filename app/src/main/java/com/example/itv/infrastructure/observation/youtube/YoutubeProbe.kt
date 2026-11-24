@@ -196,6 +196,12 @@ internal object YoutubeProbe {
         previousAt = 0L
     }
 
+    fun resetSwipeCounts() {
+        candidates = 0
+        lastRunCandidates = 0
+        SwipeDynamicsTracker.reset(ShortformApp.YOUTUBE)
+    }
+
     fun reset() {
         candidates = 0
         lastRunCandidates = 0

@@ -55,9 +55,17 @@ import com.example.itv.infrastructure.storage.CalendarMonthHealthBundle
 import com.example.itv.infrastructure.storage.DayResolvedFacts
 import com.example.itv.infrastructure.storage.MonthlyHealthTally
 import com.example.itv.infrastructure.storage.MonthlyUsageArchiveStore
+import com.example.itv.presentation.components.ItvCardSurface
 import com.example.itv.presentation.components.ItvGreen
+import com.example.itv.presentation.components.ItvInkBorder
+import com.example.itv.presentation.components.ItvInkShadow
+import com.example.itv.presentation.components.ItvInsetSurface
 import com.example.itv.presentation.components.ItvLine
 import com.example.itv.presentation.components.ItvMint
+import com.example.itv.presentation.components.ItvSeasonalCalendarBanner
+import com.example.itv.presentation.components.ItvSeasonalRoofTopAccent
+import com.example.itv.presentation.components.ItvTactileButton
+import com.example.itv.presentation.components.ItvTactileCard
 import com.example.itv.presentation.components.LocalDarkTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -74,11 +82,11 @@ import kotlin.math.roundToLong
 
 private val CardInk: Color
     @Composable
-    get() = if (LocalDarkTheme.current) Color(0xFFE2EBE4) else Color(0xFF1E2433)
+    get() = if (LocalDarkTheme.current) Color(0xFFE2EBE4) else Color(0xFF241E19)
 
 private val CardSubInk: Color
     @Composable
-    get() = if (LocalDarkTheme.current) Color(0xFFA6B7A9) else Color(0xFF505A74)
+    get() = if (LocalDarkTheme.current) Color(0xFFA6B7A9) else Color(0xFF61564B)
 
 private enum class CalendarDetailTab(val label: String) {
     COACHING("🏅 건강 리포트"),
@@ -110,9 +118,9 @@ internal fun TestCalendarRecordsScreen(
     val listState = rememberLazyListState()
     val today = remember(daySyncTick) { LocalDate.now() }
 
-    // Non-snapshot LayoutCoordinates map updated only on layout (onPlaced) -> ZERO scroll-frame overhead!
+    // Non-snapshot LayoutCoordinates holder updated only on layout (onPlaced) -> ZERO scroll & recomposition overhead!
     val localCellCoords = remember { mutableMapOf<LocalDate, LayoutCoordinates>() }
-    var localRootCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    val localRootCoordsRef = remember { arrayOfNulls<LayoutCoordinates>(1) }
     fun LayoutCoordinates?.liveBounds(): Rect? =
         this?.takeIf { it.isAttached }?.boundsInRoot()?.takeUnless { it.isEmpty }
 
@@ -144,10 +152,18 @@ internal fun TestCalendarRecordsScreen(
     var slamKey by remember { mutableIntStateOf(0) }
     var localRitualRequest by remember { mutableStateOf<StampRitualRequest?>(null) }
 
-    // Pre-warm all stamp character bitmaps off the UI thread so the very first stamp preview is 100% lag-free!
-    LaunchedEffect(Unit) {
-        withContext(Dispatchers.Default) {
-            StampCharacterBitmapCache.preload(context, DailyStampPrefs.getSelectedCharacter(context))
+    // Hoist stamp outline bitmap resolution ONCE above the calendar grid (eliminates 42 redundant produceState coroutines!)
+    val selectedStampCharacter = remember(stampRefreshVersion) { DailyStampPrefs.getSelectedCharacter(context) }
+    val sharedOutlineBitmap by produceState(
+        initialValue = StampCharacterBitmapCache.getCachedMonochromeOutline(selectedStampCharacter.id),
+        key1 = context,
+        key2 = selectedStampCharacter.id
+    ) {
+        if (value == null) {
+            value = withContext(Dispatchers.Default) {
+                StampCharacterBitmapCache.preload(context, selectedStampCharacter)
+                StampCharacterBitmapCache.getMonochromeOutline(context, selectedStampCharacter)
+            }
         }
     }
 
@@ -171,7 +187,7 @@ internal fun TestCalendarRecordsScreen(
     fun launchRitual(request: StampRitualRequest) {
         val targetDate = request.date
         val existingBounds = request.sourceCellBounds ?: localCellCoords[targetDate].liveBounds()
-        val root = localRootCoords.liveBounds()
+        val root = localRootCoordsRef[0].liveBounds()
         val isOnScreen = existingBounds != null &&
             (root == null || (existingBounds.bottom > root.top + 8f && existingBounds.top < root.bottom - 8f))
 
@@ -327,7 +343,7 @@ internal fun TestCalendarRecordsScreen(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .onPlaced { localRootCoords = it }
+            .onPlaced { localRootCoordsRef[0] = it }
     ) {
     LazyColumn(
         state = listState,
@@ -336,7 +352,7 @@ internal fun TestCalendarRecordsScreen(
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         // 1. Header ("건강 사용 캘린더" centered across full width, `?` anchored on far right)
-        item(key = "header_title") {
+        item(key = "header_title", contentType = "header_title") {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -350,103 +366,142 @@ internal fun TestCalendarRecordsScreen(
                     textAlign = TextAlign.Center,
                     modifier = Modifier.align(Alignment.Center)
                 )
-                Surface(
+                ItvTactileButton(
+                    onClick = { showGradeHelpDialog = true },
                     shape = CircleShape,
-                    color = if (isDark) Color(0xFF28362B) else Color.White,
-                    border = BorderStroke(1.dp, if (isDark) ItvLine.copy(alpha = 0.45f) else ItvLine),
+                    containerColor = if (isDark) Color(0xFF28362B) else Color.White,
+                    borderColor = ItvInkBorder,
+                    shadowColor = ItvInkShadow,
+                    borderWidth = 1.6.dp,
+                    shadowOffsetX = 1.dp,
+                    shadowOffsetY = 2.dp,
                     modifier = Modifier
                         .align(Alignment.CenterEnd)
-                        .size(30.dp)
-                        .clip(CircleShape)
-                        .clickable { showGradeHelpDialog = true }
+                        .size(34.dp)
                 ) {
-                    Box(contentAlignment = Alignment.Center) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Text("?", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = ItvGreen)
                     }
                 }
             }
         }
 
-        // 2. Calendar Card with 5-Tier Medal / Warning Stamps
-        item(key = "calendar_card") {
-            OutlinedCard(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(22.dp),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                colors = CardDefaults.outlinedCardColors(
-                    containerColor = RecordContentGreen,
-                    contentColor = CardInk
-                )
-            ) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    // Month Navigation Header (‹ on far left, Year-Month centered, › on far right)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        FilledTonalIconButton(
-                            onClick = {
-                                val prev = viewMonth.minusMonths(1)
-                                currentMonthStr = prev.toString()
-                                selectedDateStr = prev.atEndOfMonth().toString()
-                            },
-                            modifier = Modifier.size(36.dp),
-                            colors = IconButtonDefaults.filledTonalIconButtonColors(
-                                containerColor = if (isDark) Color(0xFF2C392F) else Color.White
-                            )
+        // 2. Calendar Card with Roof-Top Seasonal Accent + Two-Tier Postcard Header + 5-Tier Stamps
+        item(key = "calendar_card", contentType = "calendar_card") {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                ItvSeasonalRoofTopAccent(modifier = Modifier.padding(horizontal = 4.dp))
+                ItvTactileCard(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .graphicsLayer(),
+                    shape = RoundedCornerShape(24.dp),
+                    containerColor = ItvCardSurface,
+                    contentColor = CardInk,
+                    borderColor = ItvInkBorder,
+                    shadowColor = ItvInkShadow,
+                    borderWidth = 2.dp,
+                    shadowOffsetX = 2.dp,
+                    shadowOffsetY = 4.dp
+                ) {
+                    // Top Tier: Seasonal Postcard Banner hosting ‹ Year-Month ›
+                    ItvSeasonalCalendarBanner {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("‹", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = CardInk)
-                        }
-
-                        Text(
-                            text = "${viewMonth.year}년 ${viewMonth.monthValue}월",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = CardInk,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.weight(1f)
-                        )
-
-                        FilledTonalIconButton(
-                            onClick = {
-                                if (viewMonth < YearMonth.from(today)) {
-                                    val next = viewMonth.plusMonths(1)
-                                    currentMonthStr = next.toString()
-                                    selectedDateStr = if (next == YearMonth.from(today)) {
-                                        today.toString()
-                                    } else {
-                                        next.atDay(1).toString()
-                                    }
+                            val navBtnBg = if (isDark) Color(0xFF2B3B31) else Color.White
+                            ItvTactileButton(
+                                onClick = {
+                                    val prev = viewMonth.minusMonths(1)
+                                    currentMonthStr = prev.toString()
+                                    selectedDateStr = prev.atEndOfMonth().toString()
+                                },
+                                modifier = Modifier.size(38.dp),
+                                shape = CircleShape,
+                                containerColor = navBtnBg,
+                                borderColor = ItvInkBorder,
+                                shadowColor = ItvInkShadow,
+                                borderWidth = 1.5.dp,
+                                shadowOffsetX = 1.dp,
+                                shadowOffsetY = 2.dp
+                            ) {
+                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                    Text("‹", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = CardInk)
                                 }
-                            },
-                            enabled = viewMonth < YearMonth.from(today),
-                            modifier = Modifier.size(36.dp),
-                            colors = IconButtonDefaults.filledTonalIconButtonColors(
-                                containerColor = if (isDark) Color(0xFF2C392F) else Color.White,
-                                disabledContainerColor = (if (isDark) Color(0xFF2C392F) else Color.White).copy(alpha = 0.4f)
+                            }
+
+                            Text(
+                                text = "${viewMonth.year}년 ${viewMonth.monthValue}월",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = CardInk,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.weight(1f)
                             )
-                        ) {
-                            Text("›", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = CardInk)
+
+                            val canGoNext = viewMonth < YearMonth.from(today)
+                            ItvTactileButton(
+                                onClick = {
+                                    if (canGoNext) {
+                                        val next = viewMonth.plusMonths(1)
+                                        currentMonthStr = next.toString()
+                                        selectedDateStr = if (next == YearMonth.from(today)) {
+                                            today.toString()
+                                        } else {
+                                            next.atDay(1).toString()
+                                        }
+                                    }
+                                },
+                                enabled = canGoNext,
+                                modifier = Modifier.size(38.dp),
+                                shape = CircleShape,
+                                containerColor = if (canGoNext) navBtnBg else navBtnBg.copy(alpha = 0.45f),
+                                borderColor = if (canGoNext) ItvInkBorder else ItvLine,
+                                shadowColor = ItvInkShadow,
+                                borderWidth = 1.5.dp,
+                                shadowOffsetX = 1.dp,
+                                shadowOffsetY = 2.dp
+                            ) {
+                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                    Text(
+                                        "›",
+                                        fontSize = 20.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (canGoNext) CardInk else CardSubInk.copy(alpha = 0.45f)
+                                    )
+                                }
+                            }
                         }
                     }
 
-                    // Compact 5-Puppy Ink Stamp Legend
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(if (isDark) Color(0xFF1A231C) else Color.White.copy(alpha = 0.7f))
-                            .padding(horizontal = 8.dp, vertical = 6.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                    // Bottom Tier: Crisp Pure-White Calendar Grid for 100% Stamp & Date Contrast
+                    Column(
+                        Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        LegendStampItem(DailyHealthTier.GOLD, "해맑")
-                        LegendStampItem(DailyHealthTier.SILVER, "웃음")
-                        LegendStampItem(DailyHealthTier.BRONZE, "슬픔")
-                        LegendStampItem(DailyHealthTier.WARNING, "화남")
-                        LegendStampItem(DailyHealthTier.CRITICAL, "아픔")
-                        LegendStampItem(DailyHealthTier.IN_PROGRESS, "진행")
+
+                    // Compact 5-Puppy Ink Stamp Legend
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        color = ItvInsetSurface,
+                        border = BorderStroke(0.9.dp, ItvLine.copy(alpha = if (isDark) 0.55f else 0.75f))
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 8.dp, vertical = 7.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            LegendStampItem(DailyHealthTier.GOLD, "해맑", sharedOutlineBitmap)
+                            LegendStampItem(DailyHealthTier.SILVER, "웃음", sharedOutlineBitmap)
+                            LegendStampItem(DailyHealthTier.BRONZE, "슬픔", sharedOutlineBitmap)
+                            LegendStampItem(DailyHealthTier.WARNING, "화남", sharedOutlineBitmap)
+                            LegendStampItem(DailyHealthTier.CRITICAL, "아픔", sharedOutlineBitmap)
+                            LegendStampItem(DailyHealthTier.IN_PROGRESS, "진행", sharedOutlineBitmap)
+                        }
                     }
 
                     // Weekdays Row
@@ -489,6 +544,47 @@ internal fun TestCalendarRecordsScreen(
                         val totalSlots = firstDayOfWeek + daysInMonth
                         val rowsCount = (totalSlots + 6) / 7
 
+                        // Clean up stale day cell coords once per month switch instead of 31 per-cell DisposableEffects
+                        DisposableEffect(viewMonth) {
+                            onDispose {
+                                val staleDates = localCellCoords.keys.filter { YearMonth.from(it) == viewMonth }
+                                staleDates.forEach { d ->
+                                    localCellCoords.remove(d)
+                                    onDayCellDisposed?.invoke(d)
+                                }
+                            }
+                        }
+
+                        // Single stable click handler shared by all 31 day cells so tapping only recomposes affected cells
+                        val onCalendarDayClick = remember(viewMonth, monthBundle, stampedDates, today, selectedStampCharacter) {
+                            { dayNum: Int ->
+                                val date = viewMonth.atDay(dayNum)
+                                val assessment = monthBundle?.assessments?.get(date)
+                                val tier = assessment?.tier ?: DailyHealthTier.NO_DATA
+                                val isYesterdayPending = date == today.minusDays(1) &&
+                                    tier != DailyHealthTier.NO_DATA &&
+                                    tier != DailyHealthTier.IN_PROGRESS &&
+                                    date.toString() !in stampedDates
+                                selectedDateStr = date.toString()
+                                if (isYesterdayPending && assessment != null) {
+                                    launchRitual(
+                                        StampRitualRequest(
+                                            date = date,
+                                            tier = assessment.tier,
+                                            score = assessment.score,
+                                            headline = assessment.headline,
+                                            isMorningAuto = false,
+                                            isTestPreview = false,
+                                            character = selectedStampCharacter,
+                                            sourceCellBounds = localCellCoords[date].liveBounds()
+                                        )
+                                    )
+                                } else {
+                                    detailDialogDate = date
+                                }
+                            }
+                        }
+
                         // Hardware-cached layer prevents re-recording 31 Canvas stamps on every scroll frame
                         Column(
                             modifier = Modifier.graphicsLayer(),
@@ -512,13 +608,6 @@ internal fun TestCalendarRecordsScreen(
                                                 tier != DailyHealthTier.IN_PROGRESS &&
                                                 date.toString() !in stampedDates
 
-                                            DisposableEffect(date) {
-                                                onDispose {
-                                                    localCellCoords.remove(date)
-                                                    onDayCellDisposed?.invoke(date)
-                                                }
-                                            }
-
                                             CalendarStampCell(
                                                 day = dayNum,
                                                 dayOfWeek = date.dayOfWeek,
@@ -528,30 +617,15 @@ internal fun TestCalendarRecordsScreen(
                                                 isSelected = date == selectedDate,
                                                 isPendingStamp = isYesterdayPendingStamp,
                                                 isLiftedForRitual = activeRitualDate == date || localRitualRequest?.date == date,
-                                                onClick = {
-                                                    selectedDateStr = date.toString()
-                                                    if (isYesterdayPendingStamp && assessment != null) {
-                                                        launchRitual(
-                                                            StampRitualRequest(
-                                                                date = date,
-                                                                tier = assessment.tier,
-                                                                score = assessment.score,
-                                                                headline = assessment.headline,
-                                                                isMorningAuto = false,
-                                                                isTestPreview = false,
-                                                                character = DailyStampPrefs.getSelectedCharacter(context),
-                                                                sourceCellBounds = localCellCoords[date].liveBounds()
-                                                            )
-                                                        )
-                                                    } else {
-                                                        detailDialogDate = date
-                                                    }
-                                                },
+                                                preloadedOutlineBitmap = sharedOutlineBitmap,
+                                                onDayClick = onCalendarDayClick,
                                                 modifier = Modifier
                                                     .weight(1f)
                                                     .onPlaced { coords ->
-                                                        localCellCoords[date] = coords
-                                                        onDayCellPlaced?.invoke(date, coords)
+                                                        if (localCellCoords[date] !== coords) {
+                                                            localCellCoords[date] = coords
+                                                            onDayCellPlaced?.invoke(date, coords)
+                                                        }
                                                     }
                                             )
                                         } else {
@@ -572,7 +646,7 @@ internal fun TestCalendarRecordsScreen(
                         yesterday.toString() !in stampedDates
 
                     if (showYesterdayStampBtn) {
-                        Button(
+                        ItvTactileButton(
                             onClick = {
                                 selectedDateStr = yesterday.toString()
                                 launchRitual(
@@ -589,24 +663,42 @@ internal fun TestCalendarRecordsScreen(
                                 )
                             },
                             modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(12.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = ItvGreen)
+                            shape = RoundedCornerShape(14.dp),
+                            containerColor = ItvGreen,
+                            contentColor = Color.White,
+                            borderColor = ItvInkBorder,
+                            shadowColor = ItvInkShadow,
+                            borderWidth = 1.8.dp,
+                            shadowOffsetX = 1.5.dp,
+                            shadowOffsetY = 3.5.dp
                         ) {
-                            Text(
-                                text = "🐾 어제(${yesterday.monthValue}/${yesterday.dayOfMonth}) 강아지 도장 쾅! 찍기",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp
-                            )
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 11.dp, horizontal = 12.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "🐾 어제(${yesterday.monthValue}/${yesterday.dayOfMonth}) 강아지 도장 쾅! 찍기",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp,
+                                    color = Color.White
+                                )
+                            }
                         }
                     }
 
                     // Monthly Stamp Tally Strip
                     monthBundle?.tally?.let { tally ->
-                        MonthlyStampTallyStrip(tally = tally)
+                        MonthlyStampTallyStrip(
+                            tally = tally,
+                            preloadedOutlineBitmap = sharedOutlineBitmap
+                        )
                     }
 
                     // Stamp Motion Test Bar (5 expressions) so user can preview every tier's slam + reaction!
                     StampMotionTestBar(
+                        preloadedOutlineBitmap = sharedOutlineBitmap,
                         onTestTier = { testTier ->
                             val previewDate = if (YearMonth.from(selectedDate) == viewMonth) {
                                 selectedDate
@@ -628,12 +720,13 @@ internal fun TestCalendarRecordsScreen(
                                     headline = sampleHeadline,
                                     isMorningAuto = false,
                                     isTestPreview = true,
-                                    character = DailyStampPrefs.getSelectedCharacter(context),
+                                    character = selectedStampCharacter,
                                     sourceCellBounds = localCellCoords[previewDate].liveBounds()
                                 )
                             )
                         }
                     )
+                    }
                 }
             }
         }
@@ -643,7 +736,7 @@ internal fun TestCalendarRecordsScreen(
     localRitualRequest?.let { req ->
         DailyStampRitualOverlay(
             request = req,
-            overlayRootBounds = localRootCoords.liveBounds(),
+            overlayRootBounds = localRootCoordsRef[0].liveBounds(),
             resolveCellBounds = { date -> localCellCoords[date].liveBounds() },
             onStampCommitted = {
                 if (!req.isTestPreview) {
@@ -663,21 +756,24 @@ internal fun TestCalendarRecordsScreen(
 
 @Composable
 private fun StampMotionTestBar(
+    preloadedOutlineBitmap: ImageBitmap?,
     onTestTier: (DailyHealthTier) -> Unit
 ) {
     val isDark = LocalDarkTheme.current
-    val testTiers = listOf(
-        DailyHealthTier.GOLD,
-        DailyHealthTier.SILVER,
-        DailyHealthTier.BRONZE,
-        DailyHealthTier.WARNING,
-        DailyHealthTier.CRITICAL
-    )
+    val testTiers = remember {
+        listOf(
+            DailyHealthTier.GOLD,
+            DailyHealthTier.SILVER,
+            DailyHealthTier.BRONZE,
+            DailyHealthTier.WARNING,
+            DailyHealthTier.CRITICAL
+        )
+    }
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(14.dp),
-        color = if (isDark) Color(0xFF1B241D) else Color.White.copy(alpha = 0.85f),
-        border = BorderStroke(0.8.dp, if (isDark) ItvLine.copy(alpha = 0.4f) else ItvLine)
+        color = ItvInsetSurface,
+        border = BorderStroke(0.9.dp, ItvLine.copy(alpha = if (isDark) 0.55f else 0.75f))
     ) {
         Column(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
@@ -718,7 +814,11 @@ private fun StampMotionTestBar(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.spacedBy(2.dp)
                         ) {
-                            DailyHealthStampBadge(tier = tier, size = 26.dp)
+                            DailyHealthStampBadge(
+                                tier = tier,
+                                size = 26.dp,
+                                preloadedOutlineBitmap = preloadedOutlineBitmap
+                            )
                             Text(
                                 text = tier.label,
                                 fontSize = 10.sp,
@@ -735,12 +835,20 @@ private fun StampMotionTestBar(
 }
 
 @Composable
-private fun LegendStampItem(tier: DailyHealthTier, label: String) {
+private fun LegendStampItem(
+    tier: DailyHealthTier,
+    label: String,
+    preloadedOutlineBitmap: ImageBitmap?
+) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(2.dp)
     ) {
-        DailyHealthStampBadge(tier = tier, size = 19.dp)
+        DailyHealthStampBadge(
+            tier = tier,
+            size = 19.dp,
+            preloadedOutlineBitmap = preloadedOutlineBitmap
+        )
         Text(text = label, fontSize = 10.sp, color = CardSubInk, fontWeight = FontWeight.Medium)
     }
 }
@@ -755,14 +863,15 @@ private fun CalendarStampCell(
     isSelected: Boolean,
     isPendingStamp: Boolean,
     isLiftedForRitual: Boolean = false,
-    onClick: () -> Unit,
+    preloadedOutlineBitmap: ImageBitmap? = null,
+    onDayClick: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val isDark = LocalDarkTheme.current
 
     val cellBackground = when {
         isSelected -> ItvGreen
-        hasData -> if (isDark) Color(0xFF28362B) else Color.White
+        hasData -> if (isDark) Color(0xFF26352C) else Color(0xFFF8F5EF)
         else -> Color.Transparent
     }
 
@@ -773,14 +882,14 @@ private fun CalendarStampCell(
             DayOfWeek.SATURDAY -> Color(0xFF1E88E5)
             else -> CardInk
         }
-        else -> CardSubInk.copy(alpha = 0.28f)
+        else -> CardSubInk.copy(alpha = 0.34f)
     }
 
     val border = when {
         isSelected -> BorderStroke(1.6.dp, ItvGreen)
         isPendingStamp -> BorderStroke(1.6.dp, Color(0xFFF59E0B))
         isToday -> BorderStroke(1.5.dp, ItvGreen)
-        hasData -> BorderStroke(0.6.dp, if (isDark) ItvLine.copy(alpha = 0.35f) else ItvLine.copy(alpha = 0.6f))
+        hasData -> BorderStroke(0.9.dp, if (isDark) Color(0xFF40594A) else Color(0xFFD6CEC0))
         else -> null
     }
 
@@ -790,10 +899,10 @@ private fun CalendarStampCell(
     Surface(
         modifier = modifier
             .padding(1.dp)
-            .height(66.dp)
+            .height(68.dp)
             .graphicsLayer { alpha = if (isLiftedForRitual) 0.16f else 1f }
             .clip(RoundedCornerShape(10.dp))
-            .clickable(onClick = onClick),
+            .clickable { onDayClick(day) },
         shape = RoundedCornerShape(10.dp),
         color = cellBackground,
         border = border,
@@ -819,7 +928,7 @@ private fun CalendarStampCell(
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(bottom = 3.dp),
+                    .padding(bottom = 2.dp),
                 contentAlignment = Alignment.Center
             ) {
                 when {
@@ -833,13 +942,14 @@ private fun CalendarStampCell(
                     hasData -> {
                         DailyHealthStampBadge(
                             tier = tier,
-                            size = 39.dp,
+                            size = 41.dp,
                             onSelectedSurface = isSelected,
-                            tiltDegrees = tilt
+                            tiltDegrees = tilt,
+                            preloadedOutlineBitmap = preloadedOutlineBitmap
                         )
                     }
                     else -> {
-                        Spacer(Modifier.height(39.dp))
+                        Spacer(Modifier.height(41.dp))
                     }
                 }
             }
@@ -848,13 +958,16 @@ private fun CalendarStampCell(
 }
 
 @Composable
-private fun MonthlyStampTallyStrip(tally: MonthlyHealthTally) {
+private fun MonthlyStampTallyStrip(
+    tally: MonthlyHealthTally,
+    preloadedOutlineBitmap: ImageBitmap? = null
+) {
     val isDark = LocalDarkTheme.current
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(14.dp),
-        color = if (isDark) Color(0xFF1B241D) else Color.White.copy(alpha = 0.85f),
-        border = BorderStroke(0.8.dp, if (isDark) ItvLine.copy(alpha = 0.4f) else ItvLine)
+        color = ItvInsetSurface,
+        border = BorderStroke(0.9.dp, ItvLine.copy(alpha = if (isDark) 0.55f else 0.75f))
     ) {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(
@@ -889,23 +1002,31 @@ private fun MonthlyStampTallyStrip(tally: MonthlyHealthTally) {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                TallyPill(DailyHealthTier.GOLD, tally.goldCount)
-                TallyPill(DailyHealthTier.SILVER, tally.silverCount)
-                TallyPill(DailyHealthTier.BRONZE, tally.bronzeCount)
-                TallyPill(DailyHealthTier.WARNING, tally.warningCount)
-                TallyPill(DailyHealthTier.CRITICAL, tally.criticalCount)
+                TallyPill(DailyHealthTier.GOLD, tally.goldCount, preloadedOutlineBitmap)
+                TallyPill(DailyHealthTier.SILVER, tally.silverCount, preloadedOutlineBitmap)
+                TallyPill(DailyHealthTier.BRONZE, tally.bronzeCount, preloadedOutlineBitmap)
+                TallyPill(DailyHealthTier.WARNING, tally.warningCount, preloadedOutlineBitmap)
+                TallyPill(DailyHealthTier.CRITICAL, tally.criticalCount, preloadedOutlineBitmap)
             }
         }
     }
 }
 
 @Composable
-private fun TallyPill(tier: DailyHealthTier, count: Int) {
+private fun TallyPill(
+    tier: DailyHealthTier,
+    count: Int,
+    preloadedOutlineBitmap: ImageBitmap? = null
+) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(3.dp)
     ) {
-        DailyHealthStampBadge(tier = tier, size = 18.dp)
+        DailyHealthStampBadge(
+            tier = tier,
+            size = 18.dp,
+            preloadedOutlineBitmap = preloadedOutlineBitmap
+        )
         Text(
             text = "${count}일",
             fontSize = 11.sp,
@@ -931,11 +1052,15 @@ private fun DailyHealthVerdictBanner(
         else -> if (isDark) Color(0xFF1E2822) else Color.White
     }
 
-    Surface(
+    ItvTactileCard(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(18.dp),
-        color = bannerBg,
-        border = BorderStroke(1.2.dp, accentColor.copy(alpha = if (isDark) 0.45f else 0.35f))
+        shape = RoundedCornerShape(20.dp),
+        containerColor = bannerBg,
+        borderColor = ItvInkBorder,
+        shadowColor = ItvInkShadow,
+        borderWidth = 1.8.dp,
+        shadowOffsetX = 1.5.dp,
+        shadowOffsetY = 3.5.dp
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(
@@ -1287,7 +1412,7 @@ private fun FourAxesBreakdownCard(axes: List<HealthAxisScore>) {
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp),
-                    color = if (isDark) Color(0xFF172019) else Color(0xFFF8FBF8),
+                    color = if (isDark) Color(0xFF172019) else Color(0xFFF7F4EE),
                     border = BorderStroke(
                         0.9.dp,
                         if (isDark) ItvLine.copy(alpha = 0.4f) else ItvLine.copy(alpha = 0.85f)
@@ -1315,7 +1440,7 @@ private fun FourAxesBreakdownCard(axes: List<HealthAxisScore>) {
                                 if (axis.available) {
                                     Surface(
                                         shape = RoundedCornerShape(6.dp),
-                                        color = if (isDark) Color(0xFF243127) else Color(0xFFECF3ED)
+                                        color = if (isDark) Color(0xFF243127) else Color(0xFFEFEAE0)
                                     ) {
                                         Text(
                                             text = "비중 ${axis.weightPercent}%",
@@ -1429,14 +1554,17 @@ private fun CalendarDayDetailDialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
-        Surface(
+        ItvTactileCard(
             modifier = Modifier
                 .fillMaxWidth(0.94f)
                 .heightIn(max = 680.dp),
             shape = RoundedCornerShape(24.dp),
-            color = if (isDark) Color(0xFF161F18) else Color(0xFFF6FAF6),
-            border = BorderStroke(1.dp, if (isDark) ItvLine.copy(alpha = 0.5f) else ItvLine),
-            shadowElevation = 14.dp
+            containerColor = if (isDark) Color(0xFF0E1410) else Color(0xFFEAE4DA),
+            borderColor = ItvInkBorder,
+            shadowColor = ItvInkShadow,
+            borderWidth = 2.dp,
+            shadowOffsetX = 2.5.dp,
+            shadowOffsetY = 5.dp
         ) {
             Column(
                 modifier = Modifier
@@ -1624,14 +1752,18 @@ private fun InteractiveHourlyDistributionCard(
     val isDark = LocalDarkTheme.current
     val hourlyValues = dayReport?.values ?: List(24) { 0.0 }
     val axisMax = 60.0
-    val gridColor = if (isDark) Color(0xFF2E3B31) else Color(0xFFE5ECE6)
-    val selectionBg = ItvGreen.copy(alpha = if (isDark) 0.22f else 0.12f)
+    val gridColor = if (isDark) Color(0xFF33473A) else Color(0xFFD9D0C3)
+    val selectionBg = ItvGreen.copy(alpha = if (isDark) 0.24f else 0.14f)
 
-    Surface(
+    ItvTactileCard(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        color = if (isDark) Color(0xFF1E2822) else Color.White,
-        border = BorderStroke(1.dp, if (isDark) ItvLine.copy(alpha = 0.4f) else ItvLine)
+        shape = RoundedCornerShape(18.dp),
+        containerColor = ItvCardSurface,
+        borderColor = ItvInkBorder,
+        shadowColor = ItvInkShadow,
+        borderWidth = 1.6.dp,
+        shadowOffsetX = 1.5.dp,
+        shadowOffsetY = 3.dp
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(
@@ -1746,7 +1878,7 @@ private fun InteractiveHourlyDistributionCard(
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(14.dp),
-                    color = if (isDark) Color(0xFF172019) else Color(0xFFF4F8F4),
+                    color = if (isDark) Color(0xFF172019) else Color(0xFFF6F2EA),
                     border = BorderStroke(0.8.dp, ItvGreen.copy(alpha = 0.35f))
                 ) {
                     Column(
@@ -1894,7 +2026,7 @@ private fun AppUsageRowItem(
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(10.dp),
-        color = if (isDark) Color(0xFF172019) else Color(0xFFF8FBF8),
+        color = if (isDark) Color(0xFF172019) else Color(0xFFF7F4EE),
         border = BorderStroke(
             0.8.dp,
             if (isDark) ItvLine.copy(alpha = 0.35f) else ItvLine.copy(alpha = 0.75f)

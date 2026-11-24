@@ -165,14 +165,16 @@ class JevPolicyTest {
         assertTrue(JevCandidatePolicy.reasons(overheated, disabledSettings).isEmpty())
     }
 
-    @Test fun continuousFatigueAndInterventionResistanceAdjustment() {
+    @Test fun continuousFatigueAndContentSwitchAdjustment() {
         val s = JevSettings(probabilityThreshold = 0.80, personalizedEnabled = true)
         val base = context(ms = 600_000L) // 10 min continuous
 
-        // 1. 10분 연속 시청: 피로도 보정 없음 (0%p)
+        // 1. 10분 연속 시청, 전환/스와이프 없음: 보정 없음 (0%p)
         val adj10 = JevCandidatePolicy.computeThresholdAdjustment(s, base)
         assertEquals(0.0, adj10.fatigueDelta, 0.001)
-        assertEquals(0.0, adj10.resistanceDelta, 0.001)
+        assertEquals(0.0, adj10.longformSwitchDelta, 0.001)
+        assertEquals(0.0, adj10.shortformSwipeCountDelta, 0.001)
+        assertEquals(0.0, adj10.contentSwitchDelta, 0.001)
 
         // 2. 30분 연속 시청: 피로도 -2%p
         val base30 = base.copy(continuousMs = 1800_000L)
@@ -185,36 +187,36 @@ class JevPolicyTest {
         val adj45 = JevCandidatePolicy.computeThresholdAdjustment(s, base45)
         assertEquals(-0.04, adj45.fatigueDelta, 0.001)
 
-        // 4. 직전 개입에서 '나중에' 선택 후 계속 시청: 저항 -5%p
-        val resistedLater = base.copy(
-            lastInterventionOutcome = "LATER",
-            postInterventionActivity = true,
-            resistanceStreak = 1
-        )
-        val adjResisted = JevCandidatePolicy.computeThresholdAdjustment(s, resistedLater)
-        assertEquals(-0.05, adjResisted.resistanceDelta, 0.001)
-        assertTrue("INTERVENTION_RESISTANCE" in JevCandidatePolicy.reasons(resistedLater, s))
+        // 4. 유튜브 롱폼 영상 전환 횟수: 1회 0%p, 3회 -5%p, 5회 이상 -10%p
+        assertEquals(0.0, JevCandidatePolicy.computeThresholdAdjustment(s, base.copy(consecutiveLongformChainCount = 1)).longformSwitchDelta, 0.001)
+        val lf3 = base.copy(consecutiveLongformChainCount = 3)
+        val adjLf3 = JevCandidatePolicy.computeThresholdAdjustment(s, lf3)
+        assertEquals(-0.05, adjLf3.longformSwitchDelta, 0.001)
+        assertEquals(-0.05, adjLf3.contentSwitchDelta, 0.001)
+        assertTrue("LONGFORM_BINGE_CHAIN" in JevCandidatePolicy.reasons(lf3, s))
+        val lf5 = base.copy(consecutiveLongformChainCount = 5)
+        assertEquals(-0.10, JevCandidatePolicy.computeThresholdAdjustment(s, lf5).contentSwitchDelta, 0.001)
 
-        // 5. 직전 개입에서 '무응답' 무시 후 스와이프 등 시청 지속: 저항 -6%p
-        val ignoredNoResponse = base.copy(
-            lastInterventionOutcome = "NO_RESPONSE",
-            postInterventionActivity = true,
-            resistanceStreak = 1
-        )
-        val adjIgnored = JevCandidatePolicy.computeThresholdAdjustment(s, ignoredNoResponse)
-        assertEquals(-0.06, adjIgnored.resistanceDelta, 0.001)
+        // 5. 숏폼 누적 스와이프 수: 10회 0%p, 30회 -5%p, 50회 이상 -10%p
+        assertEquals(0.0, JevCandidatePolicy.computeThresholdAdjustment(s, base.copy(shortformSwipeCount = 10)).shortformSwipeCountDelta, 0.001)
+        val sf30 = base.copy(shortformSwipeCount = 30)
+        val adjSf30 = JevCandidatePolicy.computeThresholdAdjustment(s, sf30)
+        assertEquals(-0.05, adjSf30.shortformSwipeCountDelta, 0.001)
+        assertEquals(-0.05, adjSf30.contentSwitchDelta, 0.001)
+        assertTrue("SHORTFORM_SWIPE_COUNT" in JevCandidatePolicy.reasons(sf30, s))
+        val sf50 = base.copy(shortformSwipeCount = 50)
+        assertEquals(-0.10, JevCandidatePolicy.computeThresholdAdjustment(s, sf50).contentSwitchDelta, 0.001)
 
-        // 6. 30분 연속 시청 + 나중에 연속 2회 미룸: 피로(-2%p) + 저항(-8%p) = -10%p 보정 (0.80 -> 0.70)
+        // 6. 30분 연속 시청(-2%p) + 롱폼 3회 전환(-5%p) + 숏폼 20회(-2.5%p) -> contentSwitch -7.5%p, 총 -9.5%p (0.80 -> 0.705)
         val combined = base.copy(
             continuousMs = 1800_000L,
-            lastInterventionOutcome = "LATER",
-            postInterventionActivity = true,
-            resistanceStreak = 2
+            consecutiveLongformChainCount = 3,
+            shortformSwipeCount = 20
         )
         val adjCombined = JevCandidatePolicy.computeThresholdAdjustment(s, combined)
         assertEquals(-0.02, adjCombined.fatigueDelta, 0.001)
-        assertEquals(-0.08, adjCombined.resistanceDelta, 0.001)
-        assertEquals(0.70, adjCombined.effectiveThreshold, 0.001)
+        assertEquals(-0.075, adjCombined.contentSwitchDelta, 0.001)
+        assertEquals(0.705, adjCombined.effectiveThreshold, 0.001)
     }
     @Test fun bedtimeEnvironmentThresholdAdjustment() {
         val s = JevSettings(probabilityThreshold = 0.50, personalizedEnabled = true)
@@ -382,29 +384,30 @@ class JevPolicyTest {
             ambientLux = 5f,
             screenBrightness = 20,
             bedtimeDistanceMinutes = 10,
-            lastInterventionOutcome = "LATER",
-            postInterventionActivity = true,
-            resistanceStreak = 2
+            consecutiveLongformChainCount = 3,
+            shortformSwipeCount = 20
         )
 
         // 1. Threshold adjustments
         val adj = JevCandidatePolicy.computeThresholdAdjustment(s, ctxAll)
         // 세션 과몰입 적용 (1.3배 -> -0.06)
         assertTrue(adj.sessionDelta < 0.0)
-        // 스와이프 과열은 전체 모드에서 반드시 0.0%p
+        // 스와이프 과열(SPM)은 전체 모드에서 0.0%p
         assertEquals(0.0, adj.swipeDelta, 0.001)
         // 취침 전 암실 적용 (-15%p 부근)
         assertTrue(adj.bedtimeDelta < 0.0)
         // 연속 시청 피로도 적용 (15분 등가 도달 -> 0%p ~ -2%p)
         assertTrue(adj.fatigueDelta <= 0.0)
-        // 직전 개입 저항 적용 (2회 LATER -> -0.08)
-        assertEquals(-0.08, adj.resistanceDelta, 0.001)
+        // 유튜브 롱폼 전환(3회 -> -5%p) + 숏폼 스와이프(20회 -> -2.5%p) = -7.5%p
+        assertEquals(-0.05, adj.longformSwitchDelta, 0.001)
+        assertEquals(-0.025, adj.shortformSwipeCountDelta, 0.001)
+        assertEquals(-0.075, adj.contentSwitchDelta, 0.001)
 
         // 2. Candidate reasons
         val reasons = JevCandidatePolicy.reasons(ctxAll, s)
         assertTrue("CONTINUOUS" in reasons)
         assertTrue("PRE_BEDTIME_DARK_USAGE" in reasons || "BEDTIME" in reasons)
-        assertTrue("INTERVENTION_RESISTANCE" in reasons)
+        assertTrue("LONGFORM_BINGE_CHAIN" in reasons)
         // 스와이프 과열은 전체 모드 후보 사유에서 제외
         assertFalse("RAPID_SWIPE_OVERHEAT" in reasons)
     }
@@ -484,5 +487,32 @@ class JevPolicyTest {
         val reasons = JevCandidatePolicy.reasons(ctxGame, s)
         assertTrue("CONTINUOUS" in reasons)
         assertFalse("RAPID_SWIPE_OVERHEAT" in reasons)
+    }
+
+    @Test fun ownItvVariantsDoNotIncrementContinuousUsage() {
+        val s = JevSettings()
+        assertFalse(s.targets("com.team.itv"))
+        assertFalse(s.targets("com.team.itv.teamtest"))
+        assertFalse(s.targets("com.team.itv.qa"))
+        assertFalse(s.targets("com.example.itv"))
+
+        val tracker = JevSessionTracker { "s-itv" }
+        // 숏폼 10초 시청 (1:1 -> 10초)
+        for (i in 0..10) {
+            tracker.observe(i * 1000L, JevSettings.YOUTUBE, JevSettings.YOUTUBE)
+        }
+        assertEquals(10_000L, tracker.context("ALL", 10_000L, 10_000L, null)?.continuousMs)
+
+        // 우리 앱(.teamtest 포함) 20초 체류 -> 증가 0초, 기존 10초 보존
+        for (i in 11..30) {
+            tracker.observe(i * 1000L, "com.team.itv.teamtest", null)
+        }
+        assertEquals(10_000L, tracker.context("ALL", 30_000L, 30_000L, null)?.continuousMs)
+
+        // 일반 앱 9초 사용 (1:3 -> +3초, 총 13초)
+        for (i in 31..39) {
+            tracker.observe(i * 1000L, "com.netflix.mediaclient", null)
+        }
+        assertEquals(13_000L, tracker.context("ALL", 39_000L, 39_000L, null)?.continuousMs)
     }
 }

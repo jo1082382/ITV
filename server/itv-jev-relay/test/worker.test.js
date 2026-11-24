@@ -209,7 +209,7 @@ test("optional personalized and swipe metrics are forwarded when present and omi
  }finally{f.db.close();}
 });
 
-test("category, activity phase, and video/game metrics are forwarded in state with prompt v4",async()=>{
+test("category, activity phase, and video/game metrics are forwarded in state with prompt v5",async()=>{
  let sent;const f=fixture({upstream:async(_url,init)=>{sent=JSON.parse(init.body);return Response.json({
   model:"jev-1.14.0",answers:{intervene:{noul:0.65}},usage:{input_tokens:280}
  });}});
@@ -228,7 +228,7 @@ test("category, activity phase, and video/game metrics are forwarded in state wi
    youtube_watch_mode:"NORMAL"
   });
   assert.equal(r.status, 200);
-  assert.equal(r.body.prompt_version, "itv-coaching-v4");
+  assert.equal(r.body.prompt_version, "itv-coaching-v5");
   assert.equal(sent.state.app_activity_category, "GAME");
   assert.equal(sent.state.activity_phase, "LOBBY_OR_IDLE");
   assert.equal(sent.state.active_audio_pipeline, "GAME_AUDIO");
@@ -240,6 +240,7 @@ test("category, activity phase, and video/game metrics are forwarded in state wi
   assert.equal(sent.state.completed_longform_video_count, 1);
   assert.equal(sent.state.youtube_watch_mode, "NORMAL");
   assert.match(sent.questions.intervene.instructions, /IMMERSION CONVERSION/);
+  assert.match(sent.questions.intervene.instructions, /PROBABILITY CALIBRATION/);
   assert.match(sent.questions.intervene.instructions, /TIMING MANAGED BY CLIENT/);
   assert.match(sent.questions.intervene.instructions, /ANTI-DOUBLE-COUNTING/);
  }finally{f.db.close();}

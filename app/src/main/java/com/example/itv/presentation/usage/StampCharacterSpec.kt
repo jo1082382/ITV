@@ -165,7 +165,7 @@ internal object StampCharacterBitmapCache {
     private val arriveLeapCache = ConcurrentHashMap<String, ImageBitmap>()
 
     // Fast precomputed gamma lookup tables (replaces ~250k Math.pow calls inside pixel loops!)
-    private val stampGammaLut = FloatArray(256) { i -> (i / 255f).toDouble().pow(0.76).toFloat() }
+    private val stampGammaLut = FloatArray(256) { i -> (i / 255f).toDouble().pow(0.54).toFloat() }
     private val liveGammaLut = FloatArray(256) { i -> (i / 255f).toDouble().pow(0.82).toFloat() }
 
     private fun fastLut(lut: FloatArray, value: Float): Float =
@@ -372,7 +372,8 @@ internal object StampCharacterBitmapCache {
         h: Int,
         spec: StampCharacterSpec
     ): ImageBitmap {
-        val outPixels = IntArray(w * h)
+        val total = w * h
+        var alphaMap = FloatArray(total)
         val lm = spec.landmarks
         val threshold = spec.stampOutlineThreshold
         val invSpread = 1f / spec.stampOutlineSpread.coerceAtLeast(1f)
@@ -400,9 +401,55 @@ internal object StampCharacterBitmapCache {
 
                 val rawOutline = ((threshold - lum) * invSpread).coerceIn(0f, 1f) * (a * (1f / 255f))
                 if (rawOutline > 0.03f) {
-                    val boosted = fastLut(stampGammaLut, rawOutline)
-                    outPixels[idx] = ((boosted * 255f).roundToInt() shl 24) or 0x00FFFFFF
+                    alphaMap[idx] = fastLut(stampGammaLut, rawOutline)
                 }
+            }
+        }
+
+        // Smooth circular-weighted 3x3 morphological dilation (4 passes) so the 420px outline
+        // stays bold, chunky, and clearly legible even when scaled down to 39~41dp calendar cells!
+        val passes = ((w * 0.0105f).roundToInt()).coerceIn(3, 5)
+        var nextMap = FloatArray(total)
+        repeat(passes) {
+            nextMap.fill(0f)
+            for (py in 1 until h - 1) {
+                val row = py * w
+                val prev = row - w
+                val next = row + w
+                for (px in 1 until w - 1) {
+                    val idx = row + px
+                    var m = alphaMap[idx]
+                    val cL = alphaMap[idx - 1]
+                    val cR = alphaMap[idx + 1]
+                    val cU = alphaMap[prev + px]
+                    val cD = alphaMap[next + px]
+                    if (cL > m) m = cL
+                    if (cR > m) m = cR
+                    if (cU > m) m = cU
+                    if (cD > m) m = cD
+
+                    val dUL = alphaMap[prev + px - 1] * 0.88f
+                    val dUR = alphaMap[prev + px + 1] * 0.88f
+                    val dDL = alphaMap[next + px - 1] * 0.88f
+                    val dDR = alphaMap[next + px + 1] * 0.88f
+                    if (dUL > m) m = dUL
+                    if (dUR > m) m = dUR
+                    if (dDL > m) m = dDL
+                    if (dDR > m) m = dDR
+                    nextMap[idx] = m
+                }
+            }
+            val tmp = alphaMap
+            alphaMap = nextMap
+            nextMap = tmp
+        }
+
+        val outPixels = IntArray(total)
+        for (i in 0 until total) {
+            val v = alphaMap[i]
+            if (v > 0.03f) {
+                val boosted = (v * 1.12f).coerceIn(0f, 1f)
+                outPixels[i] = ((boosted * 255f).roundToInt() shl 24) or 0x00FFFFFF
             }
         }
         val out = createBitmap(w, h)
