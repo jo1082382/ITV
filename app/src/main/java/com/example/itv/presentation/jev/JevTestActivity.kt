@@ -528,7 +528,7 @@ private fun LiveContinuousUsageCard(
                 )
             }
             Text(
-                text = "숏폼 1초/초 · 일반 앱 1/3초/초 · ITV 앱 일시정지",
+                text = "숏폼 1:1 · 피드/SNS·게임 1:2 · 롱폼/일반 1:3 · ITV 앱 일시정지",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -1053,7 +1053,7 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
                 }
                 DeltaFactorRow(
                     title = "취침환경 · 조도",
-                    rangeHint = "±15%p",
+                    rangeHint = "-30~+15%p",
                     detail = bedtimeDetail,
                     deltaPct = adj.bedtimeDelta * 100.0
                 )
@@ -1207,7 +1207,7 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
 
                 Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
                     Text(
-                        text = if (isLongformOrAll) "확률 격차별 재평가 변동표 (일반/통합 1:3 기준)" else "확률 격차별 재평가 변동표 (숏폼 1:1 기준)",
+                        text = if (isLongformOrAll) "확률 격차별 재평가 변동표 (일반/통합 기준)" else "확률 격차별 재평가 변동표 (숏폼 1:1 기준)",
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1268,15 +1268,16 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
                     }
                     if (showDetails) {
                         val rawPhysicalMs = ctx.rawShortformMs + ctx.rawGeneralMs
+                        val rawLowMs = (ctx.rawGeneralMs - ctx.rawMidWeightMs).coerceAtLeast(0L)
                         val sfRatio = if (rawPhysicalMs > 0L) (ctx.rawShortformMs.toDouble() / rawPhysicalMs.toDouble()) * 100.0 else 0.0
-                        val weightedMs = ctx.rawShortformMs + (ctx.rawGeneralMs / 3L)
+                        val weightedMs = ctx.rawShortformMs + (ctx.rawMidWeightMs / 2L) + (rawLowMs / 3L)
                         CompactCheckRow(
                             label = "물리 사용 시간",
-                            value = "${"%.1f".format(rawPhysicalMs / 1000.0)}초 (숏폼 ${"%.1f".format(ctx.rawShortformMs / 1000.0)}초 + 일반 ${"%.1f".format(ctx.rawGeneralMs / 1000.0)}초)"
+                            value = "${"%.1f".format(rawPhysicalMs / 1000.0)}초 (숏폼 ${"%.1f".format(ctx.rawShortformMs / 1000.0)}초 + 피드·게임 ${"%.1f".format(ctx.rawMidWeightMs / 1000.0)}초 + 롱폼·일반 ${"%.1f".format(rawLowMs / 1000.0)}초)"
                         )
                         CompactCheckRow(
                             label = "숏폼 비중 / 환산",
-                            value = "${"%.1f".format(sfRatio)}% · 환산 ${"%.1f".format(weightedMs / 1000.0)}초 (1x + 1/3x)"
+                            value = "${"%.1f".format(sfRatio)}% · 환산 ${"%.1f".format(weightedMs / 1000.0)}초 (1:1 / 1:2 / 1:3)"
                         )
                         CompactCheckRow(
                             label = "롱폼 시청 분석",

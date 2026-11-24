@@ -23,8 +23,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import com.example.itv.domain.coaching.CharacterIntensity
-import com.example.itv.domain.coaching.CoachingIntensity
 import com.example.itv.domain.coaching.CoachingTone
 import com.example.itv.domain.coaching.InterventionType
 import com.example.itv.domain.coaching.UserCoachingSettings
@@ -108,24 +106,14 @@ fun CoachingSettingsScreen(
 
             HorizontalDivider(color = ItvLine.copy(alpha = 0.6f))
 
-            // 2. 코칭 강도 설정 (시청 시간·피로도에 따른 개입 빈도: 약하게, 보통, 강하게)
-            CoachingIntensitySection(
-                selectedIntensity = settings.coachingIntensity,
-                onSelectIntensity = { store.updateCoachingIntensity(it) }
+            // 2. 상황별 자동 개입 강도 안내 (수동 선택 대신 취침 전/암실 사전 개입 → 본 개입 → 자동 격상)
+            AutoIntensityPolicySection(
+                isActuallyNotificationOnly = isActuallyNotificationOnly
             )
 
             HorizontalDivider(color = ItvLine.copy(alpha = 0.6f))
 
-            // 3. 캐릭터 개입 강도 설정 (화면 등장 비율 및 모션 활발함: 약하게, 보통, 강하게)
-            CharacterIntensitySection(
-                selectedIntensity = settings.characterIntensity,
-                isActuallyNotificationOnly = isActuallyNotificationOnly,
-                onSelectIntensity = { store.updateCharacterIntensity(it) }
-            )
-
-            HorizontalDivider(color = ItvLine.copy(alpha = 0.6f))
-
-            // 4. 개입 시 말투 설정 (부드럽게, 장난스럽게, 강하게)
+            // 3. 개입 시 말투 설정 (부드럽게, 장난스럽게, 강하게)
             CoachingToneSection(
                 selectedTone = settings.tone,
                 onSelectTone = { store.updateTone(it) }
@@ -831,98 +819,14 @@ private fun InterventionOptionCard(
 }
 
 @Composable
-private fun CoachingIntensitySection(
-    selectedIntensity: CoachingIntensity,
-    onSelectIntensity: (CoachingIntensity) -> Unit
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(
-                text = "코칭 강도",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                color = ItvGreen
-            )
-            Text(
-                text = "숏폼 시청 시간 및 피로도에 따른 개입 빈도와 민감도를 설정합니다.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-
-        // 3개 선택 세그먼트 (약하게 / 보통 / 강하게)
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            CoachingIntensity.entries.forEach { intensity ->
-                val isSelected = intensity == selectedIntensity
-                Surface(
-                    onClick = { onSelectIntensity(intensity) },
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(12.dp),
-                    color = if (isSelected) ItvGreen else MaterialTheme.colorScheme.surface,
-                    border = BorderStroke(1.dp, if (isSelected) ItvGreen else ItvLine)
-                ) {
-                    Column(
-                        modifier = Modifier.padding(vertical = 12.dp, horizontal = 4.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(2.dp)
-                    ) {
-                        Text(
-                            text = intensity.title,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 14.sp,
-                            color = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            text = intensity.subtitle,
-                            fontSize = 10.sp,
-                            color = if (isSelected) Color.White.copy(alpha = 0.85f) else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
-        }
-
-        // 선택된 강도에 대한 세부 설명 카드
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp),
-            colors = CardDefaults.cardColors(containerColor = ItvMint),
-            border = BorderStroke(1.dp, ItvLine)
-        ) {
-            Column(
-                modifier = Modifier.padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                Text(
-                    text = "${selectedIntensity.title} 코칭 특징",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = ItvGreen
-                )
-                Text(
-                    text = selectedIntensity.description,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun CharacterIntensitySection(
-    selectedIntensity: CharacterIntensity,
-    isActuallyNotificationOnly: Boolean,
-    onSelectIntensity: (CharacterIntensity) -> Unit
+private fun AutoIntensityPolicySection(
+    isActuallyNotificationOnly: Boolean
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = "캐릭터 개입 강도",
+                    text = "상황별 자동 개입 강도",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     color = ItvGreen
@@ -937,77 +841,72 @@ private fun CharacterIntensitySection(
                 }
             }
             Text(
-                text = "개입 시 강아지 캐릭터가 화면에 등장하는 크기(비율)와 모션 크기를 설정합니다.",
+                text = "직접 강도를 고르지 않아도 취침 시간·주변 밝기·연속 사용 상황에 맞춰 개입 강도가 자동으로 조절됩니다.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
 
-        // 3개 선택 세그먼트 (약하게 / 보통 / 강하게)
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            CharacterIntensity.entries.forEach { intensity ->
-                val isSelected = intensity == selectedIntensity
-                Surface(
-                    onClick = { onSelectIntensity(intensity) },
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(12.dp),
-                    color = if (isSelected) ItvGreen else MaterialTheme.colorScheme.surface,
-                    border = BorderStroke(1.dp, if (isSelected) ItvGreen else ItvLine)
-                ) {
-                    Column(
-                        modifier = Modifier.padding(vertical = 12.dp, horizontal = 4.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(2.dp)
-                    ) {
-                        Text(
-                            text = intensity.title,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 14.sp,
-                            color = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            text = intensity.subtitle,
-                            fontSize = 9.sp,
-                            color = if (isSelected) Color.White.copy(alpha = 0.85f) else MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1
-                        )
-                    }
-                }
-            }
-        }
-
-        // 선택된 캐릭터 강도에 대한 세부 설명 카드
         Card(
             modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp),
+            shape = RoundedCornerShape(14.dp),
             colors = CardDefaults.cardColors(containerColor = ItvMint),
             border = BorderStroke(1.dp, ItvLine)
         ) {
             Column(
                 modifier = Modifier.padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Text(
-                        text = "🐾 ${selectedIntensity.title} 캐릭터 등장 특징",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = ItvGreen
-                    )
-                }
-                Text(
-                    text = selectedIntensity.description,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface
+                AutoIntensityTierRow(
+                    badge = "사전 개입 · 약하게",
+                    badgeBg = Color(0xFFDBEAFE),
+                    badgeText = Color(0xFF1D4ED8),
+                    description = "취침 전·경과 암실이나 어두운 환경에서 일정 시간 사용 시, 본 개입 전에 강아지가 화면 구석에서 조용히 먼저 알려줍니다. (6초 후 자동 퇴장 · 터치 시 즉시 휴식)"
+                )
+                HorizontalDivider(color = ItvLine.copy(alpha = 0.6f))
+                AutoIntensityTierRow(
+                    badge = "기본 개입 · 보통",
+                    badgeBg = ItvGreen.copy(alpha = 0.14f),
+                    badgeText = ItvGreen,
+                    description = "연속 시청·피로도 기준에 도달하면 균형 있게 휴식을 제안합니다. 취침 경과 암실에서는 사전 개입 이후에도 계속 시청하면 취침 케어로 자동 전환됩니다."
+                )
+                HorizontalDivider(color = ItvLine.copy(alpha = 0.6f))
+                AutoIntensityTierRow(
+                    badge = "자동 격상 · 강하게",
+                    badgeBg = Color(0xFFFEE2E2),
+                    badgeText = Color(0xFFB91C1C),
+                    description = "휴식 제안을 연속 2회 이상 미루거나 무응답하면 자동으로 강한 개입으로 격상되어 과몰입을 차단하며, 휴식을 마치면 기본 단계로 복귀합니다."
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun AutoIntensityTierRow(
+    badge: String,
+    badgeBg: Color,
+    badgeText: Color,
+    description: String
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Surface(
+            shape = RoundedCornerShape(8.dp),
+            color = badgeBg
+        ) {
+            Text(
+                text = badge,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = badgeText
+            )
+        }
+        Text(
+            text = description,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface
+        )
     }
 }
 

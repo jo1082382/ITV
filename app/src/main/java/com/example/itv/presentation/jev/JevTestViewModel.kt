@@ -17,6 +17,8 @@ enum class SimAppCategory(
     val activityPhase: String,
     val youtubeWatchMode: String?,
     val isShortform: Boolean,
+    val defaultDivisor: Double,
+    val defaultWeightLabel: String,
     val curveMinutes: List<Int>,
 ) {
     SHORTFORM(
@@ -27,6 +29,8 @@ enum class SimAppCategory(
         activityPhase = "BROWSING",
         youtubeWatchMode = "SHORTS",
         isShortform = true,
+        defaultDivisor = 1.0,
+        defaultWeightLabel = "1:1",
         curveMinutes = listOf(5, 10, 15, 20)
     ),
     FEED_SNS(
@@ -37,6 +41,8 @@ enum class SimAppCategory(
         activityPhase = "BROWSING",
         youtubeWatchMode = null,
         isShortform = false,
+        defaultDivisor = 2.0,
+        defaultWeightLabel = "1:2",
         curveMinutes = listOf(10, 20, 30, 45)
     ),
     LONGFORM(
@@ -47,6 +53,8 @@ enum class SimAppCategory(
         activityPhase = "VIDEO_PLAYING",
         youtubeWatchMode = "PORTRAIT_WATCH",
         isShortform = false,
+        defaultDivisor = 3.0,
+        defaultWeightLabel = "1:3",
         curveMinutes = listOf(15, 30, 45, 60)
     ),
     GAME(
@@ -57,7 +65,9 @@ enum class SimAppCategory(
         activityPhase = "ACTIVE_GAMEPLAY",
         youtubeWatchMode = null,
         isShortform = false,
-        curveMinutes = listOf(15, 30, 45, 60)
+        defaultDivisor = 2.0,
+        defaultWeightLabel = "1:2",
+        curveMinutes = listOf(10, 20, 30, 45)
     ),
     BROWSER_GENERAL(
         label = "웹·일반 앱",
@@ -67,6 +77,8 @@ enum class SimAppCategory(
         activityPhase = "ACTIVE",
         youtubeWatchMode = null,
         isShortform = false,
+        defaultDivisor = 3.0,
+        defaultWeightLabel = "1:3",
         curveMinutes = listOf(15, 30, 45, 60)
     ),
     DOCUMENT_MESSENGER(
@@ -77,14 +89,17 @@ enum class SimAppCategory(
         activityPhase = "ACTIVE",
         youtubeWatchMode = null,
         isShortform = false,
+        defaultDivisor = 3.0,
+        defaultWeightLabel = "1:3",
         curveMinutes = listOf(15, 30, 45, 60)
     )
 }
 
-enum class SimWeightMode(val label: String, val shortLabel: String, val divisor: Double) {
-    CURRENT_1_TO_3("현재 앱 기준 (1:3)", "1:3", 3.0),
-    TEST_1_TO_2("가중치 실험 (1:2)", "1:2", 2.0),
-    RAW_1_TO_1("원본 시간 (1:1)", "1:1", 1.0)
+enum class SimWeightMode(val label: String, val shortLabel: String, val divisor: Double?) {
+    APP_3_TIER("앱 기본 (3단계)", "앱 기본", null),
+    CURRENT_1_TO_3("1:3 고정", "1:3", 3.0),
+    TEST_1_TO_2("1:2 고정", "1:2", 2.0),
+    RAW_1_TO_1("1:1 원본", "1:1", 1.0)
 }
 
 /** 로컬 개입 기준 확률 변동 비교 전용 (Jev 서버 요청에는 전송하지 않음). */
@@ -291,7 +306,10 @@ data class CategorySimRequest(
     val labelOverride: String? = null,
 ) {
     val effectiveDivisor: Double
-        get() = if (category.isShortform) 1.0 else weightMode.divisor
+        get() = if (category.isShortform) 1.0 else (weightMode.divisor ?: category.defaultDivisor)
+
+    val effectiveWeightLabel: String
+        get() = if (category.isShortform) "1:1" else if (weightMode.divisor == null) category.defaultWeightLabel else weightMode.shortLabel
 
     val equivalentMinutes: Double
         get() = (rawMinutes.toDouble() / effectiveDivisor).coerceAtLeast(1.0 / 60.0)

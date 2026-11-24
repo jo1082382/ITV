@@ -1,5 +1,7 @@
 package com.example.itv.domain.jev
 
+import com.example.itv.domain.coaching.UsageWeightTier
+
 /** Test policy, independently versioned from the existing 30-second rest mission. */
 data class JevSettings(
     val enabled: Boolean = false,
@@ -16,7 +18,7 @@ data class JevSettings(
     val bedtimeEnabled: Boolean = true,
     val bedtimeDelayMinutes: Int = 0,
     val bedtimeWindowMinutes: Int = 480,
-    val probabilityThreshold: Double = 0.8,
+    val probabilityThreshold: Double = 0.75,
     val reevaluateSeconds: Int = 300,
     val additionalViewingSeconds: Int = 300,
     val resultTtlSeconds: Int = 30,
@@ -118,6 +120,7 @@ data class JevContext(
     val observedAt: Long,
     val rawShortformMs: Long = 0L,
     val rawGeneralMs: Long = 0L,
+    val rawMidWeightMs: Long = 0L,
     val quality: String = "VALID",
     val personalAvgSessionMinutes: Double? = null,
     val sessionVsAvgRatio: Double? = null,
@@ -164,23 +167,27 @@ object JevCandidatePolicy {
     }
 
     /**
-     * Computes continuous bedtime & environmental lighting adjustment (-15%p ~ +15%p).
+     * Computes continuous bedtime & environmental lighting adjustment (-30%p ~ +15%p).
      *
      * Principles:
      * 1. Proximity occlusion guard: if proximity is 0cm (or near with low lux), the sensor
      *    is physically covered by hand/pillow/bedding. It is NOT genuine dark bedroom usage (returns 0%p).
-     * 2. Pre-bedtime dark usage (lights off, lux <= 25, screen dimmed or watching in dark):
-     *    During bedtime window (including 2~3 hours before bedtime up to late night),
-     *    lowers intervention threshold linearly down to -15%p to strictly prevent bedtime sleep disruption.
-     * 3. Normal / daytime active usage:
-     *    During daytime, or even when approaching bedtime if room lights are on (lux >= 40)
-     *    and screen is bright, the user is active/awake, raising threshold up to +15%p.
+     * 2. Pre-bedtime dark usage (d < 0, lights off, lux <= 25):
+     *    During pre-bedtime window (up to 3~4 hours before bedtime),
+     *    lowers intervention threshold linearly down to -15%p.
+     * 3. Post-bedtime dark usage (d >= 0 or bedtimePassedMinutes >= 0, lights off, lux <= 25):
+     *    Once target bedtime has passed in a dark room, strengthens protection smoothly
+     *    from -25%p (at bedtime) to -30%p (30+ minutes past bedtime) so short-form usage
+     *    triggers intervention around ~10 minutes.
+     * 4. Normal / daytime active usage:
+     *    During daytime, or when room lights are on (lux >= 40) and screen is bright,
+     *    raises threshold up to +15%p.
      */
     fun computeBedtimeEnvironmentDelta(c: JevContext): Double {
         val lux = c.ambientLux
         val brightness = c.screenBrightness
         val occluded = c.isNearOrOccluded
-        val d = c.bedtimeDistanceMinutes
+        val d = c.bedtimeDistanceMinutes ?: c.bedtimePassedMinutes
 
         if (lux == null && brightness == null && d == null) return 0.0
 
@@ -237,7 +244,7 @@ object JevCandidatePolicy {
             else -> 1.0
         }
 
-        // 5. Pre-bedtime Dark Usage Score (P_sleep in [0.0, 1.0])
+        // 5. Bedtime Dark Usage Score (P_sleep in [0.0, 1.0])
         val sleepDarkScore = if (darknessLevel > 0.0 && bedtimeWeight > 0.0) {
             val screenFactor = 0.75 + 0.25 * dimScreenFactor
             (bedtimeWeight * darknessLevel * screenFactor).coerceIn(0.0, 1.0)
@@ -254,16 +261,26 @@ object JevCandidatePolicy {
 
         val activeScore = maxOf(litRoomActiveScore, daytimeActiveScore)
 
-        // 7. Calculate continuous linear delta in [-0.15, +0.15]
+        // 7. Calculate continuous linear delta:
+        // - Pre-bedtime dark (d < 0): up to -15%p
+        // - Post-bedtime dark (d >= 0): smoothly strengthened from -25%p (d=0) to -30%p (d>=30)
+        // - Daytime / bright room: up to +15%p
+        val isPostBedtime = (d != null && d >= 0) || (c.bedtimePassedMinutes != null && c.bedtimePassedMinutes >= 0)
+        val maxDarkPenalty = if (isPostBedtime) {
+            val passedMin = maxOf(d ?: 0, c.bedtimePassedMinutes ?: 0).coerceAtLeast(0)
+            0.25 + 0.05 * (passedMin / 30.0).coerceIn(0.0, 1.0)
+        } else {
+            0.15
+        }
         val delta = if (sleepDarkScore > 0.0) {
-            -0.15 * sleepDarkScore
+            -maxDarkPenalty * sleepDarkScore
         } else if (activeScore > 0.0) {
             0.15 * activeScore
         } else {
             0.0
         }
 
-        return kotlin.math.round(delta.coerceIn(-0.15, 0.15) * 1000.0) / 1000.0
+        return kotlin.math.round(delta.coerceIn(-0.30, 0.15) * 1000.0) / 1000.0
     }
 
     fun reasons(c: JevContext, s: JevSettings): List<String> = buildList {
@@ -406,7 +423,7 @@ object JevCandidatePolicy {
         // [제거됨] 폰 사용 중 숏폼 비중은 실시간 몰입도 판단 지표로 부적합하므로 보정 계산에서 제외 (0%p)
         val phoneShareDelta = 0.0
 
-        // 3. 취침 연계 환경 조도 및 화면 밝기 선형 증감: 취침전암실 (-15%p) ~ 평상시실내 (0%p) ~ 주간/밝은환경 (+15%p)
+        // 3. 취침 연계 환경 조도 및 화면 밝기 선형 증감: 취침경과암실 (-30%p) ~ 취침전암실 (-15%p) ~ 평상시실내 (0%p) ~ 주간/밝은환경 (+15%p)
         val bedtimeDelta = computeBedtimeEnvironmentDelta(c)
 
         // 4. 연속 시청 피로도 누적: 15분 미만(0%p) ~ 30분(-2%p) ~ 45분 이상(-4%p)
@@ -515,8 +532,10 @@ object JevCandidatePolicy {
         }
         if (kotlin.math.abs(adj.bedtimeDelta) >= 0.005) {
             val sign = if (adj.bedtimeDelta > 0) "+" else ""
+            val isPostBedtime = (c.bedtimeDistanceMinutes ?: -1) >= 0 || (c.bedtimePassedMinutes ?: -1) >= 0
             val envDesc = when {
                 c.isNearOrOccluded -> "센서가림"
+                adj.bedtimeDelta < 0 && isPostBedtime -> "취침경과암실"
                 adj.bedtimeDelta < 0 -> "취침전암실"
                 else -> "주간/밝은환경"
             }
@@ -577,20 +596,50 @@ class JevSessionTracker(private val newId: () -> String) {
         var nonConfirmedMs: Long = 0,
         var screenOffMs: Long = 0,
         var rawShortformMs: Long = 0,
+        var rawMidMs: Long = 0,
+        var rawLowMs: Long = 0,
         var rawGeneralMs: Long = 0,
         var totalShortformMs: Long = 0,
+        var totalMidMs: Long = 0,
+        var totalLowMs: Long = 0,
         var totalGeneralMs: Long = 0,
         /** Continuous viewing of the most recent run; kept after reset for test inspection only. */
         var lastRunContinuousMs: Long = 0,
         val returns: MutableList<Long> = mutableListOf()
-    )
+    ) {
+        internal fun recomputeWeighted() {
+            rawGeneralMs = rawMidMs + rawLowMs
+            totalGeneralMs = totalMidMs + totalLowMs
+            continuousMs = rawShortformMs + (rawMidMs / 2L) + (rawLowMs / 3L)
+            totalMs = totalShortformMs + (totalMidMs / 2L) + (totalLowMs / 3L)
+        }
+
+        internal fun clearContinuousRaw() {
+            continuousMs = 0L
+            rawShortformMs = 0L
+            rawMidMs = 0L
+            rawLowMs = 0L
+            rawGeneralMs = 0L
+        }
+
+        internal fun clearSessionTotals() {
+            totalMs = 0L
+            rawShortformMs = 0L; rawMidMs = 0L; rawLowMs = 0L; rawGeneralMs = 0L
+            totalShortformMs = 0L; totalMidMs = 0L; totalLowMs = 0L; totalGeneralMs = 0L
+        }
+    }
     val states = linkedMapOf<String, AppState>()
     private var previousAt: Long? = null
     private var previousPkg: String? = null
     private var previousConfirmed: String? = null
     private var coverageStart: Long? = null
 
-    fun observe(now: Long, pkg: String?, confirmedPkg: String?) {
+    fun observe(
+        now: Long,
+        pkg: String?,
+        confirmedPkg: String?,
+        nonShortformTier: UsageWeightTier = UsageWeightTier.LOW_1_TO_3
+    ) {
         val before = previousAt
         val delta = if (before == null) 0 else now - before
         val contiguous = before != null && delta in 1..1500
@@ -611,9 +660,8 @@ class JevSessionTracker(private val newId: () -> String) {
                     val verifiedAway = state.awayMs + if (contiguous && previousPkg != null) delta else 0L
                     val verifiedScreenOff = state.screenOffMs + if (contiguous && previousPkg == "LOCKED") delta else 0L
                     if (verifiedAway >= SESSION_TIMEOUT_MS || verifiedScreenOff >= RECOGNIZED_REST_MS) {
-                        state.id = newId(); state.totalMs = 0
-                        state.rawShortformMs = 0L; state.rawGeneralMs = 0L
-                        state.totalShortformMs = 0L; state.totalGeneralMs = 0L
+                        state.id = newId()
+                        state.clearSessionTotals()
                     }
                     if (state.entered && previousPkg != null) state.returns.add(now)
                     state.entered = true
@@ -628,25 +676,26 @@ class JevSessionTracker(private val newId: () -> String) {
                 if (confirmedPkg != null && contiguous) {
                     state.rawShortformMs += delta
                     state.totalShortformMs += delta
-                    state.continuousMs = state.rawShortformMs + (state.rawGeneralMs / 3L)
-                    state.totalMs = state.totalShortformMs + (state.totalGeneralMs / 3L)
+                    state.recomputeWeighted()
                     state.nonConfirmedMs = 0L
                 } else if (inspectingItv) {
                     // Preserve continuousMs while checking ITV app
                 } else if (isTargetPkg && contiguous) {
-                    state.rawGeneralMs += delta
-                    state.totalGeneralMs += delta
-                    state.continuousMs = state.rawShortformMs + (state.rawGeneralMs / 3L)
-                    state.totalMs = state.totalShortformMs + (state.totalGeneralMs / 3L)
+                    if (nonShortformTier == UsageWeightTier.MID_1_TO_2) {
+                        state.rawMidMs += delta
+                        state.totalMidMs += delta
+                    } else {
+                        state.rawLowMs += delta
+                        state.totalLowMs += delta
+                    }
+                    state.recomputeWeighted()
                     state.nonConfirmedMs = 0L
                 } else if (!contiguous && previousPkg != "LOCKED" && pkg != "LOCKED") {
-                    state.continuousMs = 0L; state.rawShortformMs = 0L; state.rawGeneralMs = 0L; state.nonConfirmedMs = 0L
+                    state.clearContinuousRaw(); state.nonConfirmedMs = 0L
                 } else {
                     state.nonConfirmedMs += delta
                     if (state.nonConfirmedMs >= INTERRUPTION_TOLERANCE_MS) {
-                        state.continuousMs = 0L
-                        state.rawShortformMs = 0L
-                        state.rawGeneralMs = 0L
+                        state.clearContinuousRaw()
                     }
                 }
                 if (state.continuousMs > 0L) state.lastRunContinuousMs = state.continuousMs
@@ -656,9 +705,8 @@ class JevSessionTracker(private val newId: () -> String) {
                     val verifiedAway = state.awayMs + if (contiguous && previousPkg != null) delta else 0L
                     val verifiedScreenOff = state.screenOffMs + if (contiguous && previousPkg == "LOCKED") delta else 0L
                     if (verifiedAway >= SESSION_TIMEOUT_MS || verifiedScreenOff >= RECOGNIZED_REST_MS) {
-                        state.id = newId(); state.totalMs = 0
-                        state.rawShortformMs = 0L; state.rawGeneralMs = 0L
-                        state.totalShortformMs = 0L; state.totalGeneralMs = 0L
+                        state.id = newId()
+                        state.clearSessionTotals()
                     }
                     if (state.entered && previousPkg != null) state.returns.add(now)
                     state.entered = true
@@ -674,8 +722,7 @@ class JevSessionTracker(private val newId: () -> String) {
                     if (previousConfirmed == app || state.continuousMs > 0L) {
                         state.rawShortformMs += delta
                         state.totalShortformMs += delta
-                        state.continuousMs = state.rawShortformMs + (state.rawGeneralMs / 3L)
-                        state.totalMs = state.totalShortformMs + (state.totalGeneralMs / 3L)
+                        state.recomputeWeighted()
                     }
                     state.nonConfirmedMs = 0L
                 } else if (confirmedPkg == app) {
@@ -683,24 +730,25 @@ class JevSessionTracker(private val newId: () -> String) {
                 } else if (inspectingItv) {
                     // Preserve continuousMs while checking ITV app
                 } else if (pkg == app && contiguous) {
-                    // Continuous usage within the target app (e.g. YouTube longform/home, Instagram feed, or user app):
-                    // 1:3 ratio (1 second equivalent per 3 seconds of general app viewing)
-                    state.rawGeneralMs += delta
-                    state.totalGeneralMs += delta
-                    state.continuousMs = state.rawShortformMs + (state.rawGeneralMs / 3L)
-                    state.totalMs = state.totalShortformMs + (state.totalGeneralMs / 3L)
+                    // 3단계 가중치 적용: 피드/SNS·게임은 1:2, 롱폼·일반 앱은 1:3
+                    if (nonShortformTier == UsageWeightTier.MID_1_TO_2) {
+                        state.rawMidMs += delta
+                        state.totalMidMs += delta
+                    } else {
+                        state.rawLowMs += delta
+                        state.totalLowMs += delta
+                    }
+                    state.recomputeWeighted()
                     state.nonConfirmedMs = 0L
                 } else if (!contiguous && previousPkg != "LOCKED" && pkg != "LOCKED") {
                     // Unobserved/unknown gap while active: reset continuous viewing
-                    state.continuousMs = 0L; state.rawShortformMs = 0L; state.rawGeneralMs = 0L; state.nonConfirmedMs = 0L
+                    state.clearContinuousRaw(); state.nonConfirmedMs = 0L
                 } else {
                     // In another app, or screen turned off/locked:
                     // Only reset continuous viewing if nonConfirmedMs exceeds INTERRUPTION_TOLERANCE_MS (90초)
                     state.nonConfirmedMs += delta
                     if (state.nonConfirmedMs >= INTERRUPTION_TOLERANCE_MS) {
-                        state.continuousMs = 0L
-                        state.rawShortformMs = 0L
-                        state.rawGeneralMs = 0L
+                        state.clearContinuousRaw()
                     }
                 }
                 if (state.continuousMs > 0L) state.lastRunContinuousMs = state.continuousMs
@@ -718,6 +766,7 @@ class JevSessionTracker(private val newId: () -> String) {
         val total = if (pkg == "ALL") (allState?.totalMs ?: 0L) else maxOf(appState?.totalMs ?: 0L, allState?.totalMs ?: 0L)
         val rawShort = if (pkg == "ALL") (allState?.rawShortformMs ?: 0L) else maxOf(appState?.rawShortformMs ?: 0L, allState?.rawShortformMs ?: 0L)
         val rawGen = if (pkg == "ALL") (allState?.rawGeneralMs ?: 0L) else maxOf(appState?.rawGeneralMs ?: 0L, allState?.rawGeneralMs ?: 0L)
+        val rawMid = if (pkg == "ALL") (allState?.rawMidMs ?: 0L) else maxOf(appState?.rawMidMs ?: 0L, allState?.rawMidMs ?: 0L)
         val returnsCount = if (pkg == "ALL") (allState?.returns?.size ?: 0) else maxOf(appState?.returns?.size ?: 0, allState?.returns?.size ?: 0)
 
         return JevContext(
@@ -730,7 +779,8 @@ class JevSessionTracker(private val newId: () -> String) {
             bedtimePassedMinutes = bedtime,
             observedAt = wall,
             rawShortformMs = rawShort,
-            rawGeneralMs = rawGen
+            rawGeneralMs = rawGen,
+            rawMidWeightMs = rawMid
         )
     }
     /** Restore totals only. Never restore continuity or absence from a wall-clock difference. */
@@ -747,16 +797,12 @@ class JevSessionTracker(private val newId: () -> String) {
     /** Reset continuous viewing and non-confirmed counters while keeping total session time intact (e.g. on rest mission success). */
     fun resetContinuous(pkg: String) {
         states[pkg]?.let {
-            it.continuousMs = 0L
-            it.rawShortformMs = 0L
-            it.rawGeneralMs = 0L
+            it.clearContinuousRaw()
             it.nonConfirmedMs = 0L
         }
         if (pkg != "ALL") {
             states["ALL"]?.let {
-                it.continuousMs = 0L
-                it.rawShortformMs = 0L
-                it.rawGeneralMs = 0L
+                it.clearContinuousRaw()
                 it.nonConfirmedMs = 0L
             }
         }

@@ -209,7 +209,7 @@ test("optional personalized and swipe metrics are forwarded when present and omi
  }finally{f.db.close();}
 });
 
-test("category, activity phase, and video/game metrics are forwarded in state with prompt v5",async()=>{
+test("category, activity phase, and video/game metrics are forwarded in state with prompt v10",async()=>{
  let sent;const f=fixture({upstream:async(_url,init)=>{sent=JSON.parse(init.body);return Response.json({
   model:"jev-1.14.0",answers:{intervene:{noul:0.65}},usage:{input_tokens:280}
  });}});
@@ -228,7 +228,7 @@ test("category, activity phase, and video/game metrics are forwarded in state wi
    youtube_watch_mode:"NORMAL"
   });
   assert.equal(r.status, 200);
-  assert.equal(r.body.prompt_version, "itv-coaching-v5");
+  assert.equal(r.body.prompt_version, "itv-coaching-v10");
   assert.equal(sent.state.app_activity_category, "GAME");
   assert.equal(sent.state.activity_phase, "LOBBY_OR_IDLE");
   assert.equal(sent.state.active_audio_pipeline, "GAME_AUDIO");

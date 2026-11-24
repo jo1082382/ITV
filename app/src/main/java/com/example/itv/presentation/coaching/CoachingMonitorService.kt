@@ -98,10 +98,28 @@ class CoachingMonitorService : Service() {
     private var missionJevContext: JevContext?=null
     private var lastOfferedIntensity: CharacterIntensity? = null
     private var activeMissionIntensity: CharacterIntensity? = null
+    private var preInterventionTriggeredInSession = false
+    private var preInterventionShownAtElapsed = 0L
+    private var darkUsageAccumulatedMs = 0L
+    private var lastDarkTickElapsed: Long? = null
+    private var offerIsPreIntervention = false
 
+    private fun resetPreInterventionSession() {
+        preInterventionTriggeredInSession = false
+        preInterventionShownAtElapsed = 0L
+        darkUsageAccumulatedMs = 0L
+        lastDarkTickElapsed = null
+        offerIsPreIntervention = false
+    }
+
+    /**
+     * 자동 상황별 개입 강도:
+     * - 사전 개입(약하게): 취침 전/경과 암실·어두운 환경에서 [ContextualPreInterventionPolicy]가 자동 실행
+     * - 본 개입(보통): 기본 개입 강도
+     * - 자동 격상(강하게): '나중에'/무응답 연속 2회 이상 시 [CharacterEscalationTracker]가 자동 격상
+     */
     private fun getEffectiveIntensity(): CharacterIntensity {
-        val base = UserCoachingSettingsStore.getInstance(this).loadSettings().characterIntensity
-        return escalationTracker.resolveEffectiveIntensity(base)
+        return escalationTracker.resolveEffectiveIntensity(CharacterIntensity.NORMAL)
     }
     private fun reminderText(ms: Long): String {
         val sec = ms / 1000L
@@ -136,6 +154,33 @@ class CoachingMonitorService : Service() {
                     selectedAnimation("닫기") { removeOverlay() }
                     com.example.itv.composition.CoachingAccess.state(this, "$title 선택 · 충분한 휴식 전까지 재제안 안 함")
                 }
+            }
+            return
+        }
+        if (offerIsPreIntervention) {
+            val preId = responseController.offerId ?: ("pre-" + java.util.UUID.randomUUID().toString().take(4))
+            offerIsPreIntervention = false
+            handler.removeCallbacks(offerTimeout)
+            if (title == "쉬기") {
+                missionFromJev = false
+                missionJevSettings = null
+                missionJevContext = null
+                responseController.suppressed = true
+                responseController.offered = false
+                responseController.offerId = null
+                responseController.retryAt = null
+                startRestMission(preId)
+                selectedAnimation("쉬기") {
+                    removeOverlay()
+                    missionController.refreshStartDeadline(SystemClock.elapsedRealtime(), false)
+                }
+                com.example.itv.composition.CoachingAccess.state(this, "사전 개입 쉬기 선택 · 휴식 미션 시작")
+            } else {
+                // 약한 사전 개입은 6초 자동 퇴장 시 저항 횟수/억제/보류를 걸지 않고, 계속 시청 시 본 개입(취침 케어 등)으로 이어지도록 둡니다.
+                responseController.offered = false
+                responseController.offerId = null
+                removeOverlay()
+                com.example.itv.composition.CoachingAccess.state(this, "사전 개입 완료 · 계속 사용 시 본 개입 진행")
             }
             return
         }
@@ -520,6 +565,7 @@ class CoachingMonitorService : Service() {
         isRestMissionFailure = false
         usageClock.clear()
         resetOfferState()
+        resetPreInterventionSession()
         activeMissionIntensity = null
         lastOfferedIntensity = null
         currentRecommendation = null
@@ -574,7 +620,10 @@ class CoachingMonitorService : Service() {
     private val pm by lazy { getSystemService(PowerManager::class.java) }
     private val nm by lazy { getSystemService(NotificationManager::class.java) }
     private fun unlocked() = observer.unlocked()
-    private fun resetOfferState() { progress.reset() }
+    private fun resetOfferState() {
+        progress.reset()
+        resetPreInterventionSession()
+    }
     private fun observeUsage(): Boolean {
         val isUnlocked = unlocked()
         val nowElapsed = SystemClock.elapsedRealtime()
@@ -590,16 +639,26 @@ class CoachingMonitorService : Service() {
             JevSettings.isLauncherPackage(fgPkg) ||
             JevSettings.isExcludedSystemPackage(fgPkg)
         )
-        // 1.0x(1초당 1초)는 실제 숏폼(YouTube 쇼츠 / Instagram 릴스) 시청 중에만 적용하고,
-        // 롱폼 영상·일반 앱·게임 등은 모두 1:3 비율(1초당 1/3초)로 환산한다.
-        val isShortform = isUnlocked && !isOwnApp && !isNonCountedSystem && when (fgPkg) {
-            JevSettings.YOUTUBE -> YoutubeProbe.screenState() == 1
-            JevSettings.INSTAGRAM -> ReelsProbe.screenState() == 1
-            else -> false
+        // 3단계 가중치 적용:
+        // - 1:1 (FULL_1_TO_1): YouTube 쇼츠, Instagram 릴스 등 확정 숏폼
+        // - 1:2 (MID_1_TO_2): 피드·SNS (인스타 피드/탐색, 유튜브 홈/피드, 커뮤니티/SNS) 및 게임
+        // - 1:3 (LOW_1_TO_3): 유튜브 롱폼 영상, 인스타 DM, 웹/검색, 문서/메신저, 기타 일반 앱
+        val weightTier = if (isUnlocked && !isOwnApp && !isNonCountedSystem) {
+            com.example.itv.infrastructure.observation.UsageWeightResolver.resolveTier(fgPkg)
+        } else {
+            com.example.itv.domain.coaching.UsageWeightTier.LOW_1_TO_3
         }
+        val isShortform = weightTier == com.example.itv.domain.coaching.UsageWeightTier.FULL_1_TO_1
         // 우리 앱(ITV)이나 홈 런처·시스템 UI 체류 중에는 사용 시간 증가를 일시정지하고 기존 누적값을 보존한다.
         val paused = isUnlocked && (isOwnApp || isNonCountedSystem)
-        return progress.observe(nowElapsed, isUnlocked, overlay != null, isShortform = isShortform, paused = paused)
+        return progress.observe(
+            now = nowElapsed,
+            using = isUnlocked,
+            offerVisible = overlay != null,
+            isShortform = isShortform,
+            paused = paused,
+            weightTier = weightTier
+        )
     }
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -679,12 +738,169 @@ class CoachingMonitorService : Service() {
                     progress.tick(nowElapsed, using, observation, overlay != null)
                 }
             }
+            updateDarkUsageAccumulation(nowElapsed, using, fgPkg)
+            maybeShowContextualPreIntervention(nowElapsed, transition = false)
             checkNightContinuousBudget(nowElapsed)
             checkRetry()
             if (feedbackView != null && (!using || !canShowJevFeedback())) dismissJevFeedback()
             maybeShowJevFeedback()
             publishDiagnostics()
             if (running) handler.postDelayed(this, 1000)
+        }
+    }
+
+    /**
+     * 어두운 환경(lux <= 15, 센서 가림 제외) 체류 시간을 누적하고,
+     * 자발적 휴식이 확인되면 세션 사전 개입 상태를 초기화합니다.
+     */
+    private fun updateDarkUsageAccumulation(now: Long, using: Boolean, fgPkg: String?) {
+        val naturalRestMs = TestCoachingPolicy.naturalRestMs(jevMode())
+        val currentUsedMs = if (jevMode()) {
+            jev.state.value.context?.continuousMs ?: usageClock.usedMs
+        } else {
+            usageClock.usedMs
+        }
+        if (currentUsedMs == 0L && usageClock.usedMs == 0L || usageClock.restMs >= naturalRestMs) {
+            resetPreInterventionSession()
+            return
+        }
+        val isOwnOrSystem = fgPkg == null ||
+            fgPkg == packageName ||
+            fgPkg.startsWith("com.team.itv") ||
+            fgPkg.startsWith("com.example.itv") ||
+            JevSettings.isLauncherPackage(fgPkg) ||
+            JevSettings.isExcludedSystemPackage(fgPkg)
+        val ambient = com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this).snapshot.value
+        val isOccluded = ambient.isOccluded || (ambient.isNear && (ambient.proximityDistanceCm ?: 5f) <= 1.0f)
+        val isDark = com.example.itv.domain.coaching.ContextualPreInterventionPolicy.isDarkRoom(ambient.lux, isOccluded)
+
+        if (using && !isOwnOrSystem && isDark) {
+            val prev = lastDarkTickElapsed
+            if (prev != null) {
+                val delta = now - prev
+                if (delta in 1..5000L) {
+                    darkUsageAccumulatedMs += delta
+                }
+            }
+            lastDarkTickElapsed = now
+        } else {
+            lastDarkTickElapsed = null
+        }
+    }
+
+    /**
+     * 취침 전/경과 암실 또는 어두운 환경에서 일정 시간 사용 시
+     * 본 개입(보통 개입 또는 취침 케어) 이전에 화면 구석의 약한 개입(GENTLE)을 사전 개입으로 자동 실행합니다.
+     */
+    private fun maybeShowContextualPreIntervention(now: Long, transition: Boolean): Boolean {
+        if (!running || preInterventionTriggeredInSession) return false
+        if (overlay != null || feedbackView != null || completionView != null ||
+            missionController.state.id != null || bedtimeCareController.isDialogShowing()
+        ) return false
+        if (responseController.offered || responseController.suppressed) return false
+        if (responseController.retryAt != null && now < (responseController.retryAt ?: 0L)) return false
+
+        val ambient = com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this).snapshot.value
+        val isOccluded = ambient.isOccluded || (ambient.isNear && (ambient.proximityDistanceCm ?: 5f) <= 1.0f)
+        val currentContinuousMs = if (jevMode()) {
+            maxOf(jev.state.value.context?.continuousMs ?: 0L, usageClock.usedMs)
+        } else {
+            usageClock.usedMs
+        }
+        val decision = com.example.itv.domain.coaching.ContextualPreInterventionPolicy.evaluate(
+            ambientLux = ambient.lux,
+            isOccluded = isOccluded,
+            bedtimeDistanceMinutes = ambient.bedtimeDistanceMinutes,
+            isPastBedtime = ambient.bedtimePhase == com.example.itv.infrastructure.observation.BedtimePhase.PAST_BEDTIME,
+            isApproachingBedtime = ambient.bedtimePhase == com.example.itv.infrastructure.observation.BedtimePhase.APPROACHING,
+            continuousUsedMs = currentContinuousMs,
+            darkAccumulatedMs = darkUsageAccumulatedMs,
+            alreadyTriggeredInSession = preInterventionTriggeredInSession,
+            isTestMode = testMode()
+        ) ?: return false
+
+        return showGentlePreIntervention(decision, transition = transition)
+    }
+
+    private fun showGentlePreIntervention(
+        decision: com.example.itv.domain.coaching.PreInterventionDecision,
+        transition: Boolean
+    ): Boolean {
+        if (overlay != null || feedbackView != null || completionView != null ||
+            missionController.state.id != null || bedtimeCareController.isDialogShowing()
+        ) return false
+        if (!unlocked() || !com.example.itv.composition.CoachingAccess.ready(this) || !Settings.canDrawOverlays(this)) return false
+
+        if (WritingGuard.blockReason() != null || observer.snapshot().isActivelyWriting()) return false
+        val currentFg = JevObservationHub.foregroundPackage
+        if (currentFg == null ||
+            currentFg == packageName ||
+            currentFg.startsWith("com.team.itv") ||
+            currentFg.startsWith("com.example.itv") ||
+            JevSettings.isLauncherPackage(currentFg) ||
+            JevSettings.isExcludedSystemPackage(currentFg) ||
+            JevSettings.isDocumentOrMessagingPackage(currentFg) ||
+            com.example.itv.infrastructure.observation.GeneralAppTracker.isFinancialPackage(currentFg)
+        ) return false
+
+        val ytMode = com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.snapshot.value.mode
+        if (currentFg == JevSettings.YOUTUBE && ytMode == com.example.itv.infrastructure.observation.youtube.YoutubeWatchMode.SHORTS_COMMENTS) {
+            return false
+        }
+        val igMode = com.example.itv.infrastructure.observation.instagram.InstagramTracker.snapshot.value.mode
+        if (currentFg == JevSettings.INSTAGRAM && (
+                igMode == com.example.itv.infrastructure.observation.instagram.InstagramScreenMode.COMMENTS ||
+                    igMode == com.example.itv.infrastructure.observation.instagram.InstagramScreenMode.STORY ||
+                    igMode == com.example.itv.infrastructure.observation.instagram.InstagramScreenMode.DM
+                )
+        ) {
+            return false
+        }
+        if (currentFg != JevSettings.YOUTUBE &&
+            currentFg != JevSettings.INSTAGRAM &&
+            com.example.itv.infrastructure.observation.GeneralAppTracker.isInterventionDeferredOrBlocked(currentFg)
+        ) {
+            return false
+        }
+        if (!transition) {
+            val isWatchingShortform = YoutubeProbe.screenState() == 1 ||
+                ReelsProbe.screenState() == 1 ||
+                com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.isActivelyInShortsOrComments() ||
+                com.example.itv.infrastructure.observation.instagram.InstagramTracker.isActivelyInReelsCommentsOrStory()
+            val isWatchingLongform = com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.isActivelyWatchingLongform()
+            if (isWatchingShortform || isWatchingLongform) return false
+        }
+
+        val ambient = com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this).snapshot.value
+        val missionContext = buildMissionSelectionContext(ambient, ambient.posture)
+        val rec = com.example.itv.domain.coaching.RestMissionCatalog.pick(ambient.posture, false, missionContext)
+        currentRecommendation = rec
+        lastOfferedIntensity = CharacterIntensity.GENTLE
+        val (root, params) = overlayFactory.offer(
+            ::onChoice,
+            listOf(decision.reason),
+            intensityOverride = CharacterIntensity.GENTLE,
+            recommendation = rec
+        )
+        return try {
+            val now = SystemClock.elapsedRealtime()
+            wm.addView(root, params)
+            overlay = root
+            offerFromJev = false
+            offerIsPreIntervention = true
+            preInterventionTriggeredInSession = true
+            preInterventionShownAtElapsed = now
+            displayedPackage = currentFg
+            responseController.offered = true
+            responseController.offerId = "pre-" + java.util.UUID.randomUUID().toString().take(4)
+            InterventionJournal.add(this, responseController.offerId!!, "사전 개입 표시 (약하게 · ${decision.kind.label})")
+            overlayFactory.attachControls(root = root)
+            com.example.itv.composition.CoachingAccess.state(this, "사전 개입(약하게) 표시 · ${decision.kind.label}")
+            true
+        } catch (_: Exception) {
+            offerIsPreIntervention = false
+            removeOverlay()
+            false
         }
     }
 
@@ -971,10 +1187,15 @@ class CoachingMonitorService : Service() {
             if (running && hasApproval) {
                 jev.promotePendingTransfer(JevSettings.YOUTUBE)
                 showPuppy(transition = true)
+            } else {
+                maybeShowContextualPreIntervention(now, transition = true)
             }
             return
         }
-        if (!waitingYoutube) return
+        if (!waitingYoutube) {
+            maybeShowContextualPreIntervention(now, transition = true)
+            return
+        }
         if (!observeUsage() || !waitingYoutube) return
         if (WritingGuard.blockReason() != null) { safeSince = null; return }
         val safeAt = safeSince ?: return
@@ -999,10 +1220,15 @@ class CoachingMonitorService : Service() {
             if (running && hasApproval) {
                 jev.promotePendingTransfer(JevSettings.YOUTUBE)
                 showPuppy(transition = true)
+            } else {
+                maybeShowContextualPreIntervention(now, transition = true)
             }
             return
         }
-        if (!waitingTransition && !waitingYoutube) return
+        if (!waitingTransition && !waitingYoutube) {
+            maybeShowContextualPreIntervention(now, transition = true)
+            return
+        }
         if (!observeUsage() || (!waitingTransition && !waitingYoutube)) return
         val safeAt = safeSince ?: return
         if (WritingGuard.blockReason() != null) { safeSince = null; return }
@@ -1027,11 +1253,16 @@ class CoachingMonitorService : Service() {
             if (running && hasApproval) {
                 jev.promotePendingTransfer(JevSettings.INSTAGRAM)
                 showPuppy(transition = true)
+            } else {
+                maybeShowContextualPreIntervention(now, transition = true)
             }
             return
         }
         // Only a transition AFTER arming can trigger this path.
-        if (!waitingTransition) return
+        if (!waitingTransition) {
+            maybeShowContextualPreIntervention(now, transition = true)
+            return
+        }
         if (!observeUsage() || !waitingTransition) return
         val safeAt = safeSince ?: return
         if (WritingGuard.blockReason() != null) { safeSince = null; return }
@@ -1056,10 +1287,15 @@ class CoachingMonitorService : Service() {
             if (running && hasApproval) {
                 jev.promotePendingTransfer(JevSettings.INSTAGRAM)
                 showPuppy(transition = true)
+            } else {
+                maybeShowContextualPreIntervention(now, transition = true)
             }
             return
         }
-        if (!waitingTransition) return
+        if (!waitingTransition) {
+            maybeShowContextualPreIntervention(now, transition = true)
+            return
+        }
         if (!observeUsage() || !waitingTransition) return
         val safeAt = safeSince ?: return
         if (WritingGuard.blockReason() != null) { safeSince = null; return }
@@ -1084,10 +1320,15 @@ class CoachingMonitorService : Service() {
             if (running && hasApproval) {
                 jev.promotePendingTransfer(event.packageName)
                 showPuppy(transition = true)
+            } else {
+                maybeShowContextualPreIntervention(now, transition = true)
             }
             return
         }
-        if (!waitingTransition) return
+        if (!waitingTransition) {
+            maybeShowContextualPreIntervention(now, transition = true)
+            return
+        }
         if (!observeUsage() || !waitingTransition) return
         val safeAt = safeSince ?: return
         if (WritingGuard.blockReason() != null) { safeSince = null; return }
@@ -1181,6 +1422,30 @@ class CoachingMonitorService : Service() {
             (!isPreBedtime || isLongUsageBeforeBed)
 
         if (shouldTriggerBedtimeCare) {
+            val isOccluded = ambient.isOccluded || (ambient.isNear && (ambient.proximityDistanceCm ?: 5f) <= 1.0f)
+            val isPastBedtime = !isPreBedtime || ambient.bedtimePhase == com.example.itv.infrastructure.observation.BedtimePhase.PAST_BEDTIME
+            if (com.example.itv.domain.coaching.ContextualPreInterventionPolicy.shouldPrecedeBedtimeCare(
+                    isPastBedtime = isPastBedtime,
+                    ambientLux = ambient.lux,
+                    isOccluded = isOccluded,
+                    alreadyTriggeredInSession = preInterventionTriggeredInSession
+                )
+            ) {
+                // 취침 시간 경과 + 암실에서는 전면 취침 케어 전에 약한 개입(GENTLE)을 사전 개입으로 먼저 보여줍니다.
+                showGentlePreIntervention(
+                    decision = com.example.itv.domain.coaching.ContextualPreInterventionPolicy.bedtimeCarePrecedingDecision(),
+                    transition = transition
+                )
+                return
+            }
+            val graceMs = com.example.itv.domain.coaching.ContextualPreInterventionPolicy.graceWindowMs(isTest)
+            if (preInterventionTriggeredInSession &&
+                preInterventionShownAtElapsed > 0L &&
+                (now - preInterventionShownAtElapsed) < graceMs
+            ) {
+                // 사전 개입 직후 짧은 유예 시간 동안에는 사용자가 스스로 멈출 수 있도록 전면 취침 케어를 잠시 대기합니다.
+                return
+            }
             removeOverlay()
             responseController.offered = true
             val offerId = jevOfferId ?: java.util.UUID.randomUUID().toString().take(8)
@@ -1361,7 +1626,7 @@ class CoachingMonitorService : Service() {
         }
         // Clear the reference before detach callbacks to avoid reentrant removal.
         val previousOverlay = overlay
-        overlay = null;displayedPackage=null;retryVisible=false;reactionInProgress=false;isRestMissionFailure=false
+        overlay = null;displayedPackage=null;retryVisible=false;reactionInProgress=false;isRestMissionFailure=false;offerIsPreIntervention=false
         previousOverlay?.let { overlayFactory.removeControls(it); try { wm.removeView(it) } catch (_: Exception) {} }
         if (missionController.state.id == null) {
             com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this).stopFacedownMonitoring()

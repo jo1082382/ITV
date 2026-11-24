@@ -267,9 +267,15 @@ class JevRuntime private constructor(context: Context) {
         } else null
 
         val genSnap = com.example.itv.infrastructure.observation.GeneralAppTracker.snapshot.value
+        val igMode = com.example.itv.infrastructure.observation.instagram.InstagramTracker.snapshot.value.mode
+        val isReelsNow = ReelsProbe.screenState() == 1 ||
+            igMode == com.example.itv.infrastructure.observation.instagram.InstagramScreenMode.REELS
         val resolvedAppCategory = when {
-            base.packageName == JevSettings.INSTAGRAM -> "SHORTFORM"
-            base.packageName == JevSettings.YOUTUBE && lfMetrics?.youtubeWatchMode == "SHORTS" -> "SHORTFORM"
+            base.packageName == JevSettings.INSTAGRAM && isReelsNow -> "SHORTFORM"
+            base.packageName == JevSettings.INSTAGRAM && igMode == com.example.itv.infrastructure.observation.instagram.InstagramScreenMode.DM -> "MESSENGER"
+            base.packageName == JevSettings.INSTAGRAM -> "COMMUNITY_SNS"
+            base.packageName == JevSettings.YOUTUBE && (lfMetrics?.youtubeWatchMode == "SHORTS" || YoutubeProbe.screenState() == 1) -> "SHORTFORM"
+            base.packageName == JevSettings.YOUTUBE && lfMetrics?.youtubeWatchMode == "BROWSE_FEED" -> "COMMUNITY_SNS"
             base.packageName == JevSettings.YOUTUBE -> "LONGFORM_VIDEO"
             genSnap.category == com.example.itv.infrastructure.observation.InferredAppCategory.GAME -> "GAME"
             genSnap.category == com.example.itv.infrastructure.observation.InferredAppCategory.DOCUMENT -> "DOCUMENT"
@@ -390,7 +396,8 @@ class JevRuntime private constructor(context: Context) {
         val confirmed=pkg?.takeIf { screen==1 && guard==null && s.targets(it) }
         val isOwnApp = pkg != null && (pkg == appContext.packageName || pkg.startsWith("com.team.itv") || pkg.startsWith("com.example.itv"))
         val effectivePkg=if(guard!=null && !isOwnApp)"GUARD_BLOCKED" else pkg
-        tracker.observe(now,effectivePkg,confirmed)
+        val weightTier = com.example.itv.infrastructure.observation.UsageWeightResolver.resolveTier(effectivePkg)
+        tracker.observe(now, effectivePkg, confirmed, nonShortformTier = weightTier)
         val sameAppSafe=pkg!=null && s.targets(pkg) && guard==null && unlocked && screen>=0
         val c=pkg?.takeIf(s::targets)?.let { tracker.context(it,now,nowWall,bedtime(s)) }
             ?.let { enrichContext(it, now) }

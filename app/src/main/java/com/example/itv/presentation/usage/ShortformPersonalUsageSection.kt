@@ -565,7 +565,7 @@ private fun PersonalizedMetricsContent(m: PersonalizedTargetMetrics, accent: Col
                         style = MaterialTheme.typography.bodyMedium
                     )
                     Text(
-                        "• 체감 세션: 몰입도가 높은 숏폼 시간은 1배, 일반 앱 사용 시간은 1/3배로 피로도를 환산합니다.",
+                        "• 체감 세션: 숏폼은 1배(1:1), 피드·SNS·게임은 1/2배(1:2), 롱폼·일반 앱은 1/3배(1:3)로 피로도를 환산합니다.",
                         style = MaterialTheme.typography.bodyMedium
                     )
                     Text(

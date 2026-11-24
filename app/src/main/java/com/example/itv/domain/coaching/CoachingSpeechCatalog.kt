@@ -76,27 +76,40 @@ object CoachingSpeechCatalog {
 
     private fun gentleOfferCandidates(tone: CoachingTone, reason: String?): List<String> {
         val r = reason?.takeIf { it.isNotBlank() }
+        if (r != null) {
+            return when (tone) {
+                CoachingTone.SOFT -> listOf(
+                    "$r\n강아지를 터치하면 바로 쉬어갈 수 있어요 🌿",
+                    "$r\n잠깐 눈을 쉬고 싶을 때 저를 터치해 주세요 ☕"
+                )
+                CoachingTone.PLAYFUL -> listOf(
+                    "$r\n저를 톡 누르면 바로 휴식 미션 시작! 🐾",
+                    "$r\n잠깐 쉬고 싶으면 강아지를 터치해 줘! 🐶"
+                )
+                CoachingTone.FIRM -> listOf(
+                    "$r\n강아지를 터치해 휴식을 시작하세요 🛑",
+                    "$r\n눈 보호를 위해 잠시 쉬어가세요. 터치 시 미션 시작 ⏱️"
+                )
+            }
+        }
         return when (tone) {
-            CoachingTone.SOFT -> listOfNotNull(
-                r?.let { "$it\n강아지를 터치하면 미션이 진행돼요 🌿" },
+            CoachingTone.SOFT -> listOf(
                 "시청 시간이 길어졌어요.\n강아지를 터치하면 미션이 진행돼요 🌿",
                 "연속 시청 중이에요.\n강아지를 터치하면 미션이 진행돼요 🍃",
                 "스마트폰을 내려놓고 쉬어요.\n강아지를 터치하면 미션이 진행돼요 ☕"
-            ).ifEmpty { listOf("시청 시간이 길어졌어요.\n강아지를 터치하면 미션이 진행돼요 🌿") }
+            )
 
-            CoachingTone.PLAYFUL -> listOfNotNull(
-                r?.let { "$it\n강아지를 터치하면 미션이 진행돼요! 🐾" },
+            CoachingTone.PLAYFUL -> listOf(
                 "연속 시청 중!\n강아지를 터치해 미션을 시작해요 🐾",
                 "영상 시청이 길어졌어요!\n강아지를 터치하면 미션이 진행돼요! 🐶",
                 "스마트폰 내려놓고 쉬어요!\n강아지를 터치하면 미션이 진행돼요! ✨"
-            ).ifEmpty { listOf("연속 시청 중!\n강아지를 터치하면 미션이 진행돼요! 🐾") }
+            )
 
-            CoachingTone.FIRM -> listOfNotNull(
-                r?.let { "$it\n강아지를 터치해 미션을 진행하세요." },
+            CoachingTone.FIRM -> listOf(
                 "시청 시간이 길어졌어요.\n강아지를 터치하면 미션이 진행돼요 🛑",
                 "연속 시청 기준 초과.\n강아지를 터치해 미션을 진행하세요 ⏱️",
                 "과몰입 방지를 위해 쉬세요.\n강아지를 터치하면 미션이 진행돼요 🛑"
-            ).ifEmpty { listOf("시청 시간이 길어졌어요.\n강아지를 터치하면 미션이 진행돼요 🛑") }
+            )
         }
     }
 

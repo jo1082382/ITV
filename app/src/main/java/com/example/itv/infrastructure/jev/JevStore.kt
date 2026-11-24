@@ -103,7 +103,7 @@ private fun decode(j: JSONObject) = JevSettings(
     continuousEnabled=j.optBoolean("continuousEnabled",true),continuousSeconds=j.optInt("continuousSeconds",900),
     returnsEnabled=j.optBoolean("returnsEnabled",true),returnsThreshold=j.optInt("returnsThreshold",3),
     bedtimeEnabled=j.optBoolean("bedtimeEnabled",true),bedtimeDelayMinutes=j.optInt("bedtimeDelayMinutes",0),
-    bedtimeWindowMinutes=j.optInt("bedtimeWindowMinutes",480),probabilityThreshold=j.optDouble("probabilityThreshold",0.8),
+    bedtimeWindowMinutes=j.optInt("bedtimeWindowMinutes",480),probabilityThreshold=j.optDouble("probabilityThreshold",0.75),
     reevaluateSeconds=j.optInt("reevaluateSeconds",300),additionalViewingSeconds=j.optInt("additionalViewingSeconds",300),
     resultTtlSeconds=j.optInt("resultTtlSeconds",30),laterSeconds=j.optInt("laterSeconds",300),
     dailyLimit=j.optInt("dailyLimit",20),personalizedEnabled=j.optBoolean("personalizedEnabled",true),revision=j.optLong("revision",1)

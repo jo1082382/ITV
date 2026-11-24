@@ -38,7 +38,7 @@ internal fun CategoryProbabilityTestPage(
 
     var categoryOrdinal by rememberSaveable { mutableIntStateOf(SimAppCategory.SHORTFORM.ordinal) }
     var minutesText by rememberSaveable { mutableStateOf("15") }
-    var weightOrdinal by rememberSaveable { mutableIntStateOf(SimWeightMode.CURRENT_1_TO_3.ordinal) }
+    var weightOrdinal by rememberSaveable { mutableIntStateOf(SimWeightMode.APP_3_TIER.ordinal) }
     var selectedCompareId by rememberSaveable { mutableStateOf<String?>(null) }
     var filterCategoryOrdinal by rememberSaveable { mutableIntStateOf(-1) }
 
@@ -196,7 +196,7 @@ internal fun CategoryProbabilityTestPage(
                 text = if (category.isShortform) {
                     "숏폼은 항상 1:1(원본 시간 그대로) 환산됩니다."
                 } else {
-                    "현재 앱은 비숏폼을 1:3으로 환산합니다. 1:2나 1:1로 바꿔 Jev가 카테고리와 시간 중 무엇에 더 반응하는지 확인할 수 있습니다."
+                    "앱 기본 3단계 가중치: 숏폼 1:1 · 피드/SNS·게임 1:2 · 롱폼/웹/문서 1:3 (현재 선택 카테고리 기본: ${category.defaultWeightLabel})"
                 },
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -215,7 +215,7 @@ internal fun CategoryProbabilityTestPage(
                 verticalArrangement = Arrangement.spacedBy(3.dp)
             ) {
                 Text(
-                    text = "Jev 전송 요약: ${category.shortLabel} ${rawMinutes}분 → 등가 ${"%.1f".format(currentRequest.equivalentMinutes)}분 (${if (category.isShortform) "1:1" else weightMode.shortLabel})",
+                    text = "Jev 전송 요약: ${category.shortLabel} ${rawMinutes}분 → 등가 ${"%.1f".format(currentRequest.equivalentMinutes)}분 (${currentRequest.effectiveWeightLabel})",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
                     color = ItvGreen
@@ -328,7 +328,7 @@ internal fun CategoryProbabilityTestPage(
 
         if (comparedResult != null) {
             val probPct = comparedResult.probability * 100.0
-            val ratioTag = if (comparedResult.request.category.isShortform) "1:1" else comparedResult.request.weightMode.shortLabel
+            val ratioTag = comparedResult.request.effectiveWeightLabel
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp),
@@ -693,7 +693,7 @@ private fun SimResultComparisonCard(
     val basePct = item.baseThreshold * 100.0
     val gapPct = probPct - basePct
     val gapSign = if (gapPct >= 0) "+" else ""
-    val ratioTag = if (item.request.category.isShortform) "1:1" else item.request.weightMode.shortLabel
+    val ratioTag = item.request.effectiveWeightLabel
     val timeStr = Instant.ofEpochMilli(item.recordedAt)
         .atZone(ZoneId.systemDefault())
         .format(DateTimeFormatter.ofPattern("HH:mm:ss"))

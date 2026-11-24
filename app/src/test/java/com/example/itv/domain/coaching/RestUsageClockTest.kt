@@ -118,4 +118,27 @@ class RestUsageClockTest {
         }
         assertEquals(13_000L, clock.usedMs)
     }
+
+    @Test
+    fun threeTierWeightingAccumulatesShortformFeedAndGeneralAccurately() {
+        val clock = RestUsageClock(requiredRestMs = 15_000L)
+        // 1. 숏폼 10초 (1:1 -> 10초)
+        clock.observe(now = 0L, using = true, weightTier = UsageWeightTier.FULL_1_TO_1)
+        for (i in 1..10) {
+            clock.observe(now = i * 1000L, using = true, weightTier = UsageWeightTier.FULL_1_TO_1)
+        }
+        // 2. 피드/SNS·게임 30초 (1:2 -> 15초)
+        for (i in 11..40) {
+            clock.observe(now = i * 1000L, using = true, weightTier = UsageWeightTier.MID_1_TO_2)
+        }
+        // 3. 롱폼/웹/일반 앱 30초 (1:3 -> 10초)
+        for (i in 41..70) {
+            clock.observe(now = i * 1000L, using = true, weightTier = UsageWeightTier.LOW_1_TO_3)
+        }
+        assertEquals(10_000L, clock.rawShortformMs)
+        assertEquals(30_000L, clock.rawMidWeightMs)
+        assertEquals(30_000L, clock.rawLowWeightMs)
+        assertEquals(60_000L, clock.rawGeneralMs)
+        assertEquals(35_000L, clock.usedMs)
+    }
 }

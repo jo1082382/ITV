@@ -8,8 +8,9 @@ class JevPolicyTest {
         JevContext("session",JevSettings.INSTAGRAM,ms,ms,returns,600,bedtime,0)
     @Test fun probabilityBoundaryAndNonFiniteValues() {
         val settings=JevSettings()
-        assertTrue(JevCandidatePolicy.passes(0.8,settings))
-        assertFalse(JevCandidatePolicy.passes(0.799999,settings))
+        assertEquals(0.75, settings.probabilityThreshold, 0.0001)
+        assertTrue(JevCandidatePolicy.passes(0.75,settings))
+        assertFalse(JevCandidatePolicy.passes(0.749999,settings))
         assertFalse(JevCandidatePolicy.passes(Double.NaN,settings))
         assertFalse(JevCandidatePolicy.passes(Double.POSITIVE_INFINITY,settings))
     }
@@ -257,8 +258,20 @@ class JevPolicyTest {
         assertTrue("2~3 hours before bedtime in dark room lowers threshold", earlyDarkAdj.bedtimeDelta <= -0.10)
         assertTrue("PRE_BEDTIME_DARK_USAGE reason candidate triggered", "PRE_BEDTIME_DARK_USAGE" in JevCandidatePolicy.reasons(earlyDarkBedtime, s))
 
+        // 3b. Just before bedtime (-45 min), pitch dark (0 lx) and dim screen (40/255)
+        // -> Pre-bedtime dark protection remains up to -15%p
+        val preBedtimeDark = base.copy(
+            bedtimeDistanceMinutes = -45,
+            ambientLux = 0f,
+            screenBrightness = 40,
+            isNearOrOccluded = false
+        )
+        val preBedtimeAdj = JevCandidatePolicy.computeThresholdAdjustment(s, preBedtimeDark)
+        assertEquals(-0.15, preBedtimeAdj.bedtimeDelta, 0.001)
+        assertEquals(0.35, preBedtimeAdj.effectiveThreshold, 0.001)
+
         // 4. Past bedtime (+30 min), pitch dark (0 lx) and dim screen (40/255)
-        // -> Maximum bedtime protection (-15%p)
+        // -> Strengthened post-bedtime dark protection (-30%p)
         val midnightDark = base.copy(
             bedtimeDistanceMinutes = 30,
             ambientLux = 0f,
@@ -266,8 +279,14 @@ class JevPolicyTest {
             isNearOrOccluded = false
         )
         val midnightAdj = JevCandidatePolicy.computeThresholdAdjustment(s, midnightDark)
-        assertEquals(-0.15, midnightAdj.bedtimeDelta, 0.001)
-        assertEquals(0.35, midnightAdj.effectiveThreshold, 0.001)
+        assertEquals(-0.30, midnightAdj.bedtimeDelta, 0.001)
+        assertEquals(0.20, midnightAdj.effectiveThreshold, 0.001)
+
+        // 4b. Default 75% base threshold in post-bedtime dark room (+30 min) -> 45% effective threshold
+        val defaultSettings = JevSettings(personalizedEnabled = true)
+        val defaultMidnightAdj = JevCandidatePolicy.computeThresholdAdjustment(defaultSettings, midnightDark)
+        assertEquals(0.45, defaultMidnightAdj.effectiveThreshold, 0.001)
+        assertTrue(JevCandidatePolicy.thresholdBreakdown(defaultSettings, midnightDark).contains("취침경과암실"))
 
         // 5. Broad daytime afternoon (-500 min), outdoors/bright room (400 lx, screen 220)
         // -> Full daytime relaxation (+15%p)
@@ -514,5 +533,38 @@ class JevPolicyTest {
             tracker.observe(i * 1000L, "com.netflix.mediaclient", null)
         }
         assertEquals(13_000L, tracker.context("ALL", 39_000L, 39_000L, null)?.continuousMs)
+    }
+
+    @Test fun threeTierWeightingAccumulatesShortformMidAndLowAccurately() {
+        val tracker = JevSessionTracker { "s-3tier" }
+        // 1. 숏폼 10초 (1:1 -> 10초)
+        for (i in 0..10) {
+            tracker.observe(i * 1000L, JevSettings.YOUTUBE, JevSettings.YOUTUBE)
+        }
+        // 2. 인스타 피드/게임 30초 (1:2 -> 15초)
+        for (i in 11..40) {
+            tracker.observe(
+                i * 1000L,
+                JevSettings.INSTAGRAM,
+                null,
+                nonShortformTier = com.example.itv.domain.coaching.UsageWeightTier.MID_1_TO_2
+            )
+        }
+        // 3. 유튜브 롱폼/일반 앱 30초 (1:3 -> 10초)
+        for (i in 41..70) {
+            tracker.observe(
+                i * 1000L,
+                "com.android.chrome",
+                null,
+                nonShortformTier = com.example.itv.domain.coaching.UsageWeightTier.LOW_1_TO_3
+            )
+        }
+        val allCtx = tracker.context("ALL", 70_000L, 70_000L, null)!!
+        assertEquals(10_000L, allCtx.rawShortformMs)
+        assertEquals(30_000L, allCtx.rawMidWeightMs)
+        assertEquals(60_000L, allCtx.rawGeneralMs) // 30s mid + 30s low
+        // 총 환산: 10s + (30s / 2) + (30s / 3) = 35s
+        assertEquals(35_000L, allCtx.continuousMs)
+        assertEquals(35_000L, allCtx.sessionMs)
     }
 }

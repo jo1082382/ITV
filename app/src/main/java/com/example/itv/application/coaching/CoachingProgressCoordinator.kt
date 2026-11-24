@@ -31,9 +31,11 @@ internal class CoachingProgressCoordinator(
         using: Boolean,
         offerVisible: Boolean,
         isShortform: Boolean = false,
-        paused: Boolean = false
+        paused: Boolean = false,
+        weightTier: UsageWeightTier? = null
     ): Boolean {
-        if (usageClock.observe(now, using, isShortform, paused)) reset()
+        val resolvedTier = weightTier ?: if (isShortform) UsageWeightTier.FULL_1_TO_1 else UsageWeightTier.LOW_1_TO_3
+        if (usageClock.observe(now, using, resolvedTier, paused)) reset()
         if (!using) {
             safeSince = null
             if (offerVisible) { effects.hideOffer(); responseController.offered = false }
