@@ -214,11 +214,13 @@ object JevCandidatePolicy {
             else -> 1.0 // Daytime active hours (4+ hours away from bedtime)
         }
 
-        // 3. Ambient Darkness vs Brightness
+        // 3. Ambient Darkness vs Brightness (공통 암실 임계값 ContextualPreInterventionPolicy.DARK_LUX_THRESHOLD = 20 lx 기준)
+        val darkCap = com.example.itv.domain.coaching.ContextualPreInterventionPolicy.DARK_LUX_THRESHOLD
+        val fullDark = com.example.itv.domain.coaching.ContextualPreInterventionPolicy.FULL_DARK_LUX_THRESHOLD
         val darknessLevel = when {
             lux == null -> 0.0
-            lux <= 5.0f -> 1.0
-            lux <= 25.0f -> ((25.0f - lux) / 20.0).coerceIn(0.0, 1.0)
+            lux <= fullDark -> 1.0
+            lux <= darkCap -> ((darkCap - lux) / (darkCap - fullDark)).toDouble().coerceIn(0.0, 1.0)
             else -> 0.0
         }
 
@@ -283,9 +285,21 @@ object JevCandidatePolicy {
         return kotlin.math.round(delta.coerceIn(-0.30, 0.15) * 1000.0) / 1000.0
     }
 
+    /**
+     * 현재 컨텍스트가 실제 숏폼 시청 화면(유튜브 쇼츠 · 인스타 릴스)인지 판별합니다.
+     * - [JevContext.appCategory]가 채워진 경우 `"SHORTFORM"`일 때만 true (유튜브 롱폼/홈, 인스타 피드/DM 제외)
+     * - [JevContext.youtubeWatchMode]가 채워진 경우 `"SHORTS"`일 때만 true
+     * - 두 필드가 모두 없는 레거시/단위테스트 컨텍스트에서는 패키지명 기준으로 폴백
+     */
+    fun isShortformContext(c: JevContext): Boolean {
+        if (c.appCategory != null) return c.appCategory == "SHORTFORM"
+        if (c.youtubeWatchMode != null) return c.youtubeWatchMode == "SHORTS"
+        return c.packageName == JevSettings.INSTAGRAM || c.packageName == JevSettings.YOUTUBE
+    }
+
     fun reasons(c: JevContext, s: JevSettings): List<String> = buildList {
         val isAll = c.packageName == "ALL"
-        val isShortform = c.packageName == JevSettings.INSTAGRAM || c.packageName == JevSettings.YOUTUBE
+        val isShortform = isShortformContext(c)
         if (!isAll && (!s.targets(c.packageName) || c.quality != "VALID")) return@buildList
         if (s.continuousEnabled && c.continuousMs >= s.continuousSeconds * 1000L) add("CONTINUOUS")
         if (s.returnsEnabled && c.returns10m >= s.returnsThreshold) add("REPEATED_RETURNS")
@@ -402,8 +416,8 @@ object JevCandidatePolicy {
             kotlin.math.round(((1.0 - clamped) * 0.20) * 1000.0) / 1000.0
         } else 0.0
 
-        // 2. 스와이프 과열 선형 보간: SPM 5.0 (0%p) ~ SPM 15.0 (-8%p) + 스트릭/가속도 (-2%p) => 최대 -10%p (숏폼 외 일반 앱 및 전체 시 0%p)
-        val isShortform = c.packageName == JevSettings.INSTAGRAM || c.packageName == JevSettings.YOUTUBE
+        // 2. 스와이프 과열 선형 보간: SPM 5.0 (0%p) ~ SPM 15.0 (-8%p) + 스트릭/가속도 (-2%p) => 최대 -10%p (실제 숏폼 화면 외 롱폼·피드·일반 앱은 0%p)
+        val isShortform = isShortformContext(c)
         val swipeDelta = if (!isShortform) 0.0 else run {
             val spm = c.effectiveSpm1m ?: 0.0
             val streak = c.fastSwipeStreak
@@ -607,6 +621,9 @@ class JevSessionTracker(private val newId: () -> String) {
         var lastRunContinuousMs: Long = 0,
         val returns: MutableList<Long> = mutableListOf()
     ) {
+        val totalRawMs: Long
+            get() = totalShortformMs + totalMidMs + totalLowMs
+
         internal fun recomputeWeighted() {
             rawGeneralMs = rawMidMs + rawLowMs
             totalGeneralMs = totalMidMs + totalLowMs
@@ -642,7 +659,7 @@ class JevSessionTracker(private val newId: () -> String) {
     ) {
         val before = previousAt
         val delta = if (before == null) 0 else now - before
-        val contiguous = before != null && delta in 1..1500
+        val contiguous = before != null && delta in 1..5000
         if (coverageStart == null || !contiguous || pkg == null) coverageStart = now
         val inspectingItv = pkg != null && (pkg.startsWith("com.team.itv") || pkg.startsWith("com.example.itv"))
         val isTargetPkg = pkg != null && pkg != "LOCKED" && pkg != "GUARD_BLOCKED" && !inspectingItv &&
@@ -681,12 +698,19 @@ class JevSessionTracker(private val newId: () -> String) {
                 } else if (inspectingItv) {
                     // Preserve continuousMs while checking ITV app
                 } else if (isTargetPkg && contiguous) {
-                    if (nonShortformTier == UsageWeightTier.MID_1_TO_2) {
-                        state.rawMidMs += delta
-                        state.totalMidMs += delta
-                    } else {
-                        state.rawLowMs += delta
-                        state.totalLowMs += delta
+                    when (nonShortformTier) {
+                        UsageWeightTier.FULL_1_TO_1 -> {
+                            state.rawShortformMs += delta
+                            state.totalShortformMs += delta
+                        }
+                        UsageWeightTier.MID_1_TO_2 -> {
+                            state.rawMidMs += delta
+                            state.totalMidMs += delta
+                        }
+                        UsageWeightTier.LOW_1_TO_3 -> {
+                            state.rawLowMs += delta
+                            state.totalLowMs += delta
+                        }
                     }
                     state.recomputeWeighted()
                     state.nonConfirmedMs = 0L
@@ -730,13 +754,20 @@ class JevSessionTracker(private val newId: () -> String) {
                 } else if (inspectingItv) {
                     // Preserve continuousMs while checking ITV app
                 } else if (pkg == app && contiguous) {
-                    // 3단계 가중치 적용: 피드/SNS·게임은 1:2, 롱폼·일반 앱은 1:3
-                    if (nonShortformTier == UsageWeightTier.MID_1_TO_2) {
-                        state.rawMidMs += delta
-                        state.totalMidMs += delta
-                    } else {
-                        state.rawLowMs += delta
-                        state.totalLowMs += delta
+                    // 3단계 가중치 적용: 숏폼은 1:1, 피드/SNS·게임은 1:2, 롱폼·일반 앱은 1:3
+                    when (nonShortformTier) {
+                        UsageWeightTier.FULL_1_TO_1 -> {
+                            state.rawShortformMs += delta
+                            state.totalShortformMs += delta
+                        }
+                        UsageWeightTier.MID_1_TO_2 -> {
+                            state.rawMidMs += delta
+                            state.totalMidMs += delta
+                        }
+                        UsageWeightTier.LOW_1_TO_3 -> {
+                            state.rawLowMs += delta
+                            state.totalLowMs += delta
+                        }
                     }
                     state.recomputeWeighted()
                     state.nonConfirmedMs = 0L
@@ -783,10 +814,33 @@ class JevSessionTracker(private val newId: () -> String) {
             rawMidWeightMs = rawMid
         )
     }
-    /** Restore totals only. Never restore continuity or absence from a wall-clock difference. */
-    fun restore(pkg: String, id: String, totalMs: Long, entered: Boolean) {
+    /** Restore totals only (preserving per-tier raw split when available). Never restore continuity or absence from a wall-clock difference. */
+    fun restore(
+        pkg: String,
+        id: String,
+        totalMs: Long,
+        entered: Boolean,
+        totalShortformMs: Long = totalMs,
+        totalMidMs: Long = 0L,
+        totalLowMs: Long = 0L
+    ) {
         val coerced = totalMs.coerceAtLeast(0)
-        states[pkg] = AppState(id, coerced, totalShortformMs = coerced, entered = entered)
+        val sf = totalShortformMs.coerceAtLeast(0)
+        val mid = totalMidMs.coerceAtLeast(0)
+        val low = totalLowMs.coerceAtLeast(0)
+        val hasSplit = sf > 0L || mid > 0L || low > 0L
+        val st = AppState(
+            id = id,
+            totalMs = coerced,
+            totalShortformMs = if (hasSplit) sf else coerced,
+            totalMidMs = mid,
+            totalLowMs = low,
+            entered = entered
+        )
+        if (hasSplit) {
+            st.recomputeWeighted()
+        }
+        states[pkg] = st
     }
     /** Reset session state for a package when a new calendar day starts or session timeout elapsed. */
     fun resetSession(pkg: String) {

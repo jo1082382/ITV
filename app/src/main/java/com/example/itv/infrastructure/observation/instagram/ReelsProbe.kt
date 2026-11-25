@@ -52,7 +52,7 @@ internal object ReelsProbe {
     }
 
     fun screenState(): Int {
-        if (SystemClock.elapsedRealtime() - frameAt > 2200L || !frameKnown) return -1
+        if (SystemClock.elapsedRealtime() - frameAt > 4000L || !frameKnown) return -1
         return if (valid) 1 else 0
     }
 

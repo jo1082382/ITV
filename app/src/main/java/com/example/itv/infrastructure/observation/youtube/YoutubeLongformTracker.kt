@@ -48,6 +48,8 @@ data class YoutubeLongformSnapshot(
     val playerBounds: Rect? = null,
     val currentVideoStartElapsed: Long = 0L,
     val currentVideoWatchDurationMs: Long = 0L,
+    val currentModeDurationMs: Long = 0L,
+    val shortsWatchDurationMs: Long = 0L,
     val lastDetectedAtWallMs: Long = 0L,
     val detail: String = "관측 대기 중"
 )
@@ -116,6 +118,11 @@ object YoutubeLongformTracker {
     private var lastTitle: String? = null
     private var lastPlaybackPositionText: String? = null
     private var lastHasEndscreen: Boolean = false
+
+    // 화면 모드별 체류 시간 및 쇼츠 누적 시청 시간 추적
+    private var currentModeDurationMs: Long = 0L
+    private var shortsWatchDurationMs: Long = 0L
+    private var lastObserveElapsed: Long = 0L
 
     // 영상별 누적 시청 시간 세션 맵 (동일 제목 영상은 3시간 이내 재시청/화면전환 시 누적 유지)
     private val videoSessions = LinkedHashMap<String, VideoWatchSession>()
@@ -295,6 +302,24 @@ object YoutubeLongformTracker {
         }
 
         val isWatchingNow = effectiveMode == YoutubeWatchMode.PORTRAIT_WATCH || effectiveMode == YoutubeWatchMode.LANDSCAPE_FULLSCREEN
+        val effectivePrevMode = if (prevLocation != AppLocation.YOUTUBE) prevYoutubeMode else prevMode
+
+        val deltaMs = if (lastObserveElapsed > 0L) {
+            (nowElapsed - lastObserveElapsed).coerceIn(0L, 3500L)
+        } else {
+            0L
+        }
+        lastObserveElapsed = nowElapsed
+
+        if (effectiveMode != effectivePrevMode) {
+            currentModeDurationMs = 0L
+        } else {
+            currentModeDurationMs += deltaMs
+        }
+
+        if (effectiveMode == YoutubeWatchMode.SHORTS && isPlaying) {
+            shortsWatchDurationMs += deltaMs
+        }
 
         // 0. 외부 앱(우리 앱 ITV 또는 홈 화면)에서 유튜브로 복귀/진입 감지
         if (prevLocation != AppLocation.YOUTUBE) {
@@ -439,7 +464,6 @@ object YoutubeLongformTracker {
         val currentWatchMs = currentAccumulatedWatchMs(nowWall)
 
         // 3. 유튜브 내부 화면/모드 전환 시나리오 감지 (세로 시청, 가로 시청, 유튜브 홈 이동, 쇼츠 진입, 숏폼 댓글)
-        val effectivePrevMode = if (prevLocation != AppLocation.YOUTUBE) prevYoutubeMode else prevMode
         if (effectiveMode != effectivePrevMode) {
             when (effectiveMode) {
                 YoutubeWatchMode.PORTRAIT_WATCH -> {
@@ -628,7 +652,7 @@ object YoutubeLongformTracker {
             mode = effectiveMode,
             currentTitle = if (effectiveMode == YoutubeWatchMode.BROWSE_FEED || effectiveMode == YoutubeWatchMode.SHORTS_COMMENTS) null else (lastTitle ?: title),
             channelName = channel,
-            isPlaying = isWatchingNow && isPlaying,
+            isPlaying = (isWatchingNow || effectiveMode == YoutubeWatchMode.SHORTS) && isPlaying,
             playbackPositionText = if (isWatchingNow) (playbackPositionText ?: lastPlaybackPositionText) else null,
             isEndscreenDetected = hasEndscreen,
             isLandscape = isLandscape,
@@ -636,6 +660,8 @@ object YoutubeLongformTracker {
             playerBounds = playerBounds,
             currentVideoStartElapsed = videoStartElapsed,
             currentVideoWatchDurationMs = currentWatchMs,
+            currentModeDurationMs = currentModeDurationMs,
+            shortsWatchDurationMs = shortsWatchDurationMs,
             lastDetectedAtWallMs = nowWall,
             detail = detailMsg
         )
@@ -653,6 +679,8 @@ object YoutubeLongformTracker {
     ) {
         // 외부 화면에서는 시청 시간 증가 즉시 정지
         lastActivePlayTickElapsed = 0L
+        lastObserveElapsed = 0L
+        currentModeDurationMs = 0L
         pendingFeedModeElapsed = 0L
 
         if (currentLocation == AppLocation.YOUTUBE) {
@@ -825,6 +853,8 @@ object YoutubeLongformTracker {
         completedLongformCount = 0
         consecutiveLongformChainCount = 0
         justEndedPreviousVideo = false
+        shortsWatchDurationMs = 0L
+        currentModeDurationMs = 0L
     }
 
     @Synchronized

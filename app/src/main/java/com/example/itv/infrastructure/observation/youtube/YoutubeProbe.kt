@@ -32,7 +32,7 @@ internal object YoutubeProbe {
         }
     }
 
-    fun screenState(): Int = if (SystemClock.elapsedRealtime() - stateAt <= 2200L) state else -1
+    fun screenState(): Int = if (SystemClock.elapsedRealtime() - stateAt <= 4000L) state else -1
     var enabled = false
     var status = "감시 중지"
     var candidates = 0
@@ -89,6 +89,18 @@ internal object YoutubeProbe {
 
     private val BOTTOM_NAV_LABELS = setOf(
         "홈", "shorts", "구독", "내 페이지", "보관함", "나", "home", "subscriptions", "you", "library"
+    )
+
+    private val INLINE_MUTE_LABELS = setOf(
+        "음소거", "음소거 해제", "소리 켜기", "소리 끄기",
+        "오디오 음소거", "오디오 음소거 해제", "동영상 음소거", "동영상 음소거 해제",
+        "mute", "unmute", "mute video", "unmute video", "mute audio", "unmute audio"
+    )
+
+    private val WATCH_EXCLUSIVE_CONTROL_DESCS = setOf(
+        "축소", "최소화", "동영상 최소화", "동영상 축소", "minimize", "collapse",
+        "자동재생 사용", "자동재생 사용 안함", "자동재생 사용 안 함",
+        "전체화면", "전체화면으로 전환", "전체 화면", "enter fullscreen", "fullscreen"
     )
 
     private val IGNORED_EXACT_TITLES = setOf(
@@ -285,11 +297,19 @@ internal object YoutubeProbe {
                     var dominantShortsSurface = false
                     var hasTopWatchPlayer = false
                     var hasFullscreenPlayer = false
+                    var hasWatchPlayerExplicit = false
+                    var hasWatchControls = false
+                    var hasWatchMetadata = false
+                    var hasWatchPageExclusiveControl = false
+                    val watchActionKinds = mutableSetOf<String>()
+                    var hasInlinePlayerSignal = false
+                    var hasFeedHeader = false
+                    val feedTopToolbarIcons = mutableSetOf<String>()
                     val playerRect = Rect()
                     var hasEndscreenOverlay = false
                     var hasNextVideoPreviewCard = false
                     var hasBottomNavBar = false
-                    var bottomNavTabCount = 0
+                    val bottomNavTabsSeen = mutableSetOf<String>()
                     var uiPaused = false
                     var uiPlaying = false
                     var uiReplay = false
@@ -379,34 +399,117 @@ internal object YoutubeProbe {
                             return
                         }
 
-                        // 하단 내비게이션 탭 바 감지 (홈 / Shorts / 구독 / 내 페이지)
-                        if (r.top >= viewport.height() * 0.80) {
+                        // 하단 내비게이션 탭 바 감지 (홈 / Shorts / 구독 / 내 페이지) - 실제 화면 내에 보이는 경우만 인정
+                        val isOnScreen = r.width() > 0 && r.height() > 0 && Rect.intersects(r, viewport)
+                        if (isOnScreen && r.top >= viewport.height() * 0.80 && r.top < viewport.height()) {
                             if (id != null && (id.contains("pivot_bar") || id.contains("bottom_bar") || id.contains("bottom_navigation"))) {
                                 hasBottomNavBar = true
                             }
                             val labelLower = (rawText ?: rawDesc)?.lowercase()
                             if (labelLower != null && labelLower in BOTTOM_NAV_LABELS && r.width() <= viewport.width() * 0.35) {
-                                bottomNavTabCount++
-                                if (bottomNavTabCount >= 2) hasBottomNavBar = true
+                                bottomNavTabsSeen.add(labelLower)
+                                if (bottomNavTabsSeen.size >= 2) hasBottomNavBar = true
                             }
                         }
 
-                        // 롱폼 플레이어 영역 감지 (하단 미니플레이어 및 쇼츠 플레이어는 제외)
+                        // 홈/구독 피드 상단 툴바 및 필터 칩 바 감지 (실제 롱폼 시청 화면 상단은 플레이어가 덮으므로 미노출)
+                        if (isOnScreen && r.top <= viewport.height() * 0.24) {
+                            if (id != null && (id.contains("feed_filter_bar") || id.contains("youtube_logo") || id.contains("menu_search"))) {
+                                hasFeedHeader = true
+                            }
+                            if (r.top <= viewport.height() * 0.14) {
+                                val topDescLower = (rawDesc ?: rawText)?.lowercase()
+                                when {
+                                    topDescLower == "검색" || topDescLower == "search" -> feedTopToolbarIcons.add("search")
+                                    topDescLower == "알림" || topDescLower == "notifications" -> feedTopToolbarIcons.add("noti")
+                                    topDescLower == "youtube" -> feedTopToolbarIcons.add("logo")
+                                }
+                                if (feedTopToolbarIcons.size >= 2) hasFeedHeader = true
+                            }
+                        }
+
+                        // 홈 피드 인라인 자동재생(피드에서 재생) 전용 시그널 감지
+                        val isInlineNode = id != null && (
+                            id.contains("inline_player") ||
+                                id.contains("inline_time_bar") ||
+                                id.contains("inline_playback") ||
+                                id.contains("inline_audio") ||
+                                id.contains("inline_muted") ||
+                                id.contains("inline_subtitle") ||
+                                id.contains("feed_player") ||
+                                id.contains("muted_autoplay")
+                            )
+                        if (isInlineNode) {
+                            hasInlinePlayerSignal = true
+                        }
+                        val descOrTextLower = (rawDesc ?: rawText)?.lowercase()
+                        if (isOnScreen && descOrTextLower != null && r.width() <= viewport.width() * 0.35 && (
+                                descOrTextLower in INLINE_MUTE_LABELS ||
+                                    descOrTextLower.startsWith("오디오 음소거") ||
+                                    descOrTextLower.startsWith("음소거 해제") ||
+                                    descOrTextLower.startsWith("동영상 음소거")
+                                )
+                        ) {
+                            hasInlinePlayerSignal = true
+                        }
+
+                        // 롱폼 플레이어 영역 감지 (하단 미니플레이어, 쇼츠 플레이어, 홈 인라인 자동재생 플레이어는 제외)
                         val isMiniplayer = id != null && (id.contains("miniplayer") || id.contains("floaty_bar"))
                         val isShortsNode = id in SHORTS_SURFACE_IDS || id in SHORTS_PAGE_IDS ||
                             (id != null && (id.startsWith("com.google.android.youtube:id/reel_") || id.startsWith("com.google.android.youtube:id/shorts_")))
-                        if (!isMiniplayer && !isShortsNode && !anyShortsPlayerNode &&
-                            (id in LONGFORM_PLAYER_IDS || (id != null && id.contains("player_view")) || n.className?.contains("SurfaceView") == true || n.className?.contains("TextureView") == true)) {
-                            if (r.width() >= viewport.width() * 0.80 && r.height() >= viewport.height() * 0.72) {
+                        val isLongformCandidate = !isMiniplayer && !isShortsNode && !isInlineNode &&
+                            (id in LONGFORM_PLAYER_IDS || (id != null && (id.contains("player_view") || id.contains("watch_player") || id.contains("movie_player"))) ||
+                             n.className?.contains("SurfaceView") == true || n.className?.contains("TextureView") == true)
+                        if (isLongformCandidate) {
+                            if (id in LONGFORM_PLAYER_IDS || id?.contains("watch_player") == true || id?.contains("movie_player") == true) {
+                                hasWatchPlayerExplicit = true
+                            }
+                            if (r.width() >= viewport.width() * 0.80 && r.height() >= viewport.height() * 0.70) {
                                 hasFullscreenPlayer = true
                                 if (r.width() * r.height() >= playerRect.width() * playerRect.height()) {
                                     playerRect.set(r)
                                 }
-                            } else if (r.top <= viewport.height() * 0.18 && r.width() >= viewport.width() * 0.85 && r.height() >= viewport.height() * 0.14) {
+                            } else if (r.top <= viewport.height() * 0.28 && r.width() >= viewport.width() * 0.75 && r.height() >= viewport.height() * 0.12) {
                                 hasTopWatchPlayer = true
                                 if (playerRect.isEmpty || r.height() > playerRect.height()) {
                                     playerRect.set(r)
                                 }
+                            }
+                        }
+
+                        // 플레이어 컨트롤 및 시청 페이지 전용 메타데이터/액션 바 감지
+                        if (id != null && !isInlineNode && (id.contains("player_control_") || id.contains("time_bar") || id.contains("timebar") || id.contains("fullscreen_button") || id.contains("expand_button"))) {
+                            hasWatchControls = true
+                        }
+                        if (id != null && (id.contains("fullscreen_button") || id.contains("player_collapse") || id.contains("autonav_toggle") || id.contains("next_gen_watch"))) {
+                            hasWatchPageExclusiveControl = true
+                        }
+                        if (isOnScreen && r.top <= viewport.height() * 0.45 && descOrTextLower != null && descOrTextLower in WATCH_EXCLUSIVE_CONTROL_DESCS) {
+                            hasWatchPageExclusiveControl = true
+                        }
+                        if (id != null && (id.contains("watch_metadata") || id.contains("video_metadata") || id.contains("watch_title") || id.contains("player_video_title") || id.contains("subscribe_button"))) {
+                            hasWatchMetadata = true
+                        }
+
+                        // 세로 시청 페이지 하단 전용 액션 버튼(좋아요/싫어요/공유/리믹스/오프라인 저장/구독) 수집
+                        // 하단 내비게이션 탭(r.top >= 0.80 * height)은 제외하여 '구독' 탭 오인 방지
+                        if (isOnScreen && r.top >= viewport.height() * 0.18 && r.top < viewport.height() * 0.80 && r.width() <= viewport.width() * 0.50) {
+                            val tLower = rawText?.lowercase()
+                            val dLower = rawDesc?.lowercase()
+                            when {
+                                dLower != null && (dLower.contains("이 동영상을 좋아함") || dLower.startsWith("좋아요") || dLower.contains("like this video")) || tLower == "좋아요" ->
+                                    watchActionKinds.add("like")
+                                dLower != null && (dLower.contains("마음에 들지 않음") || dLower.startsWith("싫어요") || dLower.contains("dislike this video")) || tLower == "싫어요" ->
+                                    watchActionKinds.add("dislike")
+                                tLower == "공유" || dLower == "공유" || dLower == "동영상 공유" || tLower == "share" || dLower == "share" ->
+                                    watchActionKinds.add("share")
+                                tLower == "리믹스" || dLower == "리믹스" || tLower == "remix" ->
+                                    watchActionKinds.add("remix")
+                                tLower == "오프라인 저장" || dLower == "오프라인 저장" || tLower == "download" ->
+                                    watchActionKinds.add("download")
+                                tLower == "구독" || tLower == "구독중" || tLower == "구독 중" || tLower == "subscribe" || tLower == "subscribed" ||
+                                    (dLower != null && (dLower.startsWith("구독") || dLower.contains("채널 구독"))) ->
+                                    watchActionKinds.add("subscribe")
                             }
                         }
 
@@ -509,13 +612,27 @@ internal object YoutubeProbe {
                     val isShortsCommentMode = (inShortsContext && (panel || hasCommentPanelSignal)) ||
                         (anyShortsPlayerNode && !dominantShortsSurface && !hasBottomNavBar)
 
+                    // 홈/피드 화면 여부와 실제 세로 롱폼 시청 페이지 전용 UI 분리 판별
+                    // 홈 피드의 '피드에서 재생(인라인 자동재생)'은 하단 탭(홈/Shorts/구독/내 페이지), 상단 툴바/필터바,
+                    // 또는 인라인 음소거 버튼과 함께 나타나므로 실제 롱폼 시청(PORTRAIT_WATCH)과 엄격히 구분함.
+                    val hasVisibleBottomNavTabs = bottomNavTabsSeen.size >= 2
+                    val isFeedContext = hasInlinePlayerSignal || hasFeedHeader || hasVisibleBottomNavTabs
+                    val hasWatchPageUi = hasWatchMetadata || hasWatchPageExclusiveControl || watchActionKinds.size >= 2
+
                     // 화면 모드 정확 판별
                     val longformMode = when {
                         isShortsCommentMode -> YoutubeWatchMode.SHORTS_COMMENTS
                         dominantShortsSurface || recycler -> YoutubeWatchMode.SHORTS
-                        isLandscape && (hasFullscreenPlayer || hasTopWatchPlayer) -> YoutubeWatchMode.LANDSCAPE_FULLSCREEN
-                        hasFullscreenPlayer && !hasBottomNavBar -> YoutubeWatchMode.LANDSCAPE_FULLSCREEN
-                        hasTopWatchPlayer && !hasBottomNavBar -> YoutubeWatchMode.PORTRAIT_WATCH
+                        isLandscape && (hasFullscreenPlayer || hasTopWatchPlayer || hasWatchPageUi || hasWatchControls || playbackPositionText != null) ->
+                            YoutubeWatchMode.LANDSCAPE_FULLSCREEN
+                        hasFullscreenPlayer && !isFeedContext ->
+                            YoutubeWatchMode.LANDSCAPE_FULLSCREEN
+                        hasInlinePlayerSignal -> YoutubeWatchMode.BROWSE_FEED
+                        (hasFeedHeader || hasVisibleBottomNavTabs) && !hasWatchPageExclusiveControl ->
+                            YoutubeWatchMode.BROWSE_FEED
+                        hasWatchPageUi -> YoutubeWatchMode.PORTRAIT_WATCH
+                        !hasBottomNavBar && (hasTopWatchPlayer || hasWatchPlayerExplicit || hasWatchControls || playbackPositionText != null || hasEndscreenOverlay || uiReplay) ->
+                            YoutubeWatchMode.PORTRAIT_WATCH
                         else -> YoutubeWatchMode.BROWSE_FEED
                     }
 
@@ -526,6 +643,7 @@ internal object YoutubeProbe {
                     val isDefinitelyMidVideo = curSec != null && totSec != null && totSec >= 15 && (totSec - curSec) > 30 && !uiReplay
 
                     val hasEndscreen = when {
+                        longformMode == YoutubeWatchMode.BROWSE_FEED -> false
                         isDefinitelyMidVideo -> false
                         hasEndscreenOverlay || isTimeNearEnd || uiReplay -> true
                         else -> false
@@ -582,6 +700,7 @@ internal object YoutubeProbe {
                     val audioManager = service.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
                     val isAudioActive = audioManager?.isMusicActive == true
                     val isVideoPlaying = when {
+                        longformMode == YoutubeWatchMode.SHORTS -> !uiPaused
                         longformMode != YoutubeWatchMode.PORTRAIT_WATCH && longformMode != YoutubeWatchMode.LANDSCAPE_FULLSCREEN -> false
                         uiPaused -> false
                         uiPlaying -> true
@@ -596,9 +715,9 @@ internal object YoutubeProbe {
                         channel = null,
                         hasEndscreen = hasEndscreen,
                         isLandscape = isLandscape,
-                        playerBounds = if (!playerRect.isEmpty) playerRect else null,
+                        playerBounds = if (longformMode != YoutubeWatchMode.BROWSE_FEED && !playerRect.isEmpty) playerRect else null,
                         isPlaying = isVideoPlaying,
-                        playbackPositionText = playbackPositionText
+                        playbackPositionText = if (longformMode == YoutubeWatchMode.BROWSE_FEED) null else playbackPositionText
                     )
 
                     if (longformMode == YoutubeWatchMode.SHORTS_COMMENTS || panel) {

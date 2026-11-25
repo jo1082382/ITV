@@ -8,15 +8,28 @@ import android.content.IntentFilter
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.graphics.text.LineBreakConfig
+import android.graphics.text.LineBreaker
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.text.Layout
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.TextUtils
+import android.text.style.ForegroundColorSpan
+import android.text.style.StyleSpan
 import android.view.*
 import android.widget.*
 import com.example.itv.R
 import com.example.itv.domain.coaching.CharacterIntensity
 import com.example.itv.domain.coaching.CoachingTone
 import com.example.itv.domain.coaching.CoachingSpeechCatalog
+import com.example.itv.domain.coaching.InterventionBubbleFormatter
+import com.example.itv.domain.coaching.OfferBubbleContent
+import com.example.itv.domain.coaching.ReasonBadge
 import com.example.itv.domain.coaching.SpeechSituation
 import com.example.itv.infrastructure.coaching.UserCoachingSettingsStore
 
@@ -98,7 +111,7 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
         var fenceParams: WindowManager.LayoutParams? = null
         lateinit var dog: EquippedDogView
         lateinit var dogParams: WindowManager.LayoutParams
-        lateinit var speech: TextView
+        lateinit var speech: PuppySpeechBubbleView
         var house = Rect()
         var cage = Rect()
         var homeX = 0; var homeY = 0
@@ -147,16 +160,161 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
         alpha = 1f
     }
 
-    private fun label(text: String, customTextSize: Float = 14f) = TextView(context).apply {
+    /**
+     * 1번(핵심 사유 칩 배지) + 2번(15자 이내 초단문 헤드라인 · 어절 단위 줄바꿈 · 연한 보조 안내)
+     * 조합으로 렌더링되는 강아지 전용 말풍선 뷰.
+     *
+     * 단순 텍스트([text] 대입)일 때는 칩/보조줄을 숨기고 어절 단위 줄바꿈 텍스트만 표시하므로
+     * 드래그 호버, 인사, 보상, 재시도 등 기존 모든 인터랙션과 100% 호환됩니다.
+     */
+    private inner class PuppySpeechBubbleView(ctx: Context) : LinearLayout(ctx) {
+        private val badgeContainer: LinearLayout
+        private val headlineView: TextView
+        private val sublineView: TextView
+
+        init {
+            orientation = VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            background = com.example.itv.presentation.character.PuppyBubbleDrawable()
+            setPadding(dp(18), dp(14), dp(18), dp(26))
+
+            badgeContainer = LinearLayout(ctx).apply {
+                orientation = HORIZONTAL
+                gravity = Gravity.CENTER
+                visibility = View.GONE
+            }
+            addView(
+                badgeContainer,
+                LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                    bottomMargin = dp(7)
+                }
+            )
+
+            headlineView = TextView(ctx).apply {
+                textSize = 14.5f
+                setTypeface(null, Typeface.BOLD)
+                gravity = Gravity.CENTER
+                setTextColor(Color.rgb(24, 34, 22))
+                setLineSpacing(dp(2).toFloat(), 1.15f)
+                applyKoreanPhraseBreak(this)
+            }
+            addView(headlineView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+
+            sublineView = TextView(ctx).apply {
+                textSize = 11.5f
+                setTypeface(null, Typeface.NORMAL)
+                gravity = Gravity.CENTER
+                setTextColor(Color.rgb(92, 108, 95))
+                setLineSpacing(dp(1).toFloat(), 1.12f)
+                visibility = View.GONE
+                applyKoreanPhraseBreak(this)
+            }
+            addView(
+                sublineView,
+                LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
+                    topMargin = dp(4)
+                }
+            )
+        }
+
+        var text: CharSequence
+            get() = headlineView.text
+            set(value) {
+                badgeContainer.visibility = View.GONE
+                badgeContainer.removeAllViews()
+                sublineView.visibility = View.GONE
+                headlineView.text = value
+            }
+
+        fun setHeadlineTextSize(sp: Float) {
+            headlineView.textSize = sp
+        }
+
+        fun setOfferContent(content: OfferBubbleContent) {
+            badgeContainer.removeAllViews()
+            if (content.badges.isNotEmpty()) {
+                val totalChars = content.badges.sumOf { it.text.length }
+                val stackVertically = content.badges.size > 1 && totalChars >= 21
+                badgeContainer.orientation = if (stackVertically) VERTICAL else HORIZONTAL
+                content.badges.forEachIndexed { idx, badge ->
+                    val chip = createReasonBadgeView(badge)
+                    val lp = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
+                        if (stackVertically) {
+                            if (idx > 0) topMargin = dp(4)
+                        } else {
+                            if (idx > 0) marginStart = dp(6)
+                        }
+                    }
+                    badgeContainer.addView(chip, lp)
+                }
+                badgeContainer.visibility = View.VISIBLE
+            } else {
+                badgeContainer.visibility = View.GONE
+            }
+
+            headlineView.text = content.headline
+
+            if (!content.subline.isNullOrBlank()) {
+                sublineView.text = content.subline
+                sublineView.visibility = View.VISIBLE
+            } else {
+                sublineView.visibility = View.GONE
+            }
+        }
+
+        private fun createReasonBadgeView(badge: ReasonBadge): TextView {
+            val bgColor = if (badge.isAlert) Color.rgb(255, 240, 238) else Color.rgb(232, 246, 236)
+            val strokeColor = if (badge.isAlert) Color.rgb(245, 183, 177) else Color.rgb(165, 214, 167)
+            val baseTextColor = if (badge.isAlert) Color.rgb(180, 35, 24) else Color.rgb(27, 94, 32)
+            val numAccentColor = if (badge.isAlert) Color.rgb(145, 20, 16) else Color.rgb(15, 81, 50)
+
+            return TextView(context).apply {
+                text = highlightNumbers(badge.text, numAccentColor)
+                textSize = 11.5f
+                setTextColor(baseTextColor)
+                setTypeface(null, Typeface.BOLD)
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+                gravity = Gravity.CENTER
+                setPadding(dp(9), dp(3), dp(9), dp(3))
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = dp(99).toFloat()
+                    setColor(bgColor)
+                    setStroke(dp(1), strokeColor)
+                }
+            }
+        }
+
+        private fun highlightNumbers(text: String, accentColor: Int): CharSequence {
+            val sp = SpannableString(text)
+            val numPattern = Regex("""[+\-]?\d+(?:\.\d+)?[분초편회개배%]?""")
+            numPattern.findAll(text).forEach { m ->
+                sp.setSpan(StyleSpan(Typeface.BOLD), m.range.first, m.range.last + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                sp.setSpan(ForegroundColorSpan(accentColor), m.range.first, m.range.last + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+            return sp
+        }
+
+        private fun applyKoreanPhraseBreak(tv: TextView) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                tv.breakStrategy = LineBreaker.BREAK_STRATEGY_BALANCED
+            }
+            tv.hyphenationFrequency = Layout.HYPHENATION_FREQUENCY_NONE
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                tv.lineBreakWordStyle = LineBreakConfig.LINE_BREAK_WORD_STYLE_PHRASE
+            }
+        }
+    }
+
+    private fun label(text: String, customTextSize: Float = 14f) = PuppySpeechBubbleView(context).apply {
+        setHeadlineTextSize(customTextSize)
         this.text = text
-        textSize = customTextSize
-        setTypeface(null, android.graphics.Typeface.BOLD)
-        gravity = Gravity.CENTER
-        setTextColor(Color.rgb(18, 25, 16))
-        setLineSpacing(dp(3).toFloat(), 1.18f)
-        background = com.example.itv.presentation.character.PuppyBubbleDrawable()
-        // 글자가 말풍선 밖으로 절대 나가지 않도록 넉넉한 여백 설정
-        setPadding(dp(22), dp(16), dp(22), dp(28))
+    }
+
+    private fun offerBubbleLabel(content: OfferBubbleContent, headlineSize: Float = 14.5f) = PuppySpeechBubbleView(context).apply {
+        setHeadlineTextSize(headlineSize)
+        setOfferContent(content)
     }
 
     private fun root(
@@ -278,15 +436,14 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
         s.dogParams.flags = s.dogParams.flags or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
         add(s.dog, s.dogParams)
 
-        val gentleText = if (s.retry) {
-            CoachingSpeechCatalog.pickSpeech(SpeechSituation.RETRY_INCOMPLETE, s.tone)
+        s.speech = if (s.retry) {
+            label(CoachingSpeechCatalog.pickSpeech(SpeechSituation.RETRY_INCOMPLETE, s.tone), customTextSize = 13.5f)
         } else {
-            formatGentleSpeech(s.reasons, s.tone)
+            offerBubbleLabel(buildOfferBubble(CharacterIntensity.GENTLE, s.reasons, s.tone), headlineSize = 14f)
         }
-        s.speech = label(gentleText, customTextSize = 13.5f)
         s.speech.visibility = View.INVISIBLE
-        val speechWidth = minOf(dp(300), width - dp(20))
-        val speechY = (s.homeY - dp(115)).coerceAtLeast(dp(24))
+        val speechWidth = minOf(dp(304), width - dp(20))
+        val speechY = (s.homeY - dp(122)).coerceAtLeast(dp(24))
         s.speechParams = params(
             speechWidth, WindowManager.LayoutParams.WRAP_CONTENT,
             width - speechWidth - dp(10), speechY, false
@@ -514,12 +671,11 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
             s.dogParams.flags = s.dogParams.flags or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
             add(s.dog, s.dogParams)
 
-            val reasonBlock = formatReasonLines(s.reasons, maxLines = 2) ?: "영상을 오래 시청하고 있어"
-            val strongSpeechText = CoachingSpeechCatalog.pickSpeech(SpeechSituation.STRONG_OFFER, s.tone, reason = reasonBlock)
-            s.speech = label(strongSpeechText, customTextSize = 13.5f)
+            val strongBubble = buildOfferBubble(CharacterIntensity.STRONG, s.reasons, s.tone)
+            s.speech = offerBubbleLabel(strongBubble, headlineSize = 14.5f)
             s.speech.visibility = View.INVISIBLE
             val speechWidth = minOf(dp(320), width - dp(32))
-            val speechY = (s.homeY - dp(138)).coerceAtLeast(dp(32))
+            val speechY = (s.homeY - dp(142)).coerceAtLeast(dp(32))
             s.speechParams = params(
                 speechWidth, WindowManager.LayoutParams.WRAP_CONTENT,
                 (width - speechWidth) / 2, speechY, true
@@ -626,8 +782,12 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
         }
         add(houseView, params(houseW, houseH, hx, hy, true).apply { format = PixelFormat.OPAQUE; alpha = 1f })
 
-        val normalText = if (s.retry) CoachingSpeechCatalog.pickSpeech(SpeechSituation.RETRY_INCOMPLETE, s.tone) else formatReasonsSpeech(s.reasons, s.tone)
-        s.speech = label(normalText)
+        val normalBubble = if (!s.retry) buildOfferBubble(CharacterIntensity.NORMAL, s.reasons, s.tone) else null
+        s.speech = if (s.retry) {
+            label(CoachingSpeechCatalog.pickSpeech(SpeechSituation.RETRY_INCOMPLETE, s.tone))
+        } else {
+            offerBubbleLabel(normalBubble!!, headlineSize = 14.5f)
+        }
         s.speech.visibility = View.INVISIBLE
         val speechWidth = minOf(dp(320), width - dp(24))
         val speechY = (s.homeY - dp(158)).coerceAtLeast(dp(32))
@@ -709,7 +869,11 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
                         s.onReady = null
                         cb?.invoke()
                     }
-                    s.speech.text = if (s.retry) CoachingSpeechCatalog.pickSpeech(SpeechSituation.RETRY_INCOMPLETE, s.tone) else formatReasonsSpeech(s.reasons, s.tone)
+                    if (s.retry) {
+                        s.speech.text = CoachingSpeechCatalog.pickSpeech(SpeechSituation.RETRY_INCOMPLETE, s.tone)
+                    } else if (normalBubble != null) {
+                        s.speech.setOfferContent(normalBubble)
+                    }
                     s.speechParams?.let { sp ->
                         val bubbleH = s.speech.height.takeIf { it > 0 } ?: dp(110)
                         sp.y = (s.homeY - bubbleH - dp(12)).coerceAtLeast(dp(24))
@@ -868,16 +1032,6 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
         s.bubbleFollow = null
     }
 
-    private fun formatGentleSpeech(
-        reasons: List<String>,
-        tone: CoachingTone = CoachingTone.SOFT
-    ): String = formatOfferSpeech(CharacterIntensity.GENTLE, reasons, tone)
-
-    private fun formatReasonsSpeech(
-        reasons: List<String>,
-        tone: CoachingTone = CoachingTone.SOFT
-    ): String = formatOfferSpeech(CharacterIntensity.NORMAL, reasons, tone)
-
     companion object {
         fun formatReasonLines(
             reasons: List<String>,
@@ -891,44 +1045,24 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
             }
         }
 
+        fun buildOfferBubble(
+            intensity: CharacterIntensity,
+            reasons: List<String>,
+            tone: CoachingTone = CoachingTone.SOFT,
+            random: kotlin.random.Random = kotlin.random.Random.Default
+        ): OfferBubbleContent = InterventionBubbleFormatter.buildOfferBubble(
+            intensity = intensity,
+            reasons = reasons,
+            tone = tone,
+            random = random
+        )
+
         fun formatOfferSpeech(
             intensity: CharacterIntensity,
             reasons: List<String>,
             tone: CoachingTone = CoachingTone.SOFT,
             random: kotlin.random.Random = kotlin.random.Random.Default
-        ): String = when (intensity) {
-            CharacterIntensity.GENTLE -> {
-                val firstReason = reasons.firstOrNull { it.isNotBlank() }
-                CoachingSpeechCatalog.pickSpeech(
-                    SpeechSituation.GENTLE_OFFER,
-                    tone,
-                    reason = firstReason,
-                    random = random
-                )
-            }
-            CharacterIntensity.NORMAL -> {
-                val title = CoachingSpeechCatalog.pickSpeech(
-                    SpeechSituation.NORMAL_OFFER_TITLE,
-                    tone,
-                    random = random
-                )
-                val reasonBlock = formatReasonLines(reasons, maxLines = 2)
-                if (reasonBlock == null) {
-                    "$title\n화면을 끄고 쉬어가자"
-                } else {
-                    "$title\n$reasonBlock"
-                }
-            }
-            CharacterIntensity.STRONG -> {
-                val reasonBlock = formatReasonLines(reasons, maxLines = 2) ?: "영상을 오래 시청하고 있어"
-                CoachingSpeechCatalog.pickSpeech(
-                    SpeechSituation.STRONG_OFFER,
-                    tone,
-                    reason = reasonBlock,
-                    random = random
-                )
-            }
-        }
+        ): String = buildOfferBubble(intensity, reasons, tone, random).toPlainText()
     }
 
     fun feedback(onSubmit: (Int?) -> Unit): Pair<LinearLayout, WindowManager.LayoutParams> {

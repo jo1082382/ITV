@@ -1,11 +1,14 @@
 package com.example.itv.presentation.coaching
 
 import android.annotation.SuppressLint
+import android.app.KeyguardManager
 import android.content.Context
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.PowerManager
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
@@ -17,7 +20,6 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.example.itv.R
-import com.example.itv.domain.coaching.UserPosture
 import com.example.itv.domain.jev.JevCandidatePolicy
 import com.example.itv.domain.jev.JevSettings
 import com.example.itv.infrastructure.jev.JevFeature
@@ -27,11 +29,14 @@ import com.example.itv.infrastructure.observation.AudioPipelineKind
 import com.example.itv.infrastructure.observation.GeneralAppTracker
 import com.example.itv.infrastructure.observation.InferredAppCategory
 import com.example.itv.infrastructure.observation.InterventionEligibility
-import com.example.itv.infrastructure.observation.LightAndBrightnessTracker
 import com.example.itv.infrastructure.observation.accessibility.WritingGuard
 import com.example.itv.infrastructure.observation.instagram.InstagramScreenMode
 import com.example.itv.infrastructure.observation.instagram.InstagramTracker
+import com.example.itv.domain.records.ShortformApp
+import com.example.itv.infrastructure.observation.SessionCategoryTracker
+import com.example.itv.infrastructure.observation.SwipeDynamicsTracker
 import com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker
+import com.example.itv.infrastructure.observation.youtube.YoutubeProbe
 import com.example.itv.infrastructure.observation.youtube.YoutubeWatchMode
 import com.example.itv.presentation.components.PuppyMood
 import kotlinx.coroutines.CoroutineScope
@@ -49,7 +54,7 @@ import kotlin.math.roundToInt
 
 /**
  * YouTube, Instagram 및 휴대폰의 모든 앱 화면 위에서 실시간 감지 상태
- * (앱 카테고리 확정, 게임/영상/음성 오디오 파이프라인, 앱 내 세부 화면, 시청/체류 시간, 개입 가능/불가 환경 판정)를
+ * (앱 카테고리 확정, 게임/영상/음성 오디오 파이프라인, 앱 내 세부 화면, 시청/체류 시간, 세션 카테고리별 누적 시간)를
  * 확인할 수 있는 드래그 가능한 플로팅 HUD 위젯.
  *
  * - 기본 상태: 우리 앱(ITV) 아이콘 모양의 작은 플로팅 버튼으로 떠 있어 화면을 가리지 않음
@@ -75,9 +80,9 @@ object LongformDiagnosticHud {
     private var titleText: TextView? = null
     private var basisText: TextView? = null
     private var timerText: TextView? = null
-    private var eligibilityText: TextView? = null
+    private var categoryUsageText: TextView? = null
+    private var totalUsageText: TextView? = null
     private var jevProbText: TextView? = null
-    private var eventText: TextView? = null
 
     private var lastAppliedIconKey: String? = null
 
@@ -153,14 +158,6 @@ object LongformDiagnosticHud {
 
     private fun formatDurationSec(sec: Long): String =
         if (sec >= 60) "${sec / 60}분 ${sec % 60}초" else "${sec}초"
-
-    private fun shortPostureLabel(posture: UserPosture): String = when (posture) {
-        UserPosture.SITTING_OR_STANDING -> "정면파지"
-        UserPosture.LYING_DOWN -> "누움/수평"
-        UserPosture.TABLE_OR_DESK -> "책상거치"
-        UserPosture.FACEDOWN -> "엎어둠"
-        UserPosture.UNKNOWN -> "측정중"
-    }
 
     fun isOverlayPermissionGranted(context: Context): Boolean =
         Settings.canDrawOverlays(context)
@@ -434,18 +431,29 @@ object LongformDiagnosticHud {
         }
         card.addView(timerText)
 
-        // 2-5. 개입 가능 환경 vs 개입 불가 환경 + 센서(자세/조도) 판정 줄
-        eligibilityText = TextView(appCtx).apply {
+        // 2-5. 앱 카테고리별 누적 사용량 줄
+        categoryUsageText = TextView(appCtx).apply {
+            textSize = 10.5f
+            setTextColor(Color.parseColor("#81D4FA"))
+            text = "📊 카테고리: 집계 대기 중"
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(0, 1.dp(), 0, 2.dp())
+        }
+        card.addView(categoryUsageText)
+
+        // 2-6. 세션 총 사용시간 (실제 물리 총 시간 + 3단계 가중치 환산 시간)
+        totalUsageText = TextView(appCtx).apply {
             textSize = 11f
-            setTextColor(Color.parseColor("#48C774"))
-            text = "개입 환경 판정 대기 중"
+            setTextColor(Color.parseColor("#FFD54F"))
+            text = "⏱ 총 사용: 0초"
             maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END
             setPadding(0, 1.dp(), 0, 2.dp())
         }
-        card.addView(eligibilityText)
+        card.addView(totalUsageText)
 
-        // 2-5b. Jev 확률 vs 우리 앱 기준 확률 차이 및 5단계 표정 상태 줄
+        // 2-7. Jev 확률 vs 우리 앱 기준 확률 차이 및 5단계 표정 상태 줄
         jevProbText = TextView(appCtx).apply {
             textSize = 10.5f
             setTextColor(Color.parseColor("#B0BEC5"))
@@ -456,16 +464,6 @@ object LongformDiagnosticHud {
             visibility = View.GONE
         }
         card.addView(jevProbText)
-
-        // 2-6. 최근 전환 이벤트 한 줄 요약
-        eventText = TextView(appCtx).apply {
-            textSize = 10f
-            setTextColor(Color.parseColor("#99E6B8"))
-            text = "최근 이벤트: 없음"
-            maxLines = 1
-            ellipsize = android.text.TextUtils.TruncateAt.END
-        }
-        card.addView(eventText)
 
         expandedView = card
 
@@ -642,11 +640,8 @@ object LongformDiagnosticHud {
     private fun renderHud(appCtx: Context) {
         val fgPkg = JevObservationHub.foregroundPackage
         val yt = YoutubeLongformTracker.snapshot.value
-        val ytEvent = YoutubeLongformTracker.history.value.firstOrNull()
         val ig = InstagramTracker.snapshot.value
-        val igEvent = InstagramTracker.history.value.firstOrNull()
         val gen = GeneralAppTracker.snapshot.value
-        val genEvent = GeneralAppTracker.history.value.firstOrNull()
         val guardReason = WritingGuard.blockReason()
         val isWritingBlocked = guardReason != null && !guardReason.startsWith("ITV 내부")
 
@@ -719,7 +714,25 @@ object LongformDiagnosticHud {
             }
         }
 
-        // 아이콘으로 접혀 있는 상태라면 텍스트 뷰 렌더링 생략 (배터리 절약)
+        // HUD가 아이콘으로 접혀 있는 상태에서도 카테고리별 누적 사용 시간은 끊기지 않고 계속 집계한다.
+        val pm = appCtx.getSystemService(PowerManager::class.java)
+        val km = appCtx.getSystemService(KeyguardManager::class.java)
+        val isUnlockedNow = (pm?.isInteractive == true) && (km?.isKeyguardLocked != true)
+        val isOwnOrSystemPkg = fgPkg != null && (
+            fgPkg == appCtx.packageName ||
+            fgPkg.startsWith("com.team.itv") ||
+            fgPkg.startsWith("com.example.itv") ||
+            JevSettings.isLauncherPackage(fgPkg) ||
+            JevSettings.isExcludedSystemPackage(fgPkg)
+        )
+        SessionCategoryTracker.observe(
+            nowElapsed = SystemClock.elapsedRealtime(),
+            isUnlocked = isUnlockedNow,
+            fgPkg = fgPkg,
+            paused = isUnlockedNow && isOwnOrSystemPkg
+        )
+
+        // 아이콘으로 접혀 있는 상태라면 텍스트 뷰 렌더링만 생략 (배터리 절약)
         if (!isExpanded) return
 
         // 펼침 카드 내 Jev 확률 vs 우리 앱 기준 확률 차이 표시 갱신
@@ -766,17 +779,6 @@ object LongformDiagnosticHud {
             }
         }
 
-        val ambient = try {
-            LightAndBrightnessTracker.getInstance(appCtx).snapshot.value
-        } catch (_: Exception) {
-            null
-        }
-        val sensorSuffix = if (ambient != null) {
-            val postureStr = shortPostureLabel(ambient.posture)
-            val luxStr = ambient.lux?.toInt()?.let { "${it}lx" } ?: ""
-            if (luxStr.isNotEmpty()) " · $postureStr/$luxStr" else " · $postureStr"
-        } else ""
-
         when {
             // 1. 인스타그램 전면 실행 중
             fgPkg == JevSettings.INSTAGRAM || ig.isInInstagram -> {
@@ -821,27 +823,6 @@ object LongformDiagnosticHud {
                 val modeStr = formatDurationSec(ig.currentModeDurationMs / 1000L)
                 timerText?.text = "⏱ 현 화면: $modeStr · 누적 릴스: $reelsStr (스와이프 ${ig.reelsSwipeCount}회)"
                 timerText?.setTextColor(Color.parseColor("#E0E0E0"))
-
-                val (eligLine, eligColor) = when {
-                    ig.mode == InstagramScreenMode.DM || isWritingBlocked ->
-                        "⛔ 개입 불가 (DM·메시지 작성 보호)$sensorSuffix" to Color.parseColor("#FF6B6B")
-                    ig.mode == InstagramScreenMode.REELS ->
-                        "⏳ 개입 대기 (릴스 시청 중 → 다음 전환 시 개입)$sensorSuffix" to Color.parseColor("#FFD166")
-                    ig.mode == InstagramScreenMode.COMMENTS ->
-                        "⏳ 개입 대기 (댓글 열람 중 → 전환/피드 이동 시 개입)$sensorSuffix" to Color.parseColor("#FFD166")
-                    ig.mode == InstagramScreenMode.STORY ->
-                        "⏳ 개입 대기 (스토리 시청 중 → 피드 복귀 시 개입)$sensorSuffix" to Color.parseColor("#FFD166")
-                    else ->
-                        "✅ 개입 가능 환경 (인스타 피드/탐색 중)$sensorSuffix" to Color.parseColor("#48C774")
-                }
-                eligibilityText?.text = eligLine
-                eligibilityText?.setTextColor(eligColor)
-
-                eventText?.text = if (igEvent != null) {
-                    "최근[${igEvent.formattedTime}]: ${igEvent.description}"
-                } else {
-                    "최근 이벤트: 아직 없음"
-                }
             }
 
             // 2. 유튜브 전면 실행 중
@@ -859,6 +840,11 @@ object LongformDiagnosticHud {
                 modeText?.text = modeLabel
                 modeText?.setTextColor(modeColor)
 
+                val ytSwipes = maxOf(
+                    SwipeDynamicsTracker.snapshot(ShortformApp.YOUTUBE).totalSwipesInRun,
+                    YoutubeProbe.candidates
+                )
+
                 titleText?.text = when {
                     isWritingBlocked ->
                         "✍️ 유튜브에서 검색어·댓글 작성 중"
@@ -867,55 +853,60 @@ object LongformDiagnosticHud {
                     yt.mode == YoutubeWatchMode.BROWSE_FEED ->
                         "유튜브 홈/피드 둘러보는 중"
                     yt.mode == YoutubeWatchMode.SHORTS ->
-                        "쇼츠(Shorts) 플레이어 재생 중"
+                        "쇼츠(Shorts) 플레이어 재생 중 · 전환 ${ytSwipes}회"
                     yt.mode == YoutubeWatchMode.SHORTS_COMMENTS ->
-                        "쇼츠(Shorts) 댓글 보는 중"
+                        "쇼츠(Shorts) 댓글 보는 중 (개입 보류)"
                     else ->
                         yt.currentTitle ?: "유튜브 화면 탐색 중"
                 }
 
                 val lfMetrics = YoutubeLongformTracker.getJevLongformMetrics()
-                basisText?.text = "🔎 구분: ${yt.mode.label} · 연속전환 ${lfMetrics.consecutiveChainCount}회 · 완료 ${lfMetrics.completedLongformCount}편"
+                basisText?.text = when (yt.mode) {
+                    YoutubeWatchMode.SHORTS -> "🔎 구분: 쇼츠 시청 · 스와이프 전환 ${ytSwipes}회"
+                    YoutubeWatchMode.SHORTS_COMMENTS -> "🔎 구분: 쇼츠 댓글 열람 (개입 보류)"
+                    YoutubeWatchMode.BROWSE_FEED -> "🔎 구분: 홈/피드 둘러보는 중 (시청 정지)"
+                    else -> "🔎 구분: ${yt.mode.label} · 연속전환 ${lfMetrics.consecutiveChainCount}회 · 완료 ${lfMetrics.completedLongformCount}편"
+                }
 
                 val timeStr = formatDurationSec(yt.currentVideoWatchDurationMs / 1000L)
-                val playBadge = when {
-                    yt.isEndscreenDetected -> "🏁 영상 종료"
-                    yt.mode == YoutubeWatchMode.SHORTS_COMMENTS -> "💬 댓글 열람 중"
-                    !isWatching -> "⏹ 시청 정지"
-                    yt.isPlaying -> "▶ 재생 중"
-                    else -> "⏸ 일시정지(멈춤)"
-                }
+                val modeStr = formatDurationSec(yt.currentModeDurationMs / 1000L)
+                val shortsStr = formatDurationSec(yt.shortsWatchDurationMs / 1000L)
                 val seekBarInfo = if (!yt.playbackPositionText.isNullOrBlank()) " · 재생바 ${yt.playbackPositionText}" else ""
-                timerText?.text = "$playBadge · 실제 시청: $timeStr$seekBarInfo"
+
+                val (_, timerLine) = when (yt.mode) {
+                    YoutubeWatchMode.SHORTS -> {
+                        val badge = if (yt.isPlaying) "▶ 쇼츠 재생 중" else "⏸ 일시정지(멈춤)"
+                        badge to "$badge · 현 쇼츠: $modeStr · 누적 쇼츠: $shortsStr (전환 ${ytSwipes}회)"
+                    }
+                    YoutubeWatchMode.SHORTS_COMMENTS -> {
+                        "💬 댓글 열람 중" to "💬 댓글 열람 중 · 체류: $modeStr · 누적 쇼츠: $shortsStr"
+                    }
+                    YoutubeWatchMode.BROWSE_FEED -> {
+                        "⏹ 시청 정지" to "⏱ 홈 체류: $modeStr (시청 정지)"
+                    }
+                    YoutubeWatchMode.PORTRAIT_WATCH, YoutubeWatchMode.LANDSCAPE_FULLSCREEN -> {
+                        val badge = when {
+                            yt.isEndscreenDetected -> "🏁 영상 종료"
+                            yt.isPlaying -> "▶ 재생 중"
+                            else -> "⏸ 일시정지(멈춤)"
+                        }
+                        badge to "$badge · 실제 시청: $timeStr$seekBarInfo"
+                    }
+                    else -> {
+                        "⏹ 관측 대기" to "⏹ 관측 대기 중"
+                    }
+                }
+                timerText?.text = timerLine
                 timerText?.setTextColor(
                     when {
                         yt.isEndscreenDetected -> Color.parseColor("#FFD166")
+                        yt.mode == YoutubeWatchMode.SHORTS && yt.isPlaying -> Color.parseColor("#E8F5E9")
                         isWatching && yt.isPlaying -> Color.parseColor("#E8F5E9")
                         isWatching && !yt.isPlaying -> Color.parseColor("#FFB74D")
+                        yt.mode == YoutubeWatchMode.BROWSE_FEED -> Color.parseColor("#4DA3FF")
                         else -> Color.parseColor("#CCCCCC")
                     }
                 )
-
-                val (eligLine, eligColor) = when {
-                    isWritingBlocked ->
-                        "⛔ 개입 불가 (검색어·댓글 작성 중)$sensorSuffix" to Color.parseColor("#FF6B6B")
-                    yt.isEndscreenDetected ->
-                        "✅ 개입 가능 타이밍! (영상 종료 · 추천 화면)$sensorSuffix" to Color.parseColor("#48C774")
-                    isWatching ->
-                        "⏳ 개입 대기 (롱폼 시청 중 → 종료/전환/홈 이동 시 개입)$sensorSuffix" to Color.parseColor("#FFD166")
-                    yt.mode == YoutubeWatchMode.SHORTS || yt.mode == YoutubeWatchMode.SHORTS_COMMENTS ->
-                        "⏳ 개입 대기 (쇼츠/댓글 중 → 다음 전환 시 개입)$sensorSuffix" to Color.parseColor("#FFD166")
-                    else ->
-                        "✅ 개입 가능 환경 (유튜브 홈/피드 탐색 중)$sensorSuffix" to Color.parseColor("#48C774")
-                }
-                eligibilityText?.text = eligLine
-                eligibilityText?.setTextColor(eligColor)
-
-                eventText?.text = if (ytEvent != null) {
-                    "최근[${ytEvent.formattedTime}]: ${ytEvent.description}"
-                } else {
-                    "최근 이벤트: 아직 없음"
-                }
             }
 
             // 3. 그 외 모든 앱 (게임, 영상/OTT, 메신저, 음성통화, 문서, 브라우저, SNS, 쇼핑, 홈 화면, 우리 앱 등)
@@ -953,27 +944,25 @@ object LongformDiagnosticHud {
                 }
                 timerText?.text = "⏱ 체류: $stayStr · $audioTag · $kbOrScreenTag"
                 timerText?.setTextColor(Color.parseColor("#DDDDDD"))
-
-                val (eligLine, eligColor) = when (gen.eligibility) {
-                    InterventionEligibility.ELIGIBLE ->
-                        "✅ ${gen.eligibilityReason}$sensorSuffix" to Color.parseColor("#48C774")
-                    InterventionEligibility.WAIT_FOR_TRANSITION ->
-                        "⏳ 개입 대기 (${gen.eligibilityReason})$sensorSuffix" to Color.parseColor("#FFD166")
-                    InterventionEligibility.BLOCKED ->
-                        "⛔ 개입 불가 (${gen.eligibilityReason})$sensorSuffix" to Color.parseColor("#FF6B6B")
-                }
-                eligibilityText?.text = eligLine
-                eligibilityText?.setTextColor(eligColor)
-
-                val latestAny = listOfNotNull(
-                    genEvent?.let { it.timestampWallMs to "최근[${it.formattedTime}]: ${it.description}" },
-                    ytEvent?.let { it.timestampWallMs to "최근[${it.formattedTime}]: ${it.description}" },
-                    igEvent?.let { it.timestampWallMs to "최근[${it.formattedTime}]: ${it.description}" }
-                ).maxByOrNull { it.first }?.second
-
-                eventText?.text = latestAny ?: "최근 이벤트: 아직 없음"
             }
         }
+
+        // 2-5. 앱 카테고리별 누적 사용량 및 세션 총 사용시간 표시 갱신 (집계는 접힘/펼침 무관하게 상단에서 수행됨)
+        val activeCats = SessionCategoryTracker.getActiveCategories()
+        val totalPhysMs = SessionCategoryTracker.getTotalPhysicalMs()
+        val totalWeightMs = SessionCategoryTracker.getTotalWeightedMs()
+
+        categoryUsageText?.text = if (activeCats.isNotEmpty()) {
+            "📊 카테고리: " + activeCats.joinToString(" · ") { (cat, ms) ->
+                "${cat.shortLabel} ${formatDurationSec(ms / 1000L)}"
+            }
+        } else {
+            "📊 카테고리: 집계 대기 중"
+        }
+
+        val physStr = formatDurationSec(totalPhysMs / 1000L)
+        val weightStr = formatDurationSec(totalWeightMs / 1000L)
+        totalUsageText?.text = "⏱ 총 사용: $physStr (환산 $weightStr · 세션)"
     }
 
     fun hide() {
@@ -1004,9 +993,9 @@ object LongformDiagnosticHud {
         titleText = null
         basisText = null
         timerText = null
-        eligibilityText = null
+        categoryUsageText = null
+        totalUsageText = null
         jevProbText = null
-        eventText = null
         isExpanded = false
         isShowing = false
     }

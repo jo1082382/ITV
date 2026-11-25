@@ -567,4 +567,169 @@ class JevPolicyTest {
         assertEquals(35_000L, allCtx.continuousMs)
         assertEquals(35_000L, allCtx.sessionMs)
     }
+
+    @Test fun tickJitterUpTo5SecondsDoesNotResetContinuousShortform() {
+        val tracker = JevSessionTracker { "s-jitter" }
+        // 정상 1초 틱 10초 누적
+        for (i in 0..10) {
+            tracker.observe(i * 1000L, JevSettings.YOUTUBE, JevSettings.YOUTUBE)
+        }
+        assertEquals(10_000L, tracker.context("ALL", 10_000L, 10_000L, null)?.continuousMs)
+
+        // 실기기 메인 스레드 지터(2.5초 지연 틱) 발생 시에도 연속 시청이 0초로 초기화되지 않고 그대로 이어져야 함
+        tracker.observe(12_500L, JevSettings.YOUTUBE, JevSettings.YOUTUBE)
+        tracker.observe(13_500L, JevSettings.YOUTUBE, JevSettings.YOUTUBE)
+        assertEquals(13_500L, tracker.context("ALL", 13_500L, 13_500L, null)?.continuousMs)
+    }
+
+    @Test fun fullOneToOneTierAccumulatesShortformEvenWhenConfirmedPkgIsNull() {
+        val tracker = JevSessionTracker { "s-tier1" }
+        tracker.observe(0L, JevSettings.YOUTUBE, JevSettings.YOUTUBE)
+        tracker.observe(
+            1_000L,
+            JevSettings.YOUTUBE,
+            null,
+            nonShortformTier = com.example.itv.domain.coaching.UsageWeightTier.FULL_1_TO_1
+        )
+        tracker.observe(
+            2_000L,
+            JevSettings.YOUTUBE,
+            null,
+            nonShortformTier = com.example.itv.domain.coaching.UsageWeightTier.FULL_1_TO_1
+        )
+        val allCtx = tracker.context("ALL", 2_000L, 2_000L, null)!!
+        assertEquals(2_000L, allCtx.rawShortformMs)
+        assertEquals(2_000L, allCtx.continuousMs)
+    }
+
+    @Test fun restUsageClockRespectsJev180SecondNaturalRestThreshold() {
+        val clock = com.example.itv.domain.coaching.RestUsageClock(com.example.itv.domain.coaching.TestCoachingPolicy.REST_MS)
+        for (i in 0..10) {
+            clock.observe(
+                now = i * 1000L,
+                using = true,
+                weightTier = com.example.itv.domain.coaching.UsageWeightTier.FULL_1_TO_1,
+                restThresholdMs = com.example.itv.domain.coaching.TestCoachingPolicy.RECOGNIZED_REST_MS
+            )
+        }
+        assertEquals(10_000L, clock.usedMs)
+        // Jev 모드에서 화면을 20초만 끈 경우(180초 미만) 사용량이 초기화되면 안 됨
+        var resetTriggered = false
+        for (i in 11..31) {
+            if (clock.observe(
+                    now = i * 1000L,
+                    using = false,
+                    weightTier = com.example.itv.domain.coaching.UsageWeightTier.LOW_1_TO_3,
+                    restThresholdMs = com.example.itv.domain.coaching.TestCoachingPolicy.RECOGNIZED_REST_MS
+                )
+            ) {
+                resetTriggered = true
+            }
+        }
+        assertFalse(resetTriggered)
+        assertEquals(10_000L, clock.usedMs)
+    }
+
+    @Test fun youtubeLongformAndInstagramFeedDoNotApplyShortformSwipePenalty() {
+        val s = JevSettings(continuousSeconds = 600, personalizedEnabled = true)
+        val youtubeLongform = JevContext(
+            sessionId = "s-yt-lf",
+            packageName = JevSettings.YOUTUBE,
+            sessionMs = 900_000L,
+            continuousMs = 900_000L,
+            returns10m = 0,
+            returnsObservedSeconds = 600,
+            bedtimePassedMinutes = null,
+            observedAt = 1000L,
+            quality = "VALID",
+            effectiveSpm1m = 18.0,
+            fastSwipeStreak = 5,
+            swipeAccel1m = 4.0,
+            swipeOverheated = true,
+            youtubeWatchMode = "LONGFORM_PORTRAIT",
+            appCategory = "LONGFORM_VIDEO"
+        )
+        assertFalse(JevCandidatePolicy.isShortformContext(youtubeLongform))
+        assertEquals(0.0, JevCandidatePolicy.computeThresholdAdjustment(s, youtubeLongform).swipeDelta, 0.001)
+        assertFalse("RAPID_SWIPE_OVERHEAT" in JevCandidatePolicy.reasons(youtubeLongform, s))
+
+        val instagramFeed = youtubeLongform.copy(
+            packageName = JevSettings.INSTAGRAM,
+            youtubeWatchMode = null,
+            appCategory = "COMMUNITY_SNS"
+        )
+        assertFalse(JevCandidatePolicy.isShortformContext(instagramFeed))
+        assertEquals(0.0, JevCandidatePolicy.computeThresholdAdjustment(s, instagramFeed).swipeDelta, 0.001)
+        assertFalse("RAPID_SWIPE_OVERHEAT" in JevCandidatePolicy.reasons(instagramFeed, s))
+
+        val youtubeShorts = youtubeLongform.copy(
+            youtubeWatchMode = "SHORTS",
+            appCategory = "SHORTFORM"
+        )
+        assertTrue(JevCandidatePolicy.isShortformContext(youtubeShorts))
+        assertTrue(JevCandidatePolicy.computeThresholdAdjustment(s, youtubeShorts).swipeDelta < 0.0)
+        assertTrue("RAPID_SWIPE_OVERHEAT" in JevCandidatePolicy.reasons(youtubeShorts, s))
+    }
+
+    @Test fun unifiedDarkLuxThresholdIs20LxAcrossPolicies() {
+        val s = JevSettings(probabilityThreshold = 0.50, personalizedEnabled = true)
+        val base = JevContext(
+            sessionId = "s-lux",
+            packageName = JevSettings.YOUTUBE,
+            sessionMs = 600_000L,
+            continuousMs = 600_000L,
+            returns10m = 0,
+            returnsObservedSeconds = 600,
+            bedtimePassedMinutes = 20,
+            observedAt = 1000L,
+            quality = "VALID",
+            bedtimeDistanceMinutes = 20,
+            screenBrightness = 40,
+            isNearOrOccluded = false
+        )
+
+        // 18 lx (<= 20 lx): 사전 개입 정책 & Jev 임계값 보정 모두 암실로 판정
+        assertTrue(com.example.itv.domain.coaching.ContextualPreInterventionPolicy.isDarkRoom(18f, false))
+        val darkAdj = JevCandidatePolicy.computeThresholdAdjustment(s, base.copy(ambientLux = 18f))
+        assertTrue("18 lx should apply post-bedtime dark adjustment (< 0.0)", darkAdj.bedtimeDelta < 0.0)
+
+        // 22 lx (> 20 lx): 사전 개입 정책 & Jev 임계값 보정 모두 암실 아님으로 일치
+        assertFalse(com.example.itv.domain.coaching.ContextualPreInterventionPolicy.isDarkRoom(22f, false))
+        val nonDarkAdj = JevCandidatePolicy.computeThresholdAdjustment(s, base.copy(ambientLux = 22f))
+        assertEquals("22 lx should not apply dark-room penalty", 0.0, nonDarkAdj.bedtimeDelta, 0.001)
+    }
+
+    @Test fun restorePreservesPerTierTotalsAndRawTotalMs() {
+        val tracker = JevSessionTracker { "s-restore" }
+        // 숏폼 60초(1:1=60s) + 중가중치 120초(1:2=60s) + 저가중치 180초(1:3=60s)
+        // 가중 합계 = 180초, 실사용 합계(totalRawMs) = 360초
+        tracker.restore(
+            pkg = "ALL",
+            id = "restored-session",
+            totalMs = 180_000L,
+            entered = true,
+            totalShortformMs = 60_000L,
+            totalMidMs = 120_000L,
+            totalLowMs = 180_000L
+        )
+        val restored = tracker.states.getValue("ALL")
+        assertEquals("restored-session", restored.id)
+        assertEquals(60_000L, restored.totalShortformMs)
+        assertEquals(120_000L, restored.totalMidMs)
+        assertEquals(180_000L, restored.totalLowMs)
+        assertEquals(180_000L, restored.totalMs)
+        assertEquals(360_000L, restored.totalRawMs)
+
+        // 복구 후 일반 앱(1:3) 30초 추가 사용 시 기존 1:1/1:2/1:3 비율이 깨지지 않고 정확히 누적되어야 함
+        tracker.observe(0L, "com.android.chrome", null)
+        for (i in 1..30) {
+            tracker.observe(i * 1000L, "com.android.chrome", null)
+        }
+        val afterMore = tracker.states.getValue("ALL")
+        assertEquals(60_000L, afterMore.totalShortformMs)
+        assertEquals(120_000L, afterMore.totalMidMs)
+        assertEquals(210_000L, afterMore.totalLowMs)
+        assertEquals(190_000L, afterMore.totalMs) // 60 + 60 + 70
+        assertEquals(390_000L, afterMore.totalRawMs) // 60 + 120 + 210
+    }
 }

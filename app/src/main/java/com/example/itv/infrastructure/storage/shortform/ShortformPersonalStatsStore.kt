@@ -534,7 +534,8 @@ internal object ShortformPersonalStatsStore {
     fun quickContextMetrics(
         context: Context,
         pkg: String,
-        currentContinuousMs: Long
+        currentContinuousMs: Long,
+        rawShortformSessionMs: Long? = null
     ): QuickPersonalMetrics {
         ensureInitialized(context)
         val nowElapsed = SystemClock.elapsedRealtime()
@@ -547,7 +548,7 @@ internal object ShortformPersonalStatsStore {
         val basisSessions = if (appSessions.size >= 2) appSessions else sessions
         val shortformAvgSessionMs = calculateRepresentativeSessionMs(basisSessions)
 
-        if (cachedPhone30dRawAvgSessionMs == 0L) {
+        if (cachedPhone30dWeightedAvgSessionMs == 0L && cachedPhone30dRawAvgSessionMs == 0L) {
             val appCtx = context.applicationContext
             val zone = ZoneId.systemDefault()
             val nowWallMs = System.currentTimeMillis()
@@ -566,9 +567,16 @@ internal object ShortformPersonalStatsStore {
             }
         }
 
+        // currentContinuousMs는 가중치 환산(숏폼 1:1, 피드·게임 1:2, 롱폼·일반 1:3) 등가 시간이므로
+        // 30일 폰 세션 기준선도 동일 단위인 가중치 환산 평균(phoneWeightedAvgMs)을 최우선으로 비교합니다.
         val phoneRawAvgMs = cachedPhone30dRawAvgSessionMs
         val phoneWeightedAvgMs = cachedPhone30dWeightedAvgSessionMs
-        val phoneBaselineAvgMs = if (phoneRawAvgMs >= 30_000L) phoneRawAvgMs else (if (phoneWeightedAvgMs >= 30_000L) phoneWeightedAvgMs else shortformAvgSessionMs)
+        val phoneBaselineAvgMs = when {
+            phoneWeightedAvgMs >= 30_000L -> phoneWeightedAvgMs
+            shortformAvgSessionMs >= 30_000L -> shortformAvgSessionMs
+            phoneRawAvgMs >= 30_000L -> (phoneRawAvgMs / 3L).coerceAtLeast(30_000L)
+            else -> 0L
+        }
         val avgSessionMs = phoneBaselineAvgMs
 
         val activeRunMs = run?.takeIf {
@@ -579,18 +587,32 @@ internal object ShortformPersonalStatsStore {
             round2(effectiveCurrentSessionMs.toDouble() / avgSessionMs.toDouble())
         } else null
 
-        val liveToday = runCatching {
-            ShortformDailyStore.today(
-                context.applicationContext,
-                if (pkg == PKG_INSTAGRAM) "instagram" else "youtube"
-            )
-        }.getOrNull()
+        val isDedicatedShortformPkg = pkg == PKG_YOUTUBE || pkg == PKG_INSTAGRAM
+        val liveTodayMs = when (pkg) {
+            PKG_INSTAGRAM -> runCatching { ShortformDailyStore.today(context.applicationContext, "instagram").ms }.getOrDefault(0L)
+            PKG_YOUTUBE -> runCatching { ShortformDailyStore.today(context.applicationContext, "youtube").ms }.getOrDefault(0L)
+            else -> {
+                val yt = runCatching { ShortformDailyStore.today(context.applicationContext, "youtube").ms }.getOrDefault(0L)
+                val ig = runCatching { ShortformDailyStore.today(context.applicationContext, "instagram").ms }.getOrDefault(0L)
+                yt + ig
+            }
+        }
         val todayStartWallMs = LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
         val elapsedSinceMidnightMs = (nowWall - todayStartWallMs).coerceAtLeast(0L)
-        val currentSessionTodayMs = minOf(effectiveCurrentSessionMs, elapsedSinceMidnightMs)
-        val todayMs = maxOf(liveToday?.ms ?: 0L, currentSessionTodayMs)
+        // 일반 앱·롱폼 사용 시간이 todayShortformMinutes를 오염시키지 않도록 순수 숏폼 세션 시간만 반영합니다.
+        val shortformSessionNowMs = when {
+            rawShortformSessionMs != null -> maxOf(rawShortformSessionMs, activeRunMs)
+            isDedicatedShortformPkg -> maxOf(currentContinuousMs, activeRunMs)
+            else -> activeRunMs
+        }
+        val currentSessionTodayMs = minOf(shortformSessionNowMs, elapsedSinceMidnightMs)
+        val todayMs = maxOf(liveTodayMs, currentSessionTodayMs)
         val todayShortformMinutes = if (todayMs > 0L) round2(todayMs / 60_000.0) else null
-        val avg7dMs = cached7dAvgByPkg[pkg] ?: 0L
+        val avg7dMs = if (isDedicatedShortformPkg) {
+            cached7dAvgByPkg[pkg] ?: 0L
+        } else {
+            (cached7dAvgByPkg[PKG_YOUTUBE] ?: 0L) + (cached7dAvgByPkg[PKG_INSTAGRAM] ?: 0L)
+        }
         val avg7dDailyMinutes = if (avg7dMs >= 60_000L) round2(avg7dMs / 60_000.0) else null
         val todayVs7dRatio = if (avg7dMs >= 60_000L && todayMs > 0L) {
             round2(todayMs.toDouble() / avg7dMs.toDouble())

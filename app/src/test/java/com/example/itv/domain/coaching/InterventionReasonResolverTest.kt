@@ -3,6 +3,7 @@ package com.example.itv.domain.coaching
 import com.example.itv.domain.jev.JevContext
 import com.example.itv.infrastructure.observation.AmbientSnapshot
 import com.example.itv.infrastructure.observation.BedtimePhase
+import com.example.itv.infrastructure.observation.SessionAppCategory
 import com.example.itv.infrastructure.observation.UserEnvironmentState
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -408,5 +409,223 @@ class InterventionReasonResolverTest {
         )
 
         assertTrue(reasons.any { it.contains("어두운 방에서 밝은 화면") })
+    }
+
+    @Test
+    fun mixedSessionPicksHighestWeightedContributorInsteadOfRawLongform() {
+        val jevContext = JevContext(
+            sessionId = "mix1",
+            packageName = "com.google.android.youtube",
+            sessionMs = 1140_000L,
+            continuousMs = 1140_000L, // 환산 19분 (쇼츠12 + 롱폼5 + 메신저2)
+            rawShortformMs = 720_000L,
+            rawGeneralMs = 1260_000L,
+            longformWatchMs = 900_000L,
+            youtubeWatchMode = "LONGFORM",
+            returns10m = 0,
+            returnsObservedSeconds = 600,
+            bedtimePassedMinutes = null,
+            observedAt = 0L,
+            ambientLux = 200f,
+            screenBrightness = 150
+        )
+        val ambient = AmbientSnapshot(
+            lux = 200f,
+            proximityDistanceCm = 5f,
+            proximityMaxRangeCm = 5f,
+            isNear = false,
+            isOccluded = false,
+            screenBrightness = 150,
+            nightModeActive = false,
+            stateLabel = "주간 밝은 환경",
+            explanation = "test",
+            bedtimePhase = BedtimePhase.ACTIVE_HOURS
+        )
+        val categories = mapOf(
+            SessionAppCategory.YOUTUBE_SHORTS to 12 * 60_000L,
+            SessionAppCategory.YOUTUBE_LONGFORM to 15 * 60_000L,
+            SessionAppCategory.DOC_MESSENGER to 6 * 60_000L
+        )
+
+        val reasons = InterventionReasonResolver.resolveReasons(
+            isJev = true,
+            jevContext = jevContext,
+            continuousUsedMs = 1140_000L,
+            ambient = ambient,
+            shortformAppName = null,
+            localTime = LocalTime.of(15, 0),
+            categoryDurationsMs = categories
+        )
+
+        assertTrue("Expected Shorts 12m first, got $reasons", reasons.first().contains("YouTube 쇼츠를 12분째"))
+    }
+
+    @Test
+    fun evenlyMixedMultiAppSessionSummarizesTotalWithoutMisattribution() {
+        val jevContext = JevContext(
+            sessionId = "mix2",
+            packageName = "ALL",
+            sessionMs = 1200_000L,
+            continuousMs = 1200_000L, // 환산 20분 (쇼츠6 + 피드5 + 게임4 + 롱폼5)
+            rawShortformMs = 360_000L,
+            rawGeneralMs = 1980_000L,
+            returns10m = 0,
+            returnsObservedSeconds = 600,
+            bedtimePassedMinutes = null,
+            observedAt = 0L,
+            ambientLux = 200f,
+            screenBrightness = 150
+        )
+        val categories = mapOf(
+            SessionAppCategory.YOUTUBE_SHORTS to 6 * 60_000L,
+            SessionAppCategory.FEED_SNS to 10 * 60_000L,
+            SessionAppCategory.GAME to 8 * 60_000L,
+            SessionAppCategory.YOUTUBE_LONGFORM to 15 * 60_000L
+        )
+
+        val reasons = InterventionReasonResolver.resolveReasons(
+            isJev = true,
+            jevContext = jevContext,
+            continuousUsedMs = 1200_000L,
+            ambient = null,
+            shortformAppName = null,
+            localTime = LocalTime.of(15, 0),
+            categoryDurationsMs = categories
+        )
+
+        assertTrue("Expected multi-app 39m summary, got $reasons", reasons.first().contains("여러 앱을 쉬지 않고 연속 39분째"))
+    }
+
+    @Test
+    fun strongSwipeOverheatBeatsShortWatchTimeByContributionScore() {
+        val jevContext = JevContext(
+            sessionId = "overheat1",
+            packageName = "com.google.android.youtube",
+            sessionMs = 360_000L,
+            continuousMs = 360_000L, // 6분
+            rawShortformMs = 360_000L,
+            returns10m = 0,
+            returnsObservedSeconds = 600,
+            bedtimePassedMinutes = null,
+            observedAt = 0L,
+            effectiveSpm1m = 15.0,
+            fastSwipeStreak = 4,
+            swipeOverheated = true, // -10%p
+            ambientLux = 200f,
+            screenBrightness = 150
+        )
+        val categories = mapOf(
+            SessionAppCategory.YOUTUBE_SHORTS to 6 * 60_000L
+        )
+
+        val reasons = InterventionReasonResolver.resolveReasons(
+            isJev = true,
+            jevContext = jevContext,
+            continuousUsedMs = 360_000L,
+            ambient = null,
+            shortformAppName = "YouTube 쇼츠",
+            localTime = LocalTime.of(15, 0),
+            categoryDurationsMs = categories
+        )
+
+        assertTrue("Expected swipe overheat #1 over 6m watch, got $reasons", reasons[0].contains("분당 15회"))
+        assertTrue("Expected Shorts 6m #2, got $reasons", reasons[1].contains("YouTube 쇼츠를 6분째"))
+    }
+
+    @Test
+    fun preBedtimeDarkRoomGetsExtraWeightOverAvgExcessAndWatchTime() {
+        val jevContext = JevContext(
+            sessionId = "prebed1",
+            packageName = "com.instagram.android",
+            sessionMs = 900_000L,
+            continuousMs = 900_000L, // 15분
+            rawShortformMs = 900_000L,
+            returns10m = 0,
+            returnsObservedSeconds = 600,
+            bedtimePassedMinutes = null,
+            bedtimeDistanceMinutes = -40,
+            observedAt = 0L,
+            personalAvgSessionMinutes = 8.0,
+            sessionVsAvgRatio = 1.875, // -10%p
+            ambientLux = 3f,
+            screenBrightness = 160
+        )
+        val ambient = AmbientSnapshot(
+            lux = 3f,
+            proximityDistanceCm = 5f,
+            proximityMaxRangeCm = 5f,
+            isNear = false,
+            isOccluded = false,
+            screenBrightness = 160,
+            nightModeActive = true,
+            stateLabel = "취침 지연 과몰입 상태",
+            explanation = "test",
+            bedtimePhase = BedtimePhase.APPROACHING,
+            bedtimeDistanceMinutes = -40,
+            userEnvironmentState = UserEnvironmentState.BEDTIME_DELAY_WATCH
+        )
+        val categories = mapOf(
+            SessionAppCategory.INSTA_REELS to 15 * 60_000L
+        )
+
+        val reasons = InterventionReasonResolver.resolveReasons(
+            isJev = true,
+            jevContext = jevContext,
+            continuousUsedMs = 900_000L,
+            ambient = ambient,
+            shortformAppName = "Instagram 릴스",
+            localTime = LocalTime.of(22, 50),
+            categoryDurationsMs = categories
+        )
+
+        assertTrue("Expected pre-bedtime dark room #1, got $reasons", reasons[0].contains("취침 40분 전") && reasons[0].contains("어두운"))
+    }
+
+    @Test
+    fun daytimePitchDarkRoomGetsExtraWeightOverAvgExcess() {
+        val jevContext = JevContext(
+            sessionId = "daydark1",
+            packageName = "com.google.android.youtube",
+            sessionMs = 720_000L,
+            continuousMs = 720_000L, // 12분
+            rawShortformMs = 720_000L,
+            returns10m = 0,
+            returnsObservedSeconds = 600,
+            bedtimePassedMinutes = null,
+            observedAt = 0L,
+            personalAvgSessionMinutes = 6.0,
+            sessionVsAvgRatio = 2.0, // -10%p
+            ambientLux = 2f,
+            screenBrightness = 180
+        )
+        val ambient = AmbientSnapshot(
+            lux = 2f,
+            proximityDistanceCm = 5f,
+            proximityMaxRangeCm = 5f,
+            isNear = false,
+            isOccluded = false,
+            screenBrightness = 180,
+            nightModeActive = false,
+            stateLabel = "활동 시간대 암실 시청 상태",
+            explanation = "test",
+            bedtimePhase = BedtimePhase.ACTIVE_HOURS,
+            userEnvironmentState = UserEnvironmentState.INDOOR_DARK_ACTIVE
+        )
+        val categories = mapOf(
+            SessionAppCategory.YOUTUBE_SHORTS to 12 * 60_000L
+        )
+
+        val reasons = InterventionReasonResolver.resolveReasons(
+            isJev = true,
+            jevContext = jevContext,
+            continuousUsedMs = 720_000L,
+            ambient = ambient,
+            shortformAppName = "YouTube 쇼츠",
+            localTime = LocalTime.of(14, 0),
+            categoryDurationsMs = categories
+        )
+
+        assertTrue("Expected pitch-dark room #1, got $reasons", reasons[0].contains("어두운 곳에서 밝은 화면"))
+        assertTrue("Expected avg excess #2, got $reasons", reasons[1].contains("평소 평균(6분)보다 6분"))
     }
 }

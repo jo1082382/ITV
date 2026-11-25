@@ -8,6 +8,7 @@ internal interface CoachingProgressEffects {
     fun status(value: String)
     fun hideOffer()
     fun showOffer()
+    fun onRestCompleted() {}
 }
 
 /** Main-thread orchestration of the existing TEST policy; owns no Android objects. */
@@ -32,10 +33,14 @@ internal class CoachingProgressCoordinator(
         offerVisible: Boolean,
         isShortform: Boolean = false,
         paused: Boolean = false,
-        weightTier: UsageWeightTier? = null
+        weightTier: UsageWeightTier? = null,
+        requiredRestMs: Long = TestCoachingPolicy.REST_MS
     ): Boolean {
         val resolvedTier = weightTier ?: if (isShortform) UsageWeightTier.FULL_1_TO_1 else UsageWeightTier.LOW_1_TO_3
-        if (usageClock.observe(now, using, resolvedTier, paused)) reset()
+        if (usageClock.observe(now, using, resolvedTier, paused, restThresholdMs = requiredRestMs)) {
+            reset()
+            effects.onRestCompleted()
+        }
         if (!using) {
             safeSince = null
             if (offerVisible) { effects.hideOffer(); responseController.offered = false }

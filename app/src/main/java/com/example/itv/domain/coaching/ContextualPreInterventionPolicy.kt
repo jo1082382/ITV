@@ -22,7 +22,10 @@ data class PreInterventionDecision(
 )
 
 object ContextualPreInterventionPolicy {
-    const val DARK_LUX_THRESHOLD = 15f
+    /** 전 모듈(조도 트래커·사전 개입·Jev 임계값·말풍선 사유) 공통 암실 조도 기준 (20 lx 이하) */
+    const val DARK_LUX_THRESHOLD = 20f
+    /** 완전 암실 기준 (5 lx 이하 → 암실 강도 100%) */
+    const val FULL_DARK_LUX_THRESHOLD = 5f
 
     // 정규 모드 기준 (등가 연속 사용 시간 / 암실 체류 시간)
     const val POST_BEDTIME_DARK_MIN_USED_MS = 3 * 60_000L

@@ -692,7 +692,7 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         val isNear = proximity != null && (proximity < maxRange || proximity == 0f)
         val isOccluded = isNear && (lux == null || lux <= 10f)
 
-        val isDarkAmbient = lux != null && lux <= 15f
+        val isDarkAmbient = lux != null && lux <= com.example.itv.domain.coaching.ContextualPreInterventionPolicy.DARK_LUX_THRESHOLD
         val isBrightAmbient = lux != null && lux > 150f
         val isVeryBrightAmbient = lux != null && lux > 1000f
         val isDarkScreen = brightness != null && brightness <= 75

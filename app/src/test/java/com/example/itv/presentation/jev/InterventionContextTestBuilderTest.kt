@@ -83,9 +83,38 @@ class InterventionContextTestBuilderTest {
             continuousUsedMs = built.jevContext.continuousMs,
             ambient = built.ambient,
             shortformAppName = built.shortformAppName,
-            localTime = built.simulatedLocalTime
+            localTime = built.simulatedLocalTime,
+            categoryDurationsMs = built.categoryDurationsMs
         )
         assertTrue(reasons.none { it.contains("취침") || it.contains("어두운") })
         assertTrue(reasons.any { it.contains("유튜브 영상") && it.contains("36분") })
+    }
+
+    @Test
+    fun `혼합 세션에서 가중치 기여도가 가장 큰 쇼츠가 롱폼보다 우선 설명된다`() {
+        val built = InterventionContextTestBuilder.build(
+            minutes = CategoryMinutesInput(
+                youtubeShorts = 12,   // 환산 12분 (1위)
+                youtubeLongform = 15, // 환산 5분
+                docMessenger = 6      // 환산 2분
+            ),
+            foregroundOverride = InterventionTestCategory.YOUTUBE_LONGFORM,
+            lux = 180f,
+            screenBrightness = 150,
+            baseBedtimeHour = 23,
+            baseBedtimeMinute = 30,
+            bedtimeOffsetMinutes = -300
+        )
+
+        val reasons = InterventionReasonResolver.resolveReasons(
+            isJev = true,
+            jevContext = built.jevContext,
+            continuousUsedMs = built.jevContext.continuousMs,
+            ambient = built.ambient,
+            shortformAppName = built.shortformAppName,
+            localTime = built.simulatedLocalTime,
+            categoryDurationsMs = built.categoryDurationsMs
+        )
+        assertTrue("Expected Shorts 12m as dominant contributor, got $reasons", reasons.first().contains("YouTube 쇼츠를 12분째"))
     }
 }

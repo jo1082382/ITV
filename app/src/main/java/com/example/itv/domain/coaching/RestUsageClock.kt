@@ -46,8 +46,15 @@ internal class RestUsageClock(private val requiredRestMs: Long) {
     /**
      * @param weightTier 3단계 가중치 ([UsageWeightTier.FULL_1_TO_1]=1:1, [UsageWeightTier.MID_1_TO_2]=1:2, [UsageWeightTier.LOW_1_TO_3]=1:3)
      * @param paused true이면 우리 앱(ITV) 확인 또는 비측정 시스템 화면 체류 중으로, 사용량과 휴식 시간을 모두 보존(일시정지)
+     * @param restThresholdMs 자발적 휴식 인정 기준 시간 (테스트 모드 15초 / Jev 모드 180초)
      */
-    fun observe(now: Long, using: Boolean, weightTier: UsageWeightTier, paused: Boolean = false): Boolean {
+    fun observe(
+        now: Long,
+        using: Boolean,
+        weightTier: UsageWeightTier,
+        paused: Boolean = false,
+        restThresholdMs: Long = requiredRestMs
+    ): Boolean {
         if (paused) {
             lastAt = now
             lastUsing = null
@@ -70,7 +77,7 @@ internal class RestUsageClock(private val requiredRestMs: Long) {
         if (known && previous == false && !using) restMs += delta
         if (using) restMs = 0L
         lastAt = now; lastUsing = using
-        if (restMs >= requiredRestMs) {
+        if (restMs >= restThresholdMs) {
             clear()
             return true
         }
