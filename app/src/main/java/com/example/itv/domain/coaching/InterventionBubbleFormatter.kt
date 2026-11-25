@@ -108,8 +108,9 @@ object InterventionBubbleFormatter {
         if (hasDark) {
             val min = NUM_MIN_REGEX.find(r)?.groupValues?.get(1)
             return when {
+                r.contains("밝은 화면") -> ReasonBadge("⚠️ 암실·밝은 화면", isAlert = true)
+                r.contains("어두운 화면") -> ReasonBadge("🌙 암실·어두운 화면", isAlert = true)
                 min != null -> ReasonBadge("🌑 암실 ${min}분", isAlert = true)
-                r.contains("밝은 화면") -> ReasonBadge("🌑 어두운 곳·밝음", isAlert = true)
                 else -> ReasonBadge("🌑 어두운 환경", isAlert = true)
             }
         }

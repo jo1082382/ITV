@@ -27,6 +27,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.example.itv.R
+import com.example.itv.domain.coaching.KoreanTextWrapUtils
 import com.example.itv.infrastructure.observation.LightAndBrightnessTracker
 import com.example.itv.infrastructure.observation.accessibility.WritingGuardService
 import com.example.itv.infrastructure.sleep.AsmrAudioPlayer
@@ -311,7 +312,7 @@ class BedtimeCareController private constructor(private val context: Context) {
             gravity = Gravity.CENTER_VERTICAL
         }
         val titleText = TextView(context).apply {
-            text = "오늘 밤, 잠들기 어려운 이유가 무엇인가요?"
+            text = KoreanTextWrapUtils.preventAwkwardWrap("오늘 밤, 잠들기 어려운 이유가 무엇인가요?")
             textSize = 15.5f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
@@ -321,7 +322,7 @@ class BedtimeCareController private constructor(private val context: Context) {
         bubbleContent.addView(titleRow)
 
         val desc = TextView(context).apply {
-            text = "지금 겪고 계신 상태에 맞춰 편안한 밤을 도와드릴게요."
+            text = KoreanTextWrapUtils.preventAwkwardWrap("지금 겪고 계신 상태에 맞춰 편안한 밤을 도와드릴게요.")
             textSize = 12f
             setTextColor(Color.parseColor("#94A3B8"))
             setPadding(0, dp(8), 0, dp(14))
@@ -339,13 +340,13 @@ class BedtimeCareController private constructor(private val context: Context) {
                 setOnClickListener { onClick() }
             }
             val mainView = TextView(context).apply {
-                text = mainTitle
+                text = KoreanTextWrapUtils.preventAwkwardWrap(mainTitle)
                 textSize = 14f
                 typeface = Typeface.DEFAULT_BOLD
                 setTextColor(Color.parseColor("#F8FAFC"))
             }
             val subView = TextView(context).apply {
-                text = subTitle
+                text = KoreanTextWrapUtils.preventAwkwardWrap(subTitle)
                 textSize = 11.5f
                 setTextColor(Color.parseColor("#64748B"))
                 setPadding(0, dp(3), 0, 0)
@@ -417,31 +418,53 @@ class BedtimeCareController private constructor(private val context: Context) {
             if (root.parent == null) return@post
             val w = root.width.takeIf { it > 0 } ?: context.resources.displayMetrics.widthPixels
             val h = root.height.takeIf { it > 0 } ?: context.resources.displayMetrics.heightPixels
+            val isLandscape = w > h
 
-            val targetDogSize = dp(120)
-            val startY = dp(40)
-            val endY = h - targetDogSize - dp(45)
+            val targetDogSize = if (isLandscape) minOf(dp(104), (h * 0.34f).toInt()) else dp(120)
+            val startY = if (isLandscape) dp(18) else dp(40)
+            val endY = if (isLandscape) {
+                (h - targetDogSize - dp(24)).coerceAtLeast(dp(24))
+            } else {
+                h - targetDogSize - dp(45)
+            }
+            val dogEndX = if (isLandscape) {
+                (w - targetDogSize - dp(36)).coerceAtLeast((w * 0.68f).toInt())
+            } else {
+                (w - targetDogSize) / 2
+            }
 
             dogView.layoutParams = FrameLayout.LayoutParams(targetDogSize, targetDogSize)
-            dogView.translationX = (w - targetDogSize) / 2f
+            dogView.translationX = dogEndX.toFloat()
             dogView.translationY = startY.toFloat()
             dogView.scaleX = 0.5f
             dogView.scaleY = 0.5f
 
-            spotlightView.layoutParams = FrameLayout.LayoutParams(dp(220), dp(130))
-            spotlightView.translationX = (w - dp(220)) / 2f
+            val spotW = if (isLandscape) dp(170) else dp(220)
+            val spotH = if (isLandscape) dp(105) else dp(130)
+            spotlightView.layoutParams = FrameLayout.LayoutParams(spotW, spotH)
+            spotlightView.translationX = (dogEndX + targetDogSize / 2 - spotW / 2).toFloat()
             spotlightView.translationY = (endY - dp(5)).toFloat()
 
             dogHint.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
             val hintW = dogHint.measuredWidth
             dogHint.layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT)
-            dogHint.translationX = (w - hintW) / 2f
-            dogHint.translationY = (endY - dp(32)).toFloat()
+            dogHint.translationX = (dogEndX + targetDogSize / 2 - hintW / 2)
+                .coerceIn(dp(12), (w - hintW - dp(12)).coerceAtLeast(dp(12))).toFloat()
+            dogHint.translationY = (endY - dp(32)).coerceAtLeast(dp(12)).toFloat()
 
-            val bubbleW = minOf(dp(330), w - dp(32))
-            bubbleCard.layoutParams = FrameLayout.LayoutParams(bubbleW, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
-                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-                bottomMargin = (h - endY) + dp(4)
+            if (isLandscape) {
+                val bubbleW = minOf(dp(400), (dogEndX - dp(28)).coerceAtLeast(dp(240)))
+                val bubbleMaxH = (h - dp(24)).coerceAtLeast(dp(180))
+                bubbleCard.layoutParams = FrameLayout.LayoutParams(bubbleW, bubbleMaxH).apply {
+                    gravity = Gravity.CENTER_VERTICAL or Gravity.START
+                    marginStart = dp(16)
+                }
+            } else {
+                val bubbleW = minOf(dp(330), w - dp(32))
+                bubbleCard.layoutParams = FrameLayout.LayoutParams(bubbleW, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
+                    gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                    bottomMargin = (h - endY) + dp(4)
+                }
             }
 
             var arrived = false
@@ -536,13 +559,13 @@ class BedtimeCareController private constructor(private val context: Context) {
         }
 
         val headerText = TextView(context).apply {
-            text = "📝 내일 할 일 & 머릿속 생각 털어내기"
+            text = KoreanTextWrapUtils.preventAwkwardWrap("📝 내일 할 일 & 머릿속 생각 털어내기")
             textSize = 15f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
         }
         val guideText = TextView(context).apply {
-            text = "머릿속에서 맴도는 할 일 2~3가지를 가볍게 적어보세요.\n적어둔 내용은 강아지가 안전하게 보관했다가,\n내일 아침 기상 시 첫 화면으로 알려줄게요!"
+            text = KoreanTextWrapUtils.preventAwkwardWrap("머릿속에서 맴도는 할 일 2~3가지를 가볍게 적어보세요.\n적어둔 내용은 강아지가 안전하게 보관했다가,\n내일 아침 기상 시 첫 화면으로 알려줄게요!")
             textSize = 12f
             setTextColor(Color.parseColor("#94A3B8"))
             setPadding(0, dp(8), 0, dp(12))

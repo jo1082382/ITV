@@ -25,6 +25,7 @@ import androidx.compose.ui.unit.sp
 import com.example.itv.domain.coaching.CharacterIntensity
 import com.example.itv.domain.coaching.CoachingTone
 import com.example.itv.domain.coaching.InterventionReasonResolver
+import com.example.itv.domain.coaching.KoreanTextWrapUtils
 import com.example.itv.domain.coaching.ReasonBadge
 import com.example.itv.domain.coaching.UsageWeightTier
 import com.example.itv.domain.jev.JevCandidatePolicy
@@ -706,9 +707,9 @@ internal fun InterventionContextBubbleTestPage(
                         }
                     }
 
-                    // 2번 요소: 15자 이내 초단문 헤드라인 + 어절 줄바꿈
+                    // 2번 요소: 15자 이내 초단문 헤드라인 + 어절 줄바꿈 + NBSP 보호
                     Text(
-                        text = previewBubble.headline,
+                        text = KoreanTextWrapUtils.preventAwkwardWrap(previewBubble.headline),
                         style = MaterialTheme.typography.titleSmall.copy(
                             lineBreak = LineBreak.Heading
                         ),
@@ -721,7 +722,7 @@ internal fun InterventionContextBubbleTestPage(
                     // 2번 요소: 작고 연한 보조 안내 1줄
                     previewBubble.subline?.let { sub ->
                         Text(
-                            text = sub,
+                            text = KoreanTextWrapUtils.preventAwkwardWrap(sub),
                             style = MaterialTheme.typography.labelSmall.copy(
                                 lineBreak = LineBreak.Heading
                             ),
@@ -1293,21 +1294,22 @@ private fun PreviewReasonBadgeChip(badge: ReasonBadge) {
     val borderColor = if (badge.isAlert) Color(0xFFF5B7B1) else Color(0xFFA5D6A7)
     val baseColor = if (badge.isAlert) Color(0xFFB42318) else Color(0xFF1B5E20)
     val accentColor = if (badge.isAlert) Color(0xFF912018) else Color(0xFF0F5132)
-    val annotated = remember(badge.text, badge.isAlert) {
+    val wrappedBadgeText = remember(badge.text) { KoreanTextWrapUtils.preventAwkwardWrap(badge.text) }
+    val annotated = remember(wrappedBadgeText, badge.isAlert) {
         val pattern = Regex("""[+\-]?\d+(?:\.\d+)?[분초편회개배%]?""")
         buildAnnotatedString {
             var cursor = 0
-            pattern.findAll(badge.text).forEach { m ->
+            pattern.findAll(wrappedBadgeText).forEach { m ->
                 if (m.range.first > cursor) {
-                    append(badge.text.substring(cursor, m.range.first))
+                    append(wrappedBadgeText.substring(cursor, m.range.first))
                 }
                 withStyle(SpanStyle(color = accentColor, fontWeight = FontWeight.ExtraBold)) {
                     append(m.value)
                 }
                 cursor = m.range.last + 1
             }
-            if (cursor < badge.text.length) {
-                append(badge.text.substring(cursor))
+            if (cursor < wrappedBadgeText.length) {
+                append(wrappedBadgeText.substring(cursor))
             }
         }
     }

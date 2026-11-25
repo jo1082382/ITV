@@ -1,17 +1,18 @@
 package com.example.itv.presentation.components
 
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
+import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
@@ -28,11 +29,65 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.fastForEach
 import androidx.compose.ui.util.fastForEachIndexed
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import com.example.itv.infrastructure.theme.SeasonThemeMode
 import com.example.itv.infrastructure.theme.UserThemeStore
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
+
+/**
+ * 스크롤 중이거나 오버레이/드로어가 열려 있을 때 계절 배경·전경 파티클 애니메이션을
+ * 0fps로 일시정지시켜 메인 스레드와 GPU를 스크롤 렌더링에 100% 양보하는 컨트롤러.
+ */
+class SeasonalAnimationController {
+    var scrollPaused by mutableStateOf(false)
+    var overlayPaused by mutableStateOf(false)
+    val isPaused: Boolean get() = scrollPaused || overlayPaused
+}
+
+val LocalSeasonalAnimationController = compositionLocalOf<SeasonalAnimationController?> { null }
+
+/**
+ * 풀스크린 계절 파티클을 60~120fps 무한 Choreographer 콜백 대신 저전력 20fps(50ms)로 스로틀링하고,
+ * 스크롤 중 또는 Activity 비활성(ON_PAUSE/ON_STOP) 시 0fps로 즉시 정지시키는 공유 시계.
+ * State<Long>을 반환하므로 Draw 단계(onDrawBehind)에서만 읽어 Compose 재구성을 전혀 유발하지 않습니다.
+ */
+@Composable
+internal fun rememberThrottledSeasonalTimeMs(
+    frameIntervalMs: Long = 50L
+): State<Long> {
+    val controller = LocalSeasonalAnimationController.current
+    val paused = controller?.isPaused == true
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val timeMs = remember { mutableLongStateOf(0L) }
+
+    LaunchedEffect(lifecycleOwner, paused, frameIntervalMs) {
+        if (paused) return@LaunchedEffect
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            var lastWall = android.os.SystemClock.uptimeMillis()
+            while (isActive) {
+                delay(frameIntervalMs)
+                val now = android.os.SystemClock.uptimeMillis()
+                val dt = (now - lastWall).coerceIn(0L, 250L)
+                lastWall = now
+                timeMs.longValue += dt
+            }
+        }
+    }
+    return timeMs
+}
+
+internal fun pingPongFraction(elapsedMs: Long, halfCycleMs: Long): Float {
+    val cycle = (halfCycleMs * 2L).coerceAtLeast(2L)
+    val phase = (elapsedMs % cycle).toFloat() / halfCycleMs.toFloat()
+    return 1f - abs(phase - 1f)
+}
 
 private data class SeasonalParticle(
     val xFraction: Float,
@@ -338,27 +393,9 @@ private fun SeasonalAnimatedParticlesLayer(
     modifier: Modifier = Modifier
 ) {
     val particles = remember { buildParticles() }
-    val transition = rememberInfiniteTransition(label = "itvSeasonalBgAnim")
-    val driftState = transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 22000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "seasonalDrift"
-    )
-    val twinkleState = transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 3000, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "seasonalTwinkle"
-    )
+    val timeMsState = rememberThrottledSeasonalTimeMs(frameIntervalMs = 50L)
 
-    // Dedicated hardware RenderNode isolates 60-120fps particle ticks from Scaffold/LazyColumn
+    // Dedicated hardware RenderNode isolates 20fps (0fps during scroll) particle ticks from Scaffold/LazyColumn
     Box(
         modifier = modifier
             .graphicsLayer()
@@ -458,8 +495,9 @@ private fun SeasonalAnimatedParticlesLayer(
             val hPad15 = 15.dp.toPx()
 
             onDrawBehind {
-                val drift = driftState.value
-                val twinkle = twinkleState.value
+                val elapsed = timeMsState.value
+                val drift = (elapsed % 22_000L) / 22_000f
+                val twinkle = pingPongFraction(elapsed, 3_000L)
 
                 when (activeSeason) {
                     SeasonThemeMode.WINTER -> {

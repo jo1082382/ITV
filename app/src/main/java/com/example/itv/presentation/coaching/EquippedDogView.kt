@@ -1,8 +1,11 @@
 package com.example.itv.presentation.coaching
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.drawable.Drawable
 import android.util.AttributeSet
+import android.util.LruCache
 import android.view.View
 import android.widget.FrameLayout
 import android.widget.ImageView
@@ -10,10 +13,16 @@ import androidx.annotation.DrawableRes
 import com.example.itv.R
 import com.example.itv.domain.equip.EquipSlot
 import com.example.itv.infrastructure.equip.UserEquipStore
+import java.util.concurrent.Executors
 
 /**
  * 숏폼 개입/코칭 및 프리뷰 시 강아지의 달리기 프레임별 신체 랜드마크(눈·코·머리 각도)를 실시간 추적하여
- * 착용한 코디 아이템들이 강아지의 움직임에 완벽히 동기화되어 달려오도록 하는 커스텀 뷰
+ * 착용한 코디 아이템들이 강아지의 움직임에 완벽히 동기화되어 달려오도록 하는 커스텀 뷰.
+ *
+ * 성능 최적화:
+ * - 400x400 달리기 스프라이트를 LruCache에 사전 디코딩하여 프레임 전환 시 메인 스레드 PNG 디코딩 제거
+ * - 동일 리소스 재설정 무시(early-out)로 불필요한 invalidation 차단
+ * - 스프라이트 프레임 교체 시 requestLayout() 대신 GPU translation/scale/rotation만 갱신
  */
 class EquippedDogView @JvmOverloads constructor(
     context: Context,
@@ -38,6 +47,43 @@ class EquippedDogView @JvmOverloads constructor(
     )
 
     companion object {
+        // 400x400 스프라이트 약 24~26장(장당 ~640KB)을 메모리에 캐시하여 애니메이션 중 디코딩 0회 유지
+        private const val SPRITE_CACHE_KB = 18 * 1024
+        private val spriteCache = object : LruCache<Int, Bitmap>(SPRITE_CACHE_KB) {
+            override fun sizeOf(key: Int, value: Bitmap): Int = (value.byteCount / 1024).coerceAtLeast(1)
+        }
+        private val preloadExecutor = Executors.newSingleThreadExecutor()
+
+        /**
+         * 애니메이션 시작 직전 백그라운드 스레드에서 스프라이트 프레임을 미리 디코딩해 둡니다.
+         */
+        fun preloadSprites(context: Context, resIds: IntArray) {
+            val appCtx = context.applicationContext
+            preloadExecutor.execute {
+                for (resId in resIds) {
+                    if (resId == 0 || spriteCache.get(resId) != null) continue
+                    decodeAndCache(appCtx, resId)
+                }
+            }
+        }
+
+        private fun getOrDecodeSprite(context: Context, @DrawableRes resId: Int): Bitmap? {
+            if (resId == 0) return null
+            spriteCache.get(resId)?.let { return it }
+            return decodeAndCache(context.applicationContext, resId)
+        }
+
+        private fun decodeAndCache(appCtx: Context, @DrawableRes resId: Int): Bitmap? {
+            return runCatching {
+                val opts = BitmapFactory.Options().apply {
+                    inPreferredConfig = Bitmap.Config.ARGB_8888
+                }
+                BitmapFactory.decodeResource(appCtx.resources, resId, opts)?.also { bmp ->
+                    spriteCache.put(resId, bmp)
+                }
+            }.getOrNull()
+        }
+
         // 400x400 원본 해상도 기준 각 달리기 프레임별 정밀 랜드마크 (발구름 각도 feetAngle 포함)
         private val FRAME_LANDMARKS = mapOf(
             // 프레임 0: 안기려고 점프하는 자세
@@ -97,8 +143,12 @@ class EquippedDogView @JvmOverloads constructor(
     private val hatLayer = ImageView(context).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
 
     private var currentSpriteRes: Int = 0
+    private var hasAnyEquipped: Boolean = false
+    private var lastLaidOutWidth: Int = 0
 
     init {
+        clipChildren = false
+        clipToPadding = false
         addView(baseDog)
         addView(clothesLayer)
         addView(shoesLayer)
@@ -109,34 +159,51 @@ class EquippedDogView @JvmOverloads constructor(
     }
 
     fun setImageResource(@DrawableRes resId: Int) {
-        baseDog.setImageResource(resId)
-        if (currentSpriteRes != resId) {
-            currentSpriteRes = resId
-            requestLayout()
+        if (currentSpriteRes == resId && resId != 0) return
+        currentSpriteRes = resId
+        val cached = getOrDecodeSprite(context, resId)
+        if (cached != null) {
+            baseDog.setImageBitmap(cached)
+        } else {
+            baseDog.setImageResource(resId)
+        }
+        // 이미 레이아웃된 상태라면 requestLayout() 없이 GPU 속성(translation/scale/rotation)만 즉시 동기화
+        if (hasAnyEquipped && width > 0 && height > 0) {
+            applyEquippedTransforms(width)
         }
     }
 
     fun setImageDrawable(drawable: Drawable?) {
+        currentSpriteRes = 0
         baseDog.setImageDrawable(drawable)
     }
 
     fun refreshEquipped() {
         val equipped = UserEquipStore.getEquipped(context)
-        updateLayer(clothesLayer, equipped[EquipSlot.CLOTHES]?.iconRes)
-        updateLayer(shoesLayer, equipped[EquipSlot.SHOES]?.iconRes)
-        updateLayer(noseLayer, equipped[EquipSlot.NOSE_MOUTH]?.iconRes)
-        updateLayer(glassesLayer, equipped[EquipSlot.GLASSES]?.iconRes)
-        updateLayer(hatLayer, equipped[EquipSlot.HAT]?.iconRes)
+        val hasClothes = updateLayer(clothesLayer, equipped[EquipSlot.CLOTHES]?.iconRes)
+        val hasShoes = updateLayer(shoesLayer, equipped[EquipSlot.SHOES]?.iconRes)
+        val hasNose = updateLayer(noseLayer, equipped[EquipSlot.NOSE_MOUTH]?.iconRes)
+        val hasGlasses = updateLayer(glassesLayer, equipped[EquipSlot.GLASSES]?.iconRes)
+        val hasHat = updateLayer(hatLayer, equipped[EquipSlot.HAT]?.iconRes)
+        hasAnyEquipped = hasClothes || hasShoes || hasNose || hasGlasses || hasHat
+        lastLaidOutWidth = 0
         requestLayout()
     }
 
-    private fun updateLayer(layer: ImageView, @DrawableRes resId: Int?) {
-        if (resId != null) {
-            layer.setImageResource(resId)
+    private fun updateLayer(layer: ImageView, @DrawableRes resId: Int?): Boolean {
+        return if (resId != null) {
+            val cached = getOrDecodeSprite(context, resId)
+            if (cached != null) {
+                layer.setImageBitmap(cached)
+            } else {
+                layer.setImageResource(resId)
+            }
             layer.visibility = View.VISIBLE
+            true
         } else {
             layer.setImageDrawable(null)
             layer.visibility = View.GONE
+            false
         }
     }
 
@@ -144,8 +211,30 @@ class EquippedDogView @JvmOverloads constructor(
         super.onLayout(changed, left, top, right, bottom)
         val w = right - left
         val h = bottom - top
-        if (w <= 0 || h <= 0) return
+        if (w <= 0 || h <= 0 || !hasAnyEquipped) return
 
+        // 각 코디 레이어의 기본 박스 크기는 View 너비가 바뀔 때만 1회 layout(0, 0, box, box) 설정
+        if (changed || lastLaidOutWidth != w) {
+            val scale = w.toFloat() / 400f
+            layoutOriginBox(hatLayer, 180f * scale)
+            layoutOriginBox(glassesLayer, (DEFAULT_LANDMARK.eyeSpan / 0.37f) * scale)
+            layoutOriginBox(noseLayer, 75f * scale)
+            layoutOriginBox(clothesLayer, 240f * scale)
+            layoutOriginBox(shoesLayer, 180f * scale)
+            lastLaidOutWidth = w
+        }
+        applyEquippedTransforms(w)
+    }
+
+    private fun layoutOriginBox(v: View, sizePx: Float) {
+        if (v.visibility != View.VISIBLE) return
+        val box = sizePx.toInt().coerceAtLeast(1)
+        v.layout(0, 0, box, box)
+        v.pivotX = box / 2f
+        v.pivotY = box / 2f
+    }
+
+    private fun applyEquippedTransforms(w: Int) {
         val landmark = FRAME_LANDMARKS[currentSpriteRes] ?: DEFAULT_LANDMARK
         val scale = w.toFloat() / 400f
 
@@ -154,17 +243,19 @@ class EquippedDogView @JvmOverloads constructor(
             val hatBoxSize = 180f * scale
             val cx = landmark.headTopX * scale
             val cy = (landmark.headTopY + 45f) * scale
-            layoutCenter(hatLayer, cx, cy, hatBoxSize, hatBoxSize)
-            hatLayer.rotation = landmark.eyeAngle
+            positionLayer(hatLayer, cx, cy, hatBoxSize, landmark.eyeAngle)
         }
 
         // 2. 안경 (양 눈 중심점 및 안경알 거리 완벽 동기화 + 눈 기울기 회전각)
         if (glassesLayer.visibility == View.VISIBLE) {
-            val glassesBoxSize = (landmark.eyeSpan / 0.37f) * scale
+            val baseBoxSize = (DEFAULT_LANDMARK.eyeSpan / 0.37f) * scale
+            val targetBoxSize = (landmark.eyeSpan / 0.37f) * scale
+            val ratio = (targetBoxSize / baseBoxSize).coerceIn(0.5f, 1.5f)
             val cx = landmark.eyeCenterX * scale
-            val cy = landmark.eyeCenterY * scale - (glassesBoxSize * 0.17f)
-            layoutCenter(glassesLayer, cx, cy, glassesBoxSize, glassesBoxSize)
-            glassesLayer.rotation = landmark.eyeAngle
+            val cy = landmark.eyeCenterY * scale - (targetBoxSize * 0.17f)
+            glassesLayer.scaleX = ratio
+            glassesLayer.scaleY = ratio
+            positionLayer(glassesLayer, cx, cy, baseBoxSize, landmark.eyeAngle)
         }
 
         // 3. 코와 입 (머즐 중심점 실시간 추적 + 회전각 동기화)
@@ -172,8 +263,7 @@ class EquippedDogView @JvmOverloads constructor(
             val noseBoxSize = 75f * scale
             val cx = landmark.noseX * scale
             val cy = (landmark.noseY + 4f) * scale
-            layoutCenter(noseLayer, cx, cy, noseBoxSize, noseBoxSize)
-            noseLayer.rotation = landmark.eyeAngle
+            positionLayer(noseLayer, cx, cy, noseBoxSize, landmark.eyeAngle)
         }
 
         // 4. 옷 (강아지 몸통 전체를 포근히 감싸는 핏 + 달리기 가슴 반동 동기화)
@@ -181,8 +271,7 @@ class EquippedDogView @JvmOverloads constructor(
             val clothesBoxSize = 240f * scale
             val cx = landmark.chestX * scale
             val cy = (landmark.chestY - 5f) * scale
-            layoutCenter(clothesLayer, cx, cy, clothesBoxSize, clothesBoxSize)
-            clothesLayer.rotation = landmark.eyeAngle * 0.4f
+            positionLayer(clothesLayer, cx, cy, clothesBoxSize, landmark.eyeAngle * 0.4f)
         }
 
         // 5. 신발 (발의 실제 크기에 맞고 달리기 발구름 각도 feetAngle에 따라 실시간 틸팅)
@@ -190,14 +279,13 @@ class EquippedDogView @JvmOverloads constructor(
             val shoesBoxSize = 180f * scale
             val cx = landmark.feetX * scale
             val cy = (landmark.feetY - 18f) * scale
-            layoutCenter(shoesLayer, cx, cy, shoesBoxSize, shoesBoxSize)
-            shoesLayer.rotation = landmark.feetAngle
+            positionLayer(shoesLayer, cx, cy, shoesBoxSize, landmark.feetAngle)
         }
     }
 
-    private fun layoutCenter(v: View, cx: Float, cy: Float, w: Float, h: Float) {
-        val l = (cx - (w / 2f)).toInt()
-        val t = (cy - (h / 2f)).toInt()
-        v.layout(l, t, (l + w).toInt(), (t + h).toInt())
+    private fun positionLayer(v: View, cx: Float, cy: Float, boxSize: Float, angle: Float) {
+        v.translationX = cx - (boxSize / 2f)
+        v.translationY = cy - (boxSize / 2f)
+        v.rotation = angle
     }
 }

@@ -14,9 +14,11 @@ import com.example.itv.domain.records.DailyHealthTier
 import com.example.itv.domain.records.HourlyUsageBucket
 import com.example.itv.domain.records.NightReport
 import com.example.itv.domain.records.NightSegment
+import com.example.itv.domain.records.PreSleepWeightedWindows
 import com.example.itv.domain.records.Report
 import com.example.itv.domain.records.SleepSummaryPolicy
 import com.example.itv.domain.records.TimeWindowMs
+import com.example.itv.domain.records.WeightedPreSleepUsage
 import com.example.itv.infrastructure.coaching.UserCoachingSettingsStore
 import com.example.itv.infrastructure.records.AndroidRecordSource
 import com.example.itv.infrastructure.storage.shortform.ShortformPersonalStatsStore
@@ -249,9 +251,11 @@ internal object CalendarHealthLoader {
         )
         val globalWindow = weeklySleepProfile?.globalWindow
         val globalEstimatedBedtimeMin = globalWindow?.let { it.avgStartHour * 60 + it.avgStartMinute }
-        val globalRecommendedBedtimeMin = globalWindow?.let {
-            val effSleep = it.avgDurationMinutes.coerceIn(420L, 510L)
-            ((it.avgEndHour * 60 + it.avgEndMinute - effSleep + 2880L) % 1440L).toInt()
+        val globalRecommendedBedtimeStartMin = globalWindow?.let {
+            it.recommendedBedtimeStartHour * 60 + it.recommendedBedtimeStartMinute
+        }
+        val globalRecommendedBedtimeEndMin = globalWindow?.let {
+            it.recommendedBedtimeEndHour * 60 + it.recommendedBedtimeEndMinute
         }
 
         // 데이터가 모자랄 때 사용할 목표 취침 시각 (직접 지정 취침 시각 -> 활성화된 취침 목표 순)
@@ -539,17 +543,21 @@ internal object CalendarHealthLoader {
                 archiveRec?.shortformSpm
             }
 
-            // 해당 밤(다음 날 기상 요일)에 맞는 취침 탭 기준(요일별 평소 추정·권장 취침 -> 전체 평균 -> 목표값) 산출
+            // 해당 밤(다음 날 기상 요일)에 맞는 취침 탭 기준(요일별 평소 추정·권장 취침 시간대 -> 전체 평균 -> 목표값) 산출
             val daySleepProfile = weeklySleepProfile?.dayProfiles?.get(nextDate.dayOfWeek)
             val dateEstimatedBedtimeMin = daySleepProfile?.let { it.avgStartHour * 60 + it.avgStartMinute }
                 ?: globalEstimatedBedtimeMin
-            val dateRecommendedBedtimeMin = daySleepProfile?.let { it.recommendedBedtimeHour * 60 + it.recommendedBedtimeMinute }
-                ?: globalRecommendedBedtimeMin
+            val dateRecommendedBedtimeStartMin = daySleepProfile?.let {
+                it.recommendedBedtimeHour * 60 + it.recommendedBedtimeMinute
+            } ?: globalRecommendedBedtimeStartMin
+            val dateRecommendedBedtimeEndMin = daySleepProfile?.let {
+                it.recommendedBedtimeEndHour * 60 + it.recommendedBedtimeEndMinute
+            } ?: globalRecommendedBedtimeEndMin
             val dateBaselineSleepDurationMin = daySleepProfile?.avgDurationMinutes?.toDouble()
                 ?: globalWindow?.avgDurationMinutes?.toDouble()
-            val datePreSleepFallbackBedtimeMin = dateEstimatedBedtimeMin
+            val datePreSleepFallbackBedtimeMin = dateRecommendedBedtimeStartMin
                 ?: goalBedtimeMin
-                ?: dateRecommendedBedtimeMin
+                ?: dateEstimatedBedtimeMin
 
             // 확정된 과거 날에 수면(>=3h 비사용)이 전혀 없고 실제 야간 활동이 감지되었거나 사용자가 수면 아님을 확인한 경우 -> 밤샘 판정
             val nightStartWallMs = date.atTime(23, 0).atZone(zone).toInstant().toEpochMilli()
@@ -572,46 +580,69 @@ internal object CalendarHealthLoader {
                 nightSleep.sleepDurationMinutes == null &&
                 (nightSleep.hasExplicitNoSleep || nightActivityMinutes >= 10.0 || nightActivitySessionCount >= 2)
 
-            // Pre-sleep window: 실제 비사용 시작점(bedtimeStartWallMs) 기준 직전 1시간,
-            // 미감지 시 개인 추정/목표 취침 시각 기준 직전 1시간부터 적용 (밤샘/수면아님/기준없음 시 null)
-            val preSleepWindow = CalendarDayCyclePolicy.resolvePreSleepWindow(
+            // 권장 취침 시간대의 가장 앞 시각 기준 2시간 전부터 1시간 단위 점증 가중치(2~1h 전 35%, 1~0h 전 65%, 경과 100%) 적용
+            val preSleepWeightedWindows = CalendarDayCyclePolicy.resolveWeightedPreSleepWindows(
                 date = date,
                 today = today,
                 zone = zone,
                 nowWallMs = nowWallMs,
                 cycleBounds = cycleBounds,
+                recommendedBedtimeStartMinute = dateRecommendedBedtimeStartMin,
                 bedtimeStartWallMs = nightSleep.bedtimeStartWallMs,
                 isDateFinalized = isFinalized,
                 fallbackBedtimeMinute = datePreSleepFallbackBedtimeMin,
                 hasExplicitNoSleep = nightSleep.hasExplicitNoSleep || isAllNighter
             )
 
-            val preSleepUsageMin = if (isAllNighter) {
+            val rawPreSleepPhoneWeighted = if (isAllNighter) {
                 null
             } else {
-                computePreSleepPhoneMinutes(
+                computeWeightedPreSleepPhoneUsage(
                     today = today,
                     zone = zone,
                     isDateToday = isDateToday,
                     isDateYesterday = isDateYesterday,
                     isDateFinalized = isFinalized,
-                    preSleepWindow = preSleepWindow,
+                    windows = preSleepWeightedWindows,
                     candidateSessions = candidatePhoneSessions,
                     todayReport = todayReport
-                ) ?: archiveRec?.preSleepUsageMinutes
+                )
             }
-
-            val preSleepShortformMin = if (isAllNighter) {
+            val rawPreSleepUsageMin = if (isAllNighter) {
                 null
             } else {
-                computePreSleepShortformMinutes(
+                rawPreSleepPhoneWeighted?.weightedMinutes ?: archiveRec?.preSleepUsageMinutes
+            }
+
+            val rawPreSleepSfWeighted = if (isAllNighter) {
+                null
+            } else {
+                computeWeightedPreSleepShortformUsage(
                     zone = zone,
                     bedtimeStartWallMs = nightSleep.bedtimeStartWallMs,
-                    preSleepWindow = preSleepWindow,
+                    windows = preSleepWeightedWindows,
                     sfHourBuckets = sfHourBuckets,
                     candidateSfSessions = candidateSfSessions,
                     hasShortformTracking = hasShortformTracking
-                ) ?: archiveRec?.preSleepShortformMinutes
+                )
+            }
+            val preSleepShortformMin = if (isAllNighter) {
+                null
+            } else {
+                rawPreSleepSfWeighted?.weightedMinutes ?: archiveRec?.preSleepShortformMinutes
+            }?.coerceIn(0.0, 60.0)
+
+            // 취침 전 총 화면 사용량은 물리적으로 같은 구간의 숏폼 사용량 이상이어야 함
+            val preSleepUsageMin = when {
+                rawPreSleepUsageMin != null && preSleepShortformMin != null ->
+                    maxOf(rawPreSleepUsageMin, preSleepShortformMin).coerceIn(0.0, 60.0)
+                rawPreSleepUsageMin != null -> rawPreSleepUsageMin.coerceIn(0.0, 60.0)
+                preSleepShortformMin != null && preSleepShortformMin > 0.0 -> preSleepShortformMin
+                else -> null
+            }
+            val isWeightedPreSleepComputed = rawPreSleepPhoneWeighted != null || rawPreSleepSfWeighted != null
+            val preSleepWeightedPercent = preSleepUsageMin?.let {
+                ((it / 60.0) * 100.0).roundToInt().coerceIn(0, 100)
             }
 
             val isRestDay = archiveRec?.dayType == "REST_DAY" ||
@@ -626,11 +657,14 @@ internal object CalendarHealthLoader {
                 wakeupMinute = nightSleep.wakeupMinute,
                 sleepDurationMinutes = nightSleep.sleepDurationMinutes,
                 baselineBedtimeMinute = dateEstimatedBedtimeMin,
-                recommendedBedtimeMinute = dateRecommendedBedtimeMin,
+                recommendedBedtimeMinute = dateRecommendedBedtimeStartMin,
+                recommendedBedtimeEndMinute = dateRecommendedBedtimeEndMin,
                 goalBedtimeMinute = goalBedtimeMin,
                 baselineSleepDurationMinutes = dateBaselineSleepDurationMin,
                 preSleepUsageMinutes = preSleepUsageMin,
                 preSleepShortformMinutes = preSleepShortformMin,
+                isWeightedPreSleep = isWeightedPreSleepComputed,
+                preSleepWeightedPercent = preSleepWeightedPercent,
                 isAllNighter = isAllNighter,
                 hasShortformTracking = hasShortformTracking,
                 shortformTotalMs = shortformMs,
@@ -748,73 +782,79 @@ internal object CalendarHealthLoader {
         bundle
     }
 
-    private fun computePreSleepPhoneMinutes(
+    private fun computeWeightedPreSleepPhoneUsage(
         today: LocalDate,
         zone: ZoneId,
         isDateToday: Boolean,
         isDateYesterday: Boolean,
         isDateFinalized: Boolean,
-        preSleepWindow: TimeWindowMs?,
+        windows: PreSleepWeightedWindows?,
         candidateSessions: List<ShortformPersonalStatsStore.PhoneSessionRecord>,
         todayReport: Report?
-    ): Double? {
-        val window = preSleepWindow ?: return null
+    ): WeightedPreSleepUsage? {
+        val w = windows ?: return null
 
         if (candidateSessions.isNotEmpty()) {
-            return CalendarDayCyclePolicy.computeIntervalsOverlapMinutes(
+            return CalendarDayCyclePolicy.computeWeightedIntervalsUsage(
                 intervals = candidateSessions.map { it.startWallMs to it.endWallMs },
-                window = window
+                windows = w
             )
         }
 
-        // Safe fallback using ONLY hours strictly inside `preSleepWindow` (NEVER today 00:00..02:59 for today!)
+        // Safe fallback using ONLY hours strictly inside `windows` (NEVER today 00:00..02:59 for today!)
         if ((isDateToday || (isDateYesterday && !isDateFinalized)) &&
             todayReport != null &&
             todayReport.values.size == 24
         ) {
-            return CalendarDayCyclePolicy.computeReportMinutesInWindow(
+            return CalendarDayCyclePolicy.computeWeightedReportUsage(
                 date = today,
                 hourlyMinutes = todayReport.values,
-                window = window,
+                windows = w,
                 zone = zone
             )
         }
         return null
     }
 
-    private fun computePreSleepShortformMinutes(
+    private fun computeWeightedPreSleepShortformUsage(
         zone: ZoneId,
         bedtimeStartWallMs: Long?,
-        preSleepWindow: TimeWindowMs?,
+        windows: PreSleepWeightedWindows?,
         sfHourBuckets: List<HourlyUsageBucket>,
         candidateSfSessions: List<ShortformPersonalStatsStore.SessionRecord>,
         hasShortformTracking: Boolean
-    ): Double? {
+    ): WeightedPreSleepUsage? {
         if (!hasShortformTracking) return null
-        val window = preSleepWindow ?: return null
+        val w = windows ?: return null
 
         if (bedtimeStartWallMs != null && candidateSfSessions.isNotEmpty()) {
             val intervals = candidateSfSessions.map { s ->
                 s.startWallMs to (s.startWallMs + s.durationMs).coerceAtLeast(s.updatedWallMs)
             }
-            return CalendarDayCyclePolicy.computeIntervalsOverlapMinutes(intervals, window)
+            return CalendarDayCyclePolicy.computeWeightedIntervalsUsage(intervals, w)
         }
 
         if (sfHourBuckets.isNotEmpty()) {
-            return CalendarDayCyclePolicy.computeHourlyBucketsOverlapMs(
+            return CalendarDayCyclePolicy.computeWeightedHourlyBucketsUsage(
                 buckets = sfHourBuckets,
-                window = window,
+                windows = w,
                 zone = zone
-            ) / 60_000.0
+            )
         }
 
         if (candidateSfSessions.isNotEmpty()) {
             val intervals = candidateSfSessions.map { s ->
                 s.startWallMs to (s.startWallMs + s.durationMs).coerceAtLeast(s.updatedWallMs)
             }
-            return CalendarDayCyclePolicy.computeIntervalsOverlapMinutes(intervals, window)
+            return CalendarDayCyclePolicy.computeWeightedIntervalsUsage(intervals, w)
         }
 
-        return 0.0
+        return WeightedPreSleepUsage(
+            outerMinutes = 0.0,
+            innerMinutes = 0.0,
+            postStartMinutes = 0.0,
+            weightedMinutes = 0.0,
+            weightedPercent = 0
+        )
     }
 }

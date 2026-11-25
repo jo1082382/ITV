@@ -67,6 +67,11 @@ data class AmbientSnapshot(
     val lastTriggerReason: String = "초기 상태",
     val estimatedBedtimeHour: Int? = null,
     val estimatedBedtimeMinute: Int? = null,
+    val recommendedBedtimeStartHour: Int? = null,
+    val recommendedBedtimeStartMinute: Int? = null,
+    val recommendedBedtimeEndHour: Int? = null,
+    val recommendedBedtimeEndMinute: Int? = null,
+    val recommendedBedtimeDistanceMinutes: Int? = null,
     val bedtimeDistanceMinutes: Int? = null,
     val bedtimePhase: BedtimePhase = BedtimePhase.UNKNOWN,
     val userEnvironmentState: UserEnvironmentState = UserEnvironmentState.INDOOR_ACTIVE,
@@ -143,6 +148,10 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
 
     private var estimatedStartHour: Int? = null
     private var estimatedStartMinute: Int? = null
+    private var recommendedStartHour: Int? = null
+    private var recommendedStartMinute: Int? = null
+    private var recommendedEndHour: Int? = null
+    private var recommendedEndMinute: Int? = null
     private var estimatedSource: String = "미측정"
 
     private val _snapshot = MutableStateFlow(
@@ -274,46 +283,80 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
 
                 var h: Int? = null
                 var m: Int? = null
+                var recStartH: Int? = null
+                var recStartM: Int? = null
+                var recEndH: Int? = null
+                var recEndM: Int? = null
                 var src = "기본값 (23:30)"
+
+                val zone = nightReport?.zone ?: ZoneId.systemDefault()
+                val weeklyProfile = com.example.itv.domain.records.SleepSummaryPolicy.estimateWeeklySleepProfile(
+                    confirmations = confirmations,
+                    candidates = nightReport?.candidates.orEmpty(),
+                    zone = zone
+                )
+                val adaptiveTarget = weeklyProfile?.let {
+                    com.example.itv.domain.records.SleepSummaryPolicy.getAdaptiveBedtimeTarget(
+                        weeklyProfile = it,
+                        now = ZonedDateTime.now(zone)
+                    )
+                }
 
                 if (coachingSettings.customBedtimeHour != null && coachingSettings.customBedtimeMinute != null) {
                     h = coachingSettings.customBedtimeHour
                     m = coachingSettings.customBedtimeMinute
-                    src = "직접 지정한 평소 취침 시각"
-                } else {
-                    val zone = nightReport?.zone ?: ZoneId.systemDefault()
-                    val weeklyProfile = com.example.itv.domain.records.SleepSummaryPolicy.estimateWeeklySleepProfile(
-                        confirmations = confirmations,
-                        candidates = nightReport?.candidates.orEmpty(),
-                        zone = zone
-                    )
-
-                    if (weeklyProfile != null) {
-                        val adaptiveTarget = com.example.itv.domain.records.SleepSummaryPolicy.getAdaptiveBedtimeTarget(
-                            weeklyProfile = weeklyProfile,
-                            now = ZonedDateTime.now(zone)
-                        )
-                        h = adaptiveTarget.targetHour
-                        m = adaptiveTarget.targetMinute
-                        src = adaptiveTarget.sourceDescription
+                    if (adaptiveTarget != null) {
+                        recStartH = adaptiveTarget.recommendedHour
+                        recStartM = adaptiveTarget.recommendedMinute
+                        recEndH = adaptiveTarget.recommendedEndHour
+                        recEndM = adaptiveTarget.recommendedEndMinute
                     } else {
-                        val goal = db.dao().goal("demo-guest", "BEDTIME")
-                        val goalDetail = goal?.goalId?.let { db.dao().bedtimeGoal(it) }
-                        if (goal?.enabled == true && goalDetail != null) {
-                            h = goalDetail.localMinuteOfDay / 60
-                            m = goalDetail.localMinuteOfDay % 60
-                            src = "설정된 취침 목표"
-                        } else {
-                            h = 23
-                            m = 30
-                            src = "기본 기준 시각 (23:30)"
-                        }
+                        val endMin = ((h * 60 + m + 60) % 1440 + 1440) % 1440
+                        recStartH = h
+                        recStartM = m
+                        recEndH = endMin / 60
+                        recEndM = endMin % 60
+                    }
+                    src = "직접 지정한 평소 취침 시각"
+                } else if (adaptiveTarget != null) {
+                    h = adaptiveTarget.targetHour
+                    m = adaptiveTarget.targetMinute
+                    recStartH = adaptiveTarget.recommendedHour
+                    recStartM = adaptiveTarget.recommendedMinute
+                    recEndH = adaptiveTarget.recommendedEndHour
+                    recEndM = adaptiveTarget.recommendedEndMinute
+                    src = adaptiveTarget.sourceDescription
+                } else {
+                    val goal = db.dao().goal("demo-guest", "BEDTIME")
+                    val goalDetail = goal?.goalId?.let { db.dao().bedtimeGoal(it) }
+                    if (goal?.enabled == true && goalDetail != null) {
+                        h = goalDetail.localMinuteOfDay / 60
+                        m = goalDetail.localMinuteOfDay % 60
+                        val endMin = ((goalDetail.localMinuteOfDay + 60) % 1440 + 1440) % 1440
+                        recStartH = h
+                        recStartM = m
+                        recEndH = endMin / 60
+                        recEndM = endMin % 60
+                        src = "설정된 취침 목표"
+                    } else {
+                        val defaultRange = com.example.itv.domain.records.SleepSummaryPolicy.computeRecommendedBedtimeRange(7, 30)
+                        h = 23
+                        m = 30
+                        recStartH = defaultRange.startHour
+                        recStartM = defaultRange.startMinute
+                        recEndH = defaultRange.endHour
+                        recEndM = defaultRange.endMinute
+                        src = "기본 기준 시각 (23:30)"
                     }
                 }
 
                 withContext(Dispatchers.Main) {
                     estimatedStartHour = h
                     estimatedStartMinute = m
+                    recommendedStartHour = recStartH
+                    recommendedStartMinute = recStartM
+                    recommendedEndHour = recEndH
+                    recommendedEndMinute = recEndM
                     estimatedSource = src
                     update(force = true, isSampling = _snapshot.value.isSampling, triggerReason = "취침 추정 정보 갱신")
                 }
@@ -695,7 +738,7 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         val isDarkAmbient = lux != null && lux <= com.example.itv.domain.coaching.ContextualPreInterventionPolicy.DARK_LUX_THRESHOLD
         val isBrightAmbient = lux != null && lux > 150f
         val isVeryBrightAmbient = lux != null && lux > 1000f
-        val isDarkScreen = brightness != null && brightness <= 75
+        val isDarkScreen = brightness != null && brightness <= com.example.itv.domain.coaching.ContextualPreInterventionPolicy.DARK_SCREEN_BRIGHTNESS_THRESHOLD
         val isBrightScreen = brightness != null && brightness > 180
 
         // 평소 추정 취침 시각 연계 계산
@@ -707,6 +750,16 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         val hasBedtime = h != null && m != null
         val targetMinuteOfDay = if (hasBedtime) (h!! * 60 + m!!) else (23 * 60 + 30)
         val diffMinutes = circularMinuteDiff(currentMinuteOfDay, targetMinuteOfDay)
+
+        val recStartH = recommendedStartHour
+        val recStartM = recommendedStartMinute
+        val recEndH = recommendedEndHour
+        val recEndM = recommendedEndMinute
+        val recDiffMinutes = if (recStartH != null && recStartM != null) {
+            circularMinuteDiff(currentMinuteOfDay, recStartH * 60 + recStartM)
+        } else {
+            null
+        }
 
         val bedtimePhase = when {
             !hasBedtime -> BedtimePhase.UNKNOWN
@@ -964,6 +1017,11 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
             lastTriggerReason = triggerReason,
             estimatedBedtimeHour = h,
             estimatedBedtimeMinute = m,
+            recommendedBedtimeStartHour = recStartH,
+            recommendedBedtimeStartMinute = recStartM,
+            recommendedBedtimeEndHour = recEndH,
+            recommendedBedtimeEndMinute = recEndM,
+            recommendedBedtimeDistanceMinutes = recDiffMinutes,
             bedtimeDistanceMinutes = diffMinutes,
             bedtimePhase = bedtimePhase,
             userEnvironmentState = state,

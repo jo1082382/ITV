@@ -44,6 +44,29 @@ internal data class MergedSleepData(
 )
 
 /**
+ * 2-hour progressive pre-bedtime windows anchored to the earliest edge of the recommended bedtime range
+ * (e.g., for recommended 21:00~22:00, anchor is 21:00):
+ * - [outerWindow]: [anchor - 2h, anchor - 1h] (lower weight: 35%)
+ * - [innerWindow]: [anchor - 1h, anchor]      (higher weight: 65%)
+ * - [postStartWindow]: [anchor, actualBedtime/now] if user stayed awake past recommended start (highest weight: 100%)
+ */
+internal data class PreSleepWeightedWindows(
+    val outerWindow: TimeWindowMs?,
+    val innerWindow: TimeWindowMs?,
+    val postStartWindow: TimeWindowMs? = null
+)
+
+internal data class WeightedPreSleepUsage(
+    val outerMinutes: Double,
+    val innerMinutes: Double,
+    val postStartMinutes: Double,
+    /** Equivalent minutes on 0..60 scale (60.0 == 100% weighted load across the 2h progressive window). */
+    val weightedMinutes: Double,
+    /** Percentage 0..100 where outer 100% = 35%, inner 100% = 65%, both 100% = 100%. */
+    val weightedPercent: Int
+)
+
+/**
  * Pure sleep-cycle day boundary & pre-sleep attribution policy for ITV's calendar scoring.
  *
  * Core invariants across EVERY date (today, yesterday, and all previous dates):
@@ -63,6 +86,13 @@ internal object CalendarDayCyclePolicy {
     val DEFAULT_NIGHT_CUTOFF: LocalTime = LocalTime.of(5, 0)
     val ALL_NIGHTER_FINALIZE_CUTOFF: LocalTime = LocalTime.of(12, 0)
     const val PRE_SLEEP_WINDOW_MS: Long = 60 * 60_000L
+    const val PRE_SLEEP_HOUR_MS: Long = 60 * 60_000L
+    /** 권장 취침 시작 2시간 전 ~ 1시간 전 구간 가중치 (35%) */
+    const val PRE_SLEEP_OUTER_HOUR_WEIGHT: Double = 0.35
+    /** 권장 취침 시작 1시간 전 ~ 권장 취침 시작 구간 가중치 (65%) */
+    const val PRE_SLEEP_INNER_HOUR_WEIGHT: Double = 0.65
+    /** 권장 취침 시작 시각 이후 ~ 실제 취침 전 잔여 각성 구간 가중치 (100%) */
+    const val PRE_SLEEP_POST_START_WEIGHT: Double = 1.00
 
     /**
      * Resolves the sleep record belonging to the night of [date] (concluding on [date] + 1).
@@ -371,6 +401,148 @@ internal object CalendarDayCyclePolicy {
             }
         }
         return totalMinutes
+    }
+
+    /**
+     * Resolves progressive 2-hour pre-bedtime windows anchored to the earliest edge of the
+     * recommended bedtime range ([recommendedBedtimeStartMinute], e.g., 21:00 for 21:00~22:00):
+     * - [PreSleepWeightedWindows.outerWindow]: `[anchor - 2h, anchor - 1h]` (35% weight)
+     * - [PreSleepWeightedWindows.innerWindow]: `[anchor - 1h, anchor]` (65% weight)
+     * - [PreSleepWeightedWindows.postStartWindow]: `[anchor, upperLimit]` when user stays awake past
+     *   recommended start before sleeping (100% weight, preventing false "clean pre-sleep" praise
+     *   if user binges after recommended bedtime).
+     *
+     * Strictly clipped to [cycleBounds] so it can NEVER overlap with the previous night.
+     */
+    fun resolveWeightedPreSleepWindows(
+        date: LocalDate,
+        today: LocalDate,
+        zone: ZoneId,
+        nowWallMs: Long,
+        cycleBounds: DayCycleBounds,
+        recommendedBedtimeStartMinute: Int?,
+        bedtimeStartWallMs: Long?,
+        isDateFinalized: Boolean,
+        fallbackBedtimeMinute: Int? = null,
+        hasExplicitNoSleep: Boolean = false
+    ): PreSleepWeightedWindows? {
+        if (hasExplicitNoSleep) return null
+
+        val isDateToday = date == today
+        val isDateYesterday = date == today.minusDays(1)
+
+        // Anchor priority: 권장 취침 시간대 가장 앞의 시각 -> 목표/개인 추정 취침 시각 -> 실제 비사용(취침) 시작 시각
+        val anchorWallMs: Long = when {
+            recommendedBedtimeStartMinute != null ->
+                bedtimeMinuteToWallMs(date, recommendedBedtimeStartMinute, zone)
+            fallbackBedtimeMinute != null ->
+                bedtimeMinuteToWallMs(date, fallbackBedtimeMinute, zone)
+            bedtimeStartWallMs != null ->
+                bedtimeStartWallMs
+            else -> return null
+        }
+
+        val outerRawStart = anchorWallMs - 2 * PRE_SLEEP_HOUR_MS
+        val outerRawEnd = anchorWallMs - PRE_SLEEP_HOUR_MS
+        val innerRawStart = outerRawEnd
+        val innerRawEnd = anchorWallMs
+
+        val upperLimit = when {
+            bedtimeStartWallMs != null -> minOf(bedtimeStartWallMs, cycleBounds.dayEndWallMs)
+            isDateToday -> {
+                if (nowWallMs <= outerRawStart) return null
+                minOf(nowWallMs, cycleBounds.dayEndWallMs)
+            }
+            isDateYesterday && !isDateFinalized -> {
+                if (nowWallMs <= outerRawStart) return null
+                nowWallMs
+            }
+            else -> cycleBounds.dayEndWallMs
+        }
+
+        fun clip(rawStart: Long, rawEnd: Long): TimeWindowMs? {
+            val s = maxOf(rawStart, cycleBounds.dayStartWallMs)
+            val e = minOf(rawEnd, upperLimit)
+            return if (e > s) TimeWindowMs(s, e) else null
+        }
+
+        val outerWin = clip(outerRawStart, outerRawEnd)
+        val innerWin = clip(innerRawStart, innerRawEnd)
+        val postWin = if (upperLimit > anchorWallMs) clip(anchorWallMs, upperLimit) else null
+
+        return if (outerWin != null || innerWin != null || postWin != null) {
+            PreSleepWeightedWindows(
+                outerWindow = outerWin,
+                innerWindow = innerWin,
+                postStartWindow = postWin
+            )
+        } else {
+            null
+        }
+    }
+
+    /**
+     * Aggregates raw minutes from outer (-2h..-1h), inner (-1h..0h), and post-start (0h..sleep)
+     * into normalized progressive-weighted pre-sleep usage:
+     * - 100% (60m) in outer hour only -> 35% (21.0 weighted min)
+     * - 100% (60m) in inner hour only -> 65% (39.0 weighted min)
+     * - 100% (120m) across both hours -> 100% (60.0 weighted min)
+     * - Usage past recommended bedtime start before sleep adds at 100% weight, capped at 100% (60.0 min).
+     */
+    fun combineWeightedPreSleepMinutes(
+        outerMinutes: Double,
+        innerMinutes: Double,
+        postStartMinutes: Double = 0.0
+    ): WeightedPreSleepUsage {
+        val outer = outerMinutes.coerceIn(0.0, 60.0)
+        val inner = innerMinutes.coerceIn(0.0, 60.0)
+        val post = postStartMinutes.coerceAtLeast(0.0)
+        val weightedMin = (
+            outer * PRE_SLEEP_OUTER_HOUR_WEIGHT +
+                inner * PRE_SLEEP_INNER_HOUR_WEIGHT +
+                post * PRE_SLEEP_POST_START_WEIGHT
+            ).coerceIn(0.0, 60.0)
+        val pct = kotlin.math.round((weightedMin / 60.0) * 100.0).toInt().coerceIn(0, 100)
+        return WeightedPreSleepUsage(
+            outerMinutes = outer,
+            innerMinutes = inner,
+            postStartMinutes = post,
+            weightedMinutes = weightedMin,
+            weightedPercent = pct
+        )
+    }
+
+    fun computeWeightedIntervalsUsage(
+        intervals: List<Pair<Long, Long>>,
+        windows: PreSleepWeightedWindows
+    ): WeightedPreSleepUsage {
+        val outer = windows.outerWindow?.let { computeIntervalsOverlapMinutes(intervals, it) } ?: 0.0
+        val inner = windows.innerWindow?.let { computeIntervalsOverlapMinutes(intervals, it) } ?: 0.0
+        val post = windows.postStartWindow?.let { computeIntervalsOverlapMinutes(intervals, it) } ?: 0.0
+        return combineWeightedPreSleepMinutes(outer, inner, post)
+    }
+
+    fun computeWeightedHourlyBucketsUsage(
+        buckets: List<HourlyUsageBucket>,
+        windows: PreSleepWeightedWindows,
+        zone: ZoneId
+    ): WeightedPreSleepUsage {
+        val outer = windows.outerWindow?.let { computeHourlyBucketsOverlapMs(buckets, it, zone) / 60_000.0 } ?: 0.0
+        val inner = windows.innerWindow?.let { computeHourlyBucketsOverlapMs(buckets, it, zone) / 60_000.0 } ?: 0.0
+        val post = windows.postStartWindow?.let { computeHourlyBucketsOverlapMs(buckets, it, zone) / 60_000.0 } ?: 0.0
+        return combineWeightedPreSleepMinutes(outer, inner, post)
+    }
+
+    fun computeWeightedReportUsage(
+        date: LocalDate,
+        hourlyMinutes: List<Double>,
+        windows: PreSleepWeightedWindows,
+        zone: ZoneId
+    ): WeightedPreSleepUsage {
+        val outer = windows.outerWindow?.let { computeReportMinutesInWindow(date, hourlyMinutes, it, zone) } ?: 0.0
+        val inner = windows.innerWindow?.let { computeReportMinutesInWindow(date, hourlyMinutes, it, zone) } ?: 0.0
+        val post = windows.postStartWindow?.let { computeReportMinutesInWindow(date, hourlyMinutes, it, zone) } ?: 0.0
+        return combineWeightedPreSleepMinutes(outer, inner, post)
     }
 
     /**

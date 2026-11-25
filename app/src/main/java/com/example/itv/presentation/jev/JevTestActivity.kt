@@ -1044,8 +1044,17 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
                 val bedtimeDetail = when {
                     ctx.isNearOrOccluded -> "센서 가림 감지 (0cm 근접 · 보정 제외)"
                     adj.bedtimeDelta < 0 -> {
-                        val distStr = ctx.bedtimeDistanceMinutes?.let { if (it < 0) "취침 ${-it}분 전" else "취침 ${it}분 경과" } ?: "취침 임박"
-                        "암실 시청 · $distStr (${ctx.ambientLux?.toInt() ?: 0}lx · 밝기 ${ctx.screenBrightness ?: 0})"
+                        val recDist = ctx.recommendedBedtimeDistanceMinutes
+                        val rangeWidth = ctx.recommendedBedtimeRangeMinutes.coerceIn(30, 120)
+                        val distStr = when {
+                            recDist != null && recDist < 0 -> "권장 취침 ${-recDist}분 전"
+                            recDist != null && recDist < rangeWidth -> "권장 취침 구간 (+${recDist}분)"
+                            recDist != null -> "권장 취침 ${recDist - rangeWidth}분 경과"
+                            ctx.bedtimeDistanceMinutes != null -> if (ctx.bedtimeDistanceMinutes < 0) "취침 ${-ctx.bedtimeDistanceMinutes}분 전" else "취침 ${ctx.bedtimeDistanceMinutes}분 경과"
+                            else -> "취침 임박"
+                        }
+                        val lightPrefix = if ((ctx.ambientLux ?: 999f) <= com.example.itv.domain.coaching.ContextualPreInterventionPolicy.DARK_LUX_THRESHOLD) "암실 시청 · " else ""
+                        "$lightPrefix$distStr (${ctx.ambientLux?.toInt() ?: 0}lx · 밝기 ${ctx.screenBrightness ?: 0})"
                     }
                     adj.bedtimeDelta > 0 -> "주간/밝은 환경 (${ctx.ambientLux?.toInt() ?: 0}lx · 밝기 ${ctx.screenBrightness ?: 0})"
                     else -> "일반 실내 조명 (${ctx.ambientLux?.toInt() ?: 0}lx · 밝기 ${ctx.screenBrightness ?: 0})"

@@ -67,6 +67,7 @@ import com.example.itv.presentation.components.ItvSeasonalRoofTopAccent
 import com.example.itv.presentation.components.ItvTactileButton
 import com.example.itv.presentation.components.ItvTactileCard
 import com.example.itv.presentation.components.LocalDarkTheme
+import com.example.itv.presentation.components.LocalSeasonalAnimationController
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -116,6 +117,15 @@ internal fun TestCalendarRecordsScreen(
     val isDark = LocalDarkTheme.current
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    val seasonalAnimController = LocalSeasonalAnimationController.current
+    LaunchedEffect(listState, seasonalAnimController) {
+        if (seasonalAnimController == null) return@LaunchedEffect
+        snapshotFlow { listState.isScrollInProgress }
+            .collect { scrolling -> seasonalAnimController.scrollPaused = scrolling }
+    }
+    DisposableEffect(seasonalAnimController) {
+        onDispose { seasonalAnimController?.scrollPaused = false }
+    }
     val today = remember(daySyncTick) { LocalDate.now() }
 
     // Non-snapshot LayoutCoordinates holder updated only on layout (onPlaced) -> ZERO scroll & recomposition overhead!
@@ -2167,7 +2177,7 @@ private fun HealthStampHelpDialog(onDismiss: () -> Unit) {
                     style = MaterialTheme.typography.bodySmall
                 )
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("• 수면·취침 절제 (40%): 취침 전 1시간 화면 절제 & 평소 수면 리듬 유지", fontSize = 12.sp)
+                    Text("• 수면·취침 절제 (40%): 권장 취침 전 2시간 점증 가중 절제 & 수면 리듬 유지", fontSize = 12.sp)
                     Text("• 숏폼 탈출·속도 (30%): 짧은 세션 탈출 & 무의식 고속 스와이프 방지", fontSize = 12.sp)
                     Text("• 세션 건강도 (20%): 멍하니 장시간 연속 사용 방지 & 목적성 활용", fontSize = 12.sp)
                     Text("• 생활 리듬 균형 (10%): 평일·휴일 패턴에 맞춘 균형 있는 사용", fontSize = 12.sp)

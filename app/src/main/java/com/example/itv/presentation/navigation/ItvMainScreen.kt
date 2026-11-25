@@ -243,7 +243,15 @@ fun ItvMainScreen(
         }
     }
 
+    // 스크롤 중이거나 드로어·설정·도장 의식 오버레이 표시 중에는 계절 파티클을 0fps로 정지해 CPU/GPU 부하 차단
+    val seasonalAnimController = remember { SeasonalAnimationController() }
+    val shouldPauseSeasonal = settingsOpen || showAccountSettings || showCoachingSettings || activeStampRitual != null
+    LaunchedEffect(shouldPauseSeasonal) {
+        seasonalAnimController.overlayPaused = shouldPauseSeasonal
+    }
+
     // Outer MainActivity Scaffold already handles system bar insets.
+    CompositionLocalProvider(LocalSeasonalAnimationController provides seasonalAnimController) {
     ItvSeasonalBackground(
         modifier
             .fillMaxSize()
@@ -596,6 +604,7 @@ fun ItvMainScreen(
                 activeStampRitual = null
             }
         )
+    }
     }
     }
 }

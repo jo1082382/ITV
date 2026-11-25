@@ -411,4 +411,84 @@ class CalendarDayCyclePolicyTest {
         )
         assertNull(noSleepWin)
     }
+
+    @Test
+    fun `weighted 2-hour pre-sleep window anchors to earliest recommended bedtime and increases weight closer to bedtime`() {
+        val day22 = LocalDate.of(2026, 11, 22)
+        val day23 = LocalDate.of(2026, 11, 23)
+        val bounds = DayCycleBounds(
+            dayStartWallMs = wallMs(day22, 7, 0),
+            dayEndWallMs = wallMs(day23, 7, 0)
+        )
+
+        // 권장 취침 21:00~22:00 -> 가장 앞 시간 21:00 기준으로 2시간 전:
+        // outer = [19:00, 20:00] (가중치 35%), inner = [20:00, 21:00] (가중치 65%)
+        val windows = CalendarDayCyclePolicy.resolveWeightedPreSleepWindows(
+            date = day22,
+            today = day23,
+            zone = zone,
+            nowWallMs = wallMs(day23, 8, 0),
+            cycleBounds = bounds,
+            recommendedBedtimeStartMinute = 21 * 60,
+            bedtimeStartWallMs = wallMs(day22, 21, 0),
+            isDateFinalized = true
+        )!!
+
+        val outerWin = windows.outerWindow!!
+        val innerWin = windows.innerWindow!!
+        assertEquals(wallMs(day22, 19, 0), outerWin.startMs)
+        assertEquals(wallMs(day22, 20, 0), outerWin.endMs)
+        assertEquals(wallMs(day22, 20, 0), innerWin.startMs)
+        assertEquals(wallMs(day22, 21, 0), innerWin.endMs)
+        assertNull(windows.postStartWindow)
+
+        // Case 1: 2시간 전(19:00~20:00)만 100%(60분) 사용 -> 가중치 35% (21.0 가중분)
+        val outerOnly = CalendarDayCyclePolicy.computeWeightedIntervalsUsage(
+            intervals = listOf(wallMs(day22, 19, 0) to wallMs(day22, 20, 0)),
+            windows = windows
+        )
+        assertEquals(60.0, outerOnly.outerMinutes, 0.001)
+        assertEquals(0.0, outerOnly.innerMinutes, 0.001)
+        assertEquals(21.0, outerOnly.weightedMinutes, 0.001)
+        assertEquals(35, outerOnly.weightedPercent)
+
+        // Case 2: 1시간 전(20:00~21:00)만 100%(60분) 사용 -> 가중치 65% (39.0 가중분)
+        val innerOnly = CalendarDayCyclePolicy.computeWeightedIntervalsUsage(
+            intervals = listOf(wallMs(day22, 20, 0) to wallMs(day22, 21, 0)),
+            windows = windows
+        )
+        assertEquals(0.0, innerOnly.outerMinutes, 0.001)
+        assertEquals(60.0, innerOnly.innerMinutes, 0.001)
+        assertEquals(39.0, innerOnly.weightedMinutes, 0.001)
+        assertEquals(65, innerOnly.weightedPercent)
+        assertTrue("1시간 전 사용이 2시간 전 동일 사용보다 가중치가 커야 함", innerOnly.weightedMinutes > outerOnly.weightedMinutes)
+
+        // Case 3: 2시간 전체(19:00~21:00) 100% 사용 -> 가중치 100% (60.0 가중분)
+        val fullTwoHours = CalendarDayCyclePolicy.computeWeightedIntervalsUsage(
+            intervals = listOf(wallMs(day22, 19, 0) to wallMs(day22, 21, 0)),
+            windows = windows
+        )
+        assertEquals(60.0, fullTwoHours.weightedMinutes, 0.001)
+        assertEquals(100, fullTwoHours.weightedPercent)
+
+        // Case 4: 권장 취침 시작(21:00) 이후에도 깨어있다가 22:00에 취침 (21:10~21:40 사용) -> postStart(100% 가중치) 반영
+        val lateWindows = CalendarDayCyclePolicy.resolveWeightedPreSleepWindows(
+            date = day22,
+            today = day23,
+            zone = zone,
+            nowWallMs = wallMs(day23, 8, 0),
+            cycleBounds = bounds,
+            recommendedBedtimeStartMinute = 21 * 60,
+            bedtimeStartWallMs = wallMs(day22, 22, 0),
+            isDateFinalized = true
+        )!!
+        assertNotNull(lateWindows.postStartWindow)
+        val postOnly = CalendarDayCyclePolicy.computeWeightedIntervalsUsage(
+            intervals = listOf(wallMs(day22, 21, 10) to wallMs(day22, 21, 40)),
+            windows = lateWindows
+        )
+        assertEquals(30.0, postOnly.postStartMinutes, 0.001)
+        assertEquals(30.0, postOnly.weightedMinutes, 0.001)
+        assertEquals(50, postOnly.weightedPercent)
+    }
 }

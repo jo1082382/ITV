@@ -47,11 +47,14 @@ internal data class DailyHealthContext(
     val wakeupMinute: Int? = null,
     val sleepDurationMinutes: Double? = null,
     val baselineBedtimeMinute: Int? = null,     // 취침 탭 평소 추정 취침 시각 (요일별 우선 -> 전체 평균)
-    val recommendedBedtimeMinute: Int? = null,  // 취침 탭 기상 기반 건강 권장 취침 시각 (기상 - 7~8.5h)
+    val recommendedBedtimeMinute: Int? = null,  // 취침 탭 권장 취침 시작 시각 (다음날 예상 기상 - 8시간)
+    val recommendedBedtimeEndMinute: Int? = null, // 취침 탭 권장 취침 종료 시각 (다음날 예상 기상 - 7시간)
     val goalBedtimeMinute: Int? = null,         // 데이터 부족 시 fallback 목표 취침 시각
     val baselineSleepDurationMinutes: Double? = null, // 개인 평소 평균 수면 시간 (요일별 우선 -> 전체 평균)
-    val preSleepUsageMinutes: Double? = null,   // 실제 취침(비사용 시작) 직전 1시간 스마트폰 사용량
+    val preSleepUsageMinutes: Double? = null,   // 권장 취침 전 2시간 점증 가중(또는 취침 직전 1시간) 스마트폰 사용량 (0..60 가중분)
     val preSleepShortformMinutes: Double? = null,
+    val isWeightedPreSleep: Boolean = false,    // true면 권장 취침 시작 2시간 전 점증 가중 모델 적용
+    val preSleepWeightedPercent: Int? = null,   // 0..100% 가중 사용률
     val isAllNighter: Boolean = false,          // 확정된 날 밤샘(수면 없음) -> 수면 축 0점 처리
 
     // 2. Shortform escape & swipe speed (SPM) context
@@ -165,17 +168,25 @@ internal object DailyHealthEvaluator {
                         else -> "권장 취침"
                     }
                     val delayMin = circularBedtimeDiffMinutes(bedMin, refMin)
-                    val recMin = ctx.recommendedBedtimeMinute
-                    val recDelayMin = recMin?.let { circularBedtimeDiffMinutes(bedMin, it) }
+                    val recStartMin = ctx.recommendedBedtimeMinute
+                    val recEndMin = ctx.recommendedBedtimeEndMinute ?: recStartMin
+                    // 권장 취침 시간대(예: 22:00~23:00) 안에 잠들면 권장 취침 달성으로 인정 (종료 시각 기준)
+                    val recDelayMin = recEndMin?.let { circularBedtimeDiffMinutes(bedMin, it) }
+                    val recDisplayText = when {
+                        recStartMin != null && recEndMin != null && recStartMin != recEndMin ->
+                            "${formatMinute(recStartMin)}~${formatMinute(recEndMin)}"
+                        recStartMin != null -> formatMinute(recStartMin)
+                        else -> ""
+                    }
                     val tightAllowed = if (ctx.isRestDay) 25 else 15
                     val metRecommendedBedtime = recDelayMin != null && recDelayMin <= tightAllowed
 
                     when {
                         delayMin <= tightAllowed -> {
                             if (recDelayMin != null && recDelayMin > 45) {
-                                // 평소 리듬은 지켰으나 건강 권장 취침보다 크게 늦은 습관: 억울한 감점 대신 가점 완화
+                                // 평소 리듬은 지켰으나 건강 권장 취침 시간대보다 크게 늦은 습관: 억울한 감점 대신 가점 완화
                                 sleepScore += 4
-                                summaryParts += "취침 ${formatMinute(bedMin)} (권장 ${formatMinute(recMin)})"
+                                summaryParts += "취침 ${formatMinute(bedMin)} (권장 $recDisplayText)"
                             } else {
                                 sleepScore += 10
                                 praises += "${refLabel} 리듬(${formatMinute(refMin)})을 잘 지켰어요"
@@ -183,9 +194,9 @@ internal object DailyHealthEvaluator {
                             }
                         }
                         metRecommendedBedtime -> {
-                            // 평소보다 약간 늦었어도 건강 권장 취침 시각은 지킨 경우 -> 불필요한 지연 감점 방지
+                            // 평소보다 약간 늦었어도 건강 권장 취침 시간대 안에 잠든 경우 -> 불필요한 지연 감점 방지
                             sleepScore += 6
-                            praises += "권장 취침 시각(${formatMinute(recMin)}) 안에 잘 잠들었어요"
+                            praises += "권장 취침 시간대($recDisplayText) 안에 잘 잠들었어요"
                             summaryParts += "취침 ${formatMinute(bedMin)}"
                         }
                         delayMin <= tightAllowed + 20 -> {
@@ -216,6 +227,8 @@ internal object DailyHealthEvaluator {
             }
 
             // 1-B. Pre-sleep / Late-night shortform usage (strongest sleep disruptor)
+            // isWeightedPreSleep == true 인 경우 권장 취침 시작 2시간 전 점증 가중(35%/65%/100%) 환산분(0..60) 사용
+            val preSleepWindowLabel = if (ctx.isWeightedPreSleep) "취침 전 2시간 가중" else "취침 전 1시간"
             val preSleepSf = ctx.preSleepShortformMinutes
             if (preSleepSf != null) {
                 when {
@@ -227,49 +240,71 @@ internal object DailyHealthEvaluator {
                     }
                     preSleepSf < 22.0 -> {
                         sleepScore -= 14
-                        cautions += "취침 전 1시간 숏폼 ${preSleepSf.roundToInt()}분 시청"
+                        cautions += "$preSleepWindowLabel 숏폼 ${preSleepSf.roundToInt()}분 시청"
                     }
                     preSleepSf < 35.0 -> {
                         sleepScore -= 24
                         severeTriggers++
-                        cautions += "취침 전 1시간 숏폼 ${preSleepSf.roundToInt()}분 몰입"
+                        cautions += "$preSleepWindowLabel 숏폼 ${preSleepSf.roundToInt()}분 몰입"
                     }
                     else -> {
                         sleepScore -= 36
                         severeTriggers++
-                        cautions += "취침 전 1시간 숏폼 ${preSleepSf.roundToInt()}분 과몰입"
+                        cautions += "$preSleepWindowLabel 숏폼 ${preSleepSf.roundToInt()}분 과몰입"
                     }
                 }
             }
 
             // 1-C. Pre-sleep / Late-night overall screen usage
-            val preSleepPhone = ctx.preSleepUsageMinutes
+            // 총 화면 사용량은 물리적으로 같은 구간의 숏폼 사용량보다 작을 수 없으므로 보정하여
+            // "취침 전 골든타임 절제 성공"과 "취침 전 숏폼 과몰입"이 동시에 뜨는 모순을 방지합니다.
+            val rawPreSleepPhone = ctx.preSleepUsageMinutes
+            val preSleepPhone = when {
+                rawPreSleepPhone != null && preSleepSf != null -> maxOf(rawPreSleepPhone, preSleepSf)
+                rawPreSleepPhone != null -> rawPreSleepPhone
+                else -> null
+            }
+            val preSleepPct = ctx.preSleepWeightedPercent
+                ?: preSleepPhone?.let { ((it / 60.0) * 100.0).roundToInt().coerceIn(0, 100) }
+            val preSleepSummaryValue = if (ctx.isWeightedPreSleep && preSleepPct != null) {
+                "취침 전 가중 ${preSleepPct}%"
+            } else {
+                "취침 전 ${preSleepPhone?.roundToInt() ?: 0}분"
+            }
+            val shortformExplainsMostPreSleep = preSleepSf != null && preSleepSf >= 10.0 &&
+                preSleepPhone != null && (preSleepPhone - preSleepSf) < 10.0
             if (preSleepPhone != null) {
                 when {
-                    preSleepPhone < 5.0 -> {
+                    preSleepPhone < 5.0 && (preSleepSf ?: 0.0) < 5.0 -> {
                         sleepScore += 6
                         praises += "취침 전 골든타임 스마트폰 절제 성공"
                         summaryParts += "취침 전 클린"
                     }
                     preSleepPhone < 15.0 -> {
-                        summaryParts += "취침 전 ${preSleepPhone.roundToInt()}분"
+                        summaryParts += preSleepSummaryValue
                     }
                     preSleepPhone < 30.0 -> {
                         sleepScore -= 7
-                        cautions += "취침 전 1시간 화면 사용 ${preSleepPhone.roundToInt()}분"
-                        summaryParts += "취침 전 ${preSleepPhone.roundToInt()}분"
+                        if (!shortformExplainsMostPreSleep) {
+                            cautions += "$preSleepWindowLabel 화면 사용 ${preSleepPhone.roundToInt()}분"
+                        }
+                        summaryParts += preSleepSummaryValue
                     }
                     preSleepPhone < 50.0 -> {
                         sleepScore -= 16
-                        cautions += "취침 전 1시간 화면 사용 ${preSleepPhone.roundToInt()}분으로 피로 누적"
-                        summaryParts += "취침 전 ${preSleepPhone.roundToInt()}분"
+                        if (!shortformExplainsMostPreSleep) {
+                            cautions += "$preSleepWindowLabel 화면 사용 ${preSleepPhone.roundToInt()}분으로 피로 누적"
+                        }
+                        summaryParts += preSleepSummaryValue
                     }
                     else -> {
                         sleepScore -= 28
                         if ((preSleepSf ?: 0.0) < 22.0) {
                             severeTriggers++
                         }
-                        cautions += "취침 전 화면 과사용(${preSleepPhone.roundToInt()}분)으로 수면 방해"
+                        if (!shortformExplainsMostPreSleep) {
+                            cautions += "취침 전 화면 과사용(${preSleepPhone.roundToInt()}분)으로 수면 방해"
+                        }
                         summaryParts += "취침 전 과사용"
                     }
                 }
@@ -311,7 +346,7 @@ internal object DailyHealthEvaluator {
         var shortformSummary = "추적 데이터 없음 (가중치 자동 보정)"
 
         if (hasShortformAxis) {
-            val sfMinutes = ctx.shortformTotalMs / 60_000.0
+            val sfMinutes = maxOf(ctx.shortformTotalMs / 60_000.0, ctx.preSleepShortformMinutes ?: 0.0)
             if (sfMinutes < 1.0) {
                 shortformScore = 96
                 praises += "숏폼 없이 보낸 도파민 클린 데이!"
@@ -592,8 +627,23 @@ internal object DailyHealthEvaluator {
             projectedTier
         }
 
-        val distinctPraises = praises.distinct().take(3)
         val distinctCautions = cautions.distinct().take(3)
+        // 같은 날 잘한 점과 아쉬운 점에 서로 모순되는 주제가 동시에 노출되지 않도록 교차 검증합니다.
+        val hasPreSleepCaution = distinctCautions.any { it.contains("취침 전") }
+        val hasShortformCaution = distinctCautions.any { it.contains("숏폼") || it.contains("스와이프") }
+        val hasBedtimeDelayCaution = distinctCautions.any { it.contains("밤샘") || it.contains("취침이") }
+        val hasSessionOveruseCaution = distinctCautions.any {
+            it.contains("장시간 연속 사용") || it.contains("하루 총 화면 사용량")
+        }
+        val distinctPraises = praises
+            .distinct()
+            .filterNot { praise ->
+                (hasPreSleepCaution && praise.contains("취침 전 골든타임")) ||
+                    (hasShortformCaution && praise.contains("숏폼")) ||
+                    (hasBedtimeDelayCaution && (praise.contains("리듬(") || praise.contains("권장 취침 시각"))) ||
+                    (hasSessionOveruseCaution && praise.contains("건강한 세션"))
+            }
+            .take(3)
 
         val headline = buildHeadline(
             tier = finalTier,

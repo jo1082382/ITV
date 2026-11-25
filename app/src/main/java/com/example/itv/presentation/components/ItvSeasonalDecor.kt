@@ -1,11 +1,5 @@
 package com.example.itv.presentation.components
 
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.fillMaxSize
@@ -14,7 +8,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
-import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithCache
@@ -373,27 +367,9 @@ fun ItvSeasonalForegroundOverlay(
     if (activeSeason == SeasonThemeMode.OFF) return
 
     val isDark = LocalDarkTheme.current
-    val transition = rememberInfiniteTransition(label = "itvSeasonalFg")
-    val driftState = transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 19000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "fgDrift"
-    )
-    val pulseState = transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 3600, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "fgPulse"
-    )
+    val timeMsState = rememberThrottledSeasonalTimeMs(frameIntervalMs = 50L)
 
-    // Dedicated hardware RenderNode isolates 60-120fps foreground specks from scrolling content below
+    // Dedicated hardware RenderNode isolates 20fps (0fps during scroll) foreground specks from scrolling content below
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -426,8 +402,9 @@ fun ItvSeasonalForegroundOverlay(
                 val sparkleW = 1.3f * dp1
 
                 onDrawBehind {
-                    val drift = driftState.value
-                    val pulse = pulseState.value
+                    val elapsed = timeMsState.value
+                    val drift = (elapsed % 19_000L) / 19_000f
+                    val pulse = pingPongFraction(elapsed, 3_600L)
 
                     when (activeSeason) {
                         SeasonThemeMode.WINTER -> {
@@ -503,19 +480,10 @@ fun ItvCharacterSeasonalStageBackdrop(
     val isDark = LocalDarkTheme.current
     val inkColor = ItvInkBorder
 
-    val twinkleState: State<Float> = if (activeSeason == SeasonThemeMode.WINTER || activeSeason == SeasonThemeMode.SUMMER) {
-        val transition = rememberInfiniteTransition(label = "stageTwinkle")
-        transition.animateFloat(
-            initialValue = 0f,
-            targetValue = 1f,
-            animationSpec = infiniteRepeatable(
-                animation = tween(2600, easing = LinearEasing),
-                repeatMode = RepeatMode.Reverse
-            ),
-            label = "stagePulse"
-        )
+    val stageTimeMsState: State<Long> = if (activeSeason == SeasonThemeMode.WINTER || activeSeason == SeasonThemeMode.SUMMER) {
+        rememberThrottledSeasonalTimeMs(frameIntervalMs = 66L)
     } else {
-        remember { mutableFloatStateOf(0.5f) }
+        remember { mutableLongStateOf(1300L) }
     }
 
     Box(
@@ -638,7 +606,7 @@ fun ItvCharacterSeasonalStageBackdrop(
                 val sunCol = if (isDark) Color(0xFFFFD85E) else Color(0xFFF5B53B)
 
                 onDrawBehind {
-                    val twinkle = twinkleState.value
+                    val twinkle = pingPongFraction(stageTimeMsState.value, 2_600L)
 
                     drawPath(hillPath, color = hillFill)
                     drawPath(hillArcPath, color = inkColor.copy(alpha = 0.42f), style = hillStroke)

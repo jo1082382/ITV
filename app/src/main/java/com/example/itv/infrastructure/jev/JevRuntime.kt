@@ -239,9 +239,10 @@ class JevRuntime private constructor(context: Context) {
             val elapsed=Duration.between(start,now).toMinutes()
             return elapsed.takeIf { it in 0 until settings.bedtimeWindowMinutes.toLong() }?.toInt()
         }
-        // 수동 취침 목표가 없는 경우에도 자동 추정 취침 시각 경과분을 폴백으로 연동합니다.
-        val autoDist = com.example.itv.infrastructure.observation.LightAndBrightnessTracker
-            .getInstance(appContext).snapshot.value.bedtimeDistanceMinutes
+        // 수동 취침 목표가 없는 경우에도 자동 추정/권장 취침 시각 경과분을 폴백으로 연동합니다.
+        val ambientSnap = com.example.itv.infrastructure.observation.LightAndBrightnessTracker
+            .getInstance(appContext).snapshot.value
+        val autoDist = ambientSnap.recommendedBedtimeDistanceMinutes ?: ambientSnap.bedtimeDistanceMinutes
         return autoDist?.takeIf { it in 0 until settings.bedtimeWindowMinutes }
     }
     fun enrichContext(base: JevContext, nowElapsed: Long = SystemClock.elapsedRealtime()): JevContext {
@@ -341,6 +342,7 @@ class JevRuntime private constructor(context: Context) {
             screenBrightness = ambient.screenBrightness,
             isNearOrOccluded = isOccluded,
             bedtimeDistanceMinutes = bedtimeDist,
+            recommendedBedtimeDistanceMinutes = ambient.recommendedBedtimeDistanceMinutes,
             userEnvironmentState = ambient.userEnvironmentState.name,
             estimatedDayType = personal.estimatedDayType?.name,
             dayTypeReason = personal.dayTypeReason,
@@ -478,9 +480,10 @@ class JevRuntime private constructor(context: Context) {
                 it.copy(quality="VALID")
             else it
         }
+        val isLandscapeNow = appContext.resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
         if(currentApproval!=null) {
-            if (sameAppSafe && approvalContext?.quality == "VALID" && (isShortsNow || isLongformNow)) {
-                // 숏폼 또는 롱폼 영상 시청 중에는 '시청 중 개입 금지' 원칙에 따라 영상 종료/전환 시점까지 승인을 만료시키지 않고 유지함
+            if (sameAppSafe && approvalContext?.quality == "VALID" && (isShortsNow || isLongformNow || isLandscapeNow)) {
+                // 숏폼·롱폼 영상 시청 중 또는 가로 모드 사용 중에는 종료/세로 전환 시점까지 승인을 만료시키지 않고 유지함
                 approval = currentApproval.copy(requestedAt = now)
             } else if (!JevCandidatePolicy.resultIsCurrent(currentApproval.settings.revision,s,currentApproval.captured,approvalContext,now-currentApproval.requestedAt)) {
                 suppress(currentApproval.trial,"STALE_CONTEXT_OR_RESULT");approval=null

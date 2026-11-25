@@ -139,6 +139,10 @@ data class JevContext(
     val screenBrightness: Int? = null,
     val isNearOrOccluded: Boolean = false,
     val bedtimeDistanceMinutes: Int? = null,
+    /** 권장 취침 시간대 시작 시각 기준 거리(분): 음수=권장 취침 시작 전, 0..range=권장 취침 구간 내, >range=권장 취침 경과 */
+    val recommendedBedtimeDistanceMinutes: Int? = null,
+    /** 권장 취침 시간대 폭(분). 기본 60분(7~8시간 수면 기준, 예: 22:00~23:00). */
+    val recommendedBedtimeRangeMinutes: Int = 60,
     val userEnvironmentState: String? = null,
     val estimatedDayType: String? = null,
     val dayTypeReason: String? = null,
@@ -187,7 +191,8 @@ object JevCandidatePolicy {
         val lux = c.ambientLux
         val brightness = c.screenBrightness
         val occluded = c.isNearOrOccluded
-        val d = c.bedtimeDistanceMinutes ?: c.bedtimePassedMinutes
+        val recD = c.recommendedBedtimeDistanceMinutes
+        val d = recD ?: c.bedtimeDistanceMinutes ?: c.bedtimePassedMinutes
 
         if (lux == null && brightness == null && d == null) return 0.0
 
@@ -196,10 +201,20 @@ object JevCandidatePolicy {
             return 0.0
         }
 
+        val rangeWidth = c.recommendedBedtimeRangeMinutes.coerceIn(30, 120)
+
         // 2. Time Window Factor
-        // d: minutes difference from target bedtime (circularMinuteDiff)
+        // 권장 취침 시간대(recD)가 있으면 시작 시각 2시간 전부터 1시간 단위 점증 가중치(2~1h 전 0.35~0.55, 1~0h 전 0.65~1.0)를 적용합니다.
         val bedtimeWeight = when {
             d == null -> 0.0
+            recD != null -> when {
+                recD in 0..240 -> 1.0 // 권장 취침 시간대 진입 및 경과
+                recD in -60 until 0 -> 0.65 + 0.35 * ((recD + 60).toDouble() / 60.0) // 1시간 전~권장 시작: 0.65 -> 1.00
+                recD in -120 until -60 -> 0.35 + 0.20 * ((recD + 120).toDouble() / 60.0) // 2시간 전~1시간 전: 0.35 -> 0.55
+                recD in -180 until -120 -> 0.35 * ((recD + 180).toDouble() / 60.0) // 3시간 전~2시간 전 완만한 도입
+                recD in 241..360 -> 1.0 - 0.70 * ((recD - 240).toDouble() / 120.0) // 새벽 완화
+                else -> 0.0
+            }
             d in -60..240 -> 1.0 // Core bedtime (1h before ~ 4h after)
             d in -180 until -60 -> 0.70 + 0.30 * ((d - (-180)).toDouble() / 120.0) // 2~3h before bedtime: 0.70 ~ 1.0
             d in -240 until -180 -> 0.70 * ((d - (-240)).toDouble() / 60.0) // 3~4h before bedtime: 0.0 ~ 0.70
@@ -209,6 +224,11 @@ object JevCandidatePolicy {
 
         val daytimeWeight = when {
             d == null -> 0.5
+            recD != null -> when {
+                recD in -180..360 -> 0.0
+                recD in -360 until -180 -> 1.0 - ((recD - (-360)).toDouble() / 180.0)
+                else -> 1.0
+            }
             d in -240..360 -> 0.0
             d in -420 until -240 -> 1.0 - ((d - (-420)).toDouble() / 180.0) // Transition from mid-day to evening
             else -> 1.0 // Daytime active hours (4+ hours away from bedtime)
@@ -264,22 +284,57 @@ object JevCandidatePolicy {
         val activeScore = maxOf(litRoomActiveScore, daytimeActiveScore)
 
         // 7. Calculate continuous linear delta:
-        // - Pre-bedtime dark (d < 0): up to -15%p
-        // - Post-bedtime dark (d >= 0): smoothly strengthened from -25%p (d=0) to -30%p (d>=30)
-        // - Daytime / bright room: up to +15%p
+        // - 권장 취침 시간대 연동(recD != null):
+        //   * 암실: 시작 전 2시간 점증(-15%p max), 권장 구간 [0, rangeWidth] (-20%p -> -25%p), 권장 종료 경과 (-25%p -> -30%p)
+        //   * 일반 실내(어둡지도 아주 밝지도 않은 조명): 권장 취침 전 2시간/구간/경과에 따라 완만하게 -2%p ~ -12%p 민감화
+        // - 레거시(recD == null): 기존 취침 시각 기준 유지
         val isPostBedtime = (d != null && d >= 0) || (c.bedtimePassedMinutes != null && c.bedtimePassedMinutes >= 0)
-        val maxDarkPenalty = if (isPostBedtime) {
-            val passedMin = maxOf(d ?: 0, c.bedtimePassedMinutes ?: 0).coerceAtLeast(0)
-            0.25 + 0.05 * (passedMin / 30.0).coerceIn(0.0, 1.0)
-        } else {
-            0.15
+        val maxDarkPenalty = when {
+            recD != null && recD >= rangeWidth -> {
+                val pastEndMin = (recD - rangeWidth).coerceAtLeast(0)
+                0.25 + 0.05 * (pastEndMin / 30.0).coerceIn(0.0, 1.0)
+            }
+            recD != null && recD >= 0 -> {
+                0.20 + 0.05 * (recD.toDouble() / rangeWidth.toDouble()).coerceIn(0.0, 1.0)
+            }
+            isPostBedtime -> {
+                val passedMin = maxOf(d ?: 0, c.bedtimePassedMinutes ?: 0).coerceAtLeast(0)
+                0.25 + 0.05 * (passedMin / 30.0).coerceIn(0.0, 1.0)
+            }
+            else -> 0.15
         }
-        val delta = if (sleepDarkScore > 0.0) {
-            -maxDarkPenalty * sleepDarkScore
-        } else if (activeScore > 0.0) {
-            0.15 * activeScore
-        } else {
-            0.0
+
+        val recommendedTimeOnlyPenalty = if (recD != null && activeScore < 0.25) {
+            when {
+                recD in -120 until -60 -> {
+                    val progress = ((recD + 120) / 60.0).coerceIn(0.0, 1.0)
+                    -(0.015 + 0.015 * progress) // -1.5%p -> -3.0%p
+                }
+                recD in -60 until 0 -> {
+                    val progress = ((recD + 60) / 60.0).coerceIn(0.0, 1.0)
+                    -(0.035 + 0.025 * progress) // -3.5%p -> -6.0%p
+                }
+                recD in 0 until rangeWidth -> {
+                    val progress = (recD.toDouble() / rangeWidth.toDouble()).coerceIn(0.0, 1.0)
+                    -(0.06 + 0.03 * progress) // 권장 취침 구간 내: -6%p -> -9%p
+                }
+                recD in rangeWidth..240 -> {
+                    val pastEnd = ((recD - rangeWidth) / 60.0).coerceIn(0.0, 1.0)
+                    -(0.09 + 0.03 * pastEnd) // 권장 취침 종료 경과: -9%p -> -12%p
+                }
+                else -> 0.0
+            }
+        } else 0.0
+
+        val delta = when {
+            sleepDarkScore > 0.0 -> minOf(-maxDarkPenalty * sleepDarkScore, recommendedTimeOnlyPenalty)
+            recommendedTimeOnlyPenalty < 0.0 -> recommendedTimeOnlyPenalty
+            activeScore > 0.0 -> {
+                // 권장 취침 종료를 넘긴 심야에는 밝은 방 완화 폭을 제한(+5%p 상한)
+                val maxRelax = if (recD != null && recD >= rangeWidth) 0.05 else 0.15
+                maxRelax * activeScore
+            }
+            else -> 0.0
         }
 
         return kotlin.math.round(delta.coerceIn(-0.30, 0.15) * 1000.0) / 1000.0
@@ -403,7 +458,8 @@ object JevCandidatePolicy {
         }
         val hasAnySignal = c.sessionVsAvgRatio != null || c.effectiveSpm1m != null ||
             c.swipeAccel1m != null || c.fastSwipeStreak > 0 ||
-            c.ambientLux != null || c.screenBrightness != null || c.bedtimeDistanceMinutes != null ||
+            c.ambientLux != null || c.screenBrightness != null ||
+            c.bedtimeDistanceMinutes != null || c.recommendedBedtimeDistanceMinutes != null ||
             c.continuousMs >= 900_000L || c.consecutiveLongformChainCount >= 2 || c.shortformSwipeCount > 10
         if (!hasAnySignal) {
             return ThresholdAdjustment(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, s.probabilityThreshold)
@@ -546,9 +602,19 @@ object JevCandidatePolicy {
         }
         if (kotlin.math.abs(adj.bedtimeDelta) >= 0.005) {
             val sign = if (adj.bedtimeDelta > 0) "+" else ""
+            val recD = c.recommendedBedtimeDistanceMinutes
+            val rangeWidth = c.recommendedBedtimeRangeMinutes.coerceIn(30, 120)
+            val isDarkRoom = c.ambientLux != null &&
+                c.ambientLux <= com.example.itv.domain.coaching.ContextualPreInterventionPolicy.DARK_LUX_THRESHOLD
             val isPostBedtime = (c.bedtimeDistanceMinutes ?: -1) >= 0 || (c.bedtimePassedMinutes ?: -1) >= 0
             val envDesc = when {
                 c.isNearOrOccluded -> "센서가림"
+                adj.bedtimeDelta < 0 && recD != null && recD >= rangeWidth ->
+                    if (isDarkRoom) "권장취침경과암실" else "권장취침경과"
+                adj.bedtimeDelta < 0 && recD != null && recD >= 0 ->
+                    if (isDarkRoom) "권장취침구간암실" else "권장취침구간"
+                adj.bedtimeDelta < 0 && recD != null ->
+                    if (isDarkRoom) "권장취침전암실" else "권장취침준비"
                 adj.bedtimeDelta < 0 && isPostBedtime -> "취침경과암실"
                 adj.bedtimeDelta < 0 -> "취침전암실"
                 else -> "주간/밝은환경"

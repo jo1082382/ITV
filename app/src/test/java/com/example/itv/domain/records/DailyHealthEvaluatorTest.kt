@@ -406,4 +406,102 @@ class DailyHealthEvaluatorTest {
         assertEquals(-40, DailyHealthEvaluator.circularBedtimeDiffMinutes(1420, 20))
         assertEquals(90, DailyHealthEvaluator.circularBedtimeDiffMinutes(120, 30))
     }
+
+    @Test
+    fun `pre-sleep shortform binge never coexists with pre-sleep golden time praise or contradictory shortform praise`() {
+        // 재현 사례: 취침 전 총 화면 사용량이 낮게(2분) 잡혔더라도 같은 시간대 숏폼이 37분이면
+        // "취침 전 골든타임 스마트폰 절제 성공"이 잘한 점에 절대 들어가면 안 되고,
+        // 숏폼 과몰입 아쉬운 점과 모순되는 숏폼 칭찬도 함께 나오지 않아야 함.
+        val result = DailyHealthEvaluator.evaluate(
+            DailyHealthContext(
+                date = sampleDate,
+                isToday = false,
+                isFinalized = true,
+                bedtimeMinute = 30,
+                baselineBedtimeMinute = 30,
+                sleepDurationMinutes = 420.0,
+                preSleepUsageMinutes = 2.0,
+                preSleepShortformMinutes = 37.0,
+                hasShortformTracking = true,
+                shortformTotalMs = 37 * 60_000L,
+                shortformSwipes = 120L,
+                shortformAvgSessionMs = 6 * 60_000L,
+                shortformMaxSessionMs = 12 * 60_000L,
+                shortformSpm = 2.5,
+                totalPhoneMs = 200 * 60_000L,
+                phoneAvgSessionMs = 10 * 60_000L,
+                phoneMaxSessionMs = 25 * 60_000L
+            )
+        )
+        assertTrue(result.cautions.any { it.contains("취침 전 1시간 숏폼 37분 과몰입") })
+        assertTrue(
+            "Should not praise pre-sleep restraint when pre-sleep shortform is 37m: ${result.praises}",
+            result.praises.none { it.contains("취침 전 골든타임") }
+        )
+        assertTrue(
+            "Should not praise shortform escape when pre-sleep shortform binge caution exists: ${result.praises}",
+            result.praises.none { it.contains("숏폼") }
+        )
+        assertEquals(
+            "Should not duplicate near-identical pre-sleep screen caution when shortform explains all 37m",
+            1,
+            result.cautions.count { it.contains("취침 전") }
+        )
+    }
+
+    @Test
+    fun `recommended bedtime range gives credit when sleeping inside range and weighted pre-sleep penalizes inner hour more than outer hour`() {
+        // 권장 취침 시간대 22:00~23:00 안에 22:45 취침 -> 권장 취침 달성으로 감점 없이 긍정 평가
+        val inRange = DailyHealthEvaluator.evaluate(
+            DailyHealthContext(
+                date = sampleDate,
+                isToday = false,
+                isFinalized = true,
+                bedtimeMinute = 22 * 60 + 45,
+                sleepDurationMinutes = 435.0,
+                baselineBedtimeMinute = 22 * 60,
+                recommendedBedtimeMinute = 22 * 60,
+                recommendedBedtimeEndMinute = 23 * 60,
+                preSleepUsageMinutes = 2.0,
+                isWeightedPreSleep = true,
+                preSleepWeightedPercent = 3
+            )
+        )
+        val inRangeSleepAxis = inRange.axes.first { it.id == "sleep" }
+        assertTrue("Expected positive score inside 22:00~23:00 recommended range, got ${inRangeSleepAxis.score}", inRangeSleepAxis.score >= 90)
+        assertTrue(inRange.praises.any { it.contains("22:00~23:00") })
+
+        // 동일 60분 사용이라도 2~1시간 전(가중 21분/35%)보다 1~0시간 전(가중 39분/65%)이 수면 점수가 더 낮아야 함
+        val outerOnlyEval = DailyHealthEvaluator.evaluate(
+            DailyHealthContext(
+                date = sampleDate,
+                isToday = false,
+                isFinalized = true,
+                bedtimeMinute = 22 * 60,
+                baselineBedtimeMinute = 22 * 60,
+                recommendedBedtimeMinute = 22 * 60,
+                recommendedBedtimeEndMinute = 23 * 60,
+                preSleepUsageMinutes = 21.0,
+                isWeightedPreSleep = true,
+                preSleepWeightedPercent = 35
+            )
+        )
+        val innerOnlyEval = DailyHealthEvaluator.evaluate(
+            DailyHealthContext(
+                date = sampleDate,
+                isToday = false,
+                isFinalized = true,
+                bedtimeMinute = 22 * 60,
+                baselineBedtimeMinute = 22 * 60,
+                recommendedBedtimeMinute = 22 * 60,
+                recommendedBedtimeEndMinute = 23 * 60,
+                preSleepUsageMinutes = 39.0,
+                isWeightedPreSleep = true,
+                preSleepWeightedPercent = 65
+            )
+        )
+        val outerScore = outerOnlyEval.axes.first { it.id == "sleep" }.score
+        val innerScore = innerOnlyEval.axes.first { it.id == "sleep" }.score
+        assertTrue("Expected inner hour score ($innerScore) < outer hour score ($outerScore)", innerScore < outerScore)
+    }
 }

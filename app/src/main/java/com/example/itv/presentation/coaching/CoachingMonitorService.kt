@@ -16,6 +16,7 @@ import com.example.itv.domain.jev.JevCandidatePolicy
 import android.app.*
 import android.content.*
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.os.*
 import android.provider.Settings
 import android.view.*
@@ -83,6 +84,7 @@ class CoachingMonitorService : Service() {
     private var feedbackView: View? = null
     private var feedbackQueryPending = false
     private var feedbackSaving = false
+    private var lastFeedbackQueryElapsed = 0L
 
 
     private val journal: AndroidCoachingJournal by lazy { AndroidCoachingJournal(this) }
@@ -428,6 +430,11 @@ class CoachingMonitorService : Service() {
             currentRecommendation?.isFacedownRequired == true ||
             missionController.state.requireFacedown ||
             getEffectiveIntensity() == CharacterIntensity.STRONG
+        if (isLandscapeNow() && !isStrong) {
+            landscapeDeferred = true
+            return
+        }
+        landscapeDeferred = false
         val effectiveIntensity = if (isStrong) CharacterIntensity.STRONG else getEffectiveIntensity()
         activeMissionIntensity = effectiveIntensity
         lastOfferedIntensity = effectiveIntensity
@@ -600,6 +607,7 @@ class CoachingMonitorService : Service() {
         activeMissionIntensity = null
         lastOfferedIntensity = null
         currentRecommendation = null
+        landscapeDeferred = false
         escalationTracker.reset()
         if (jevMode()) {
             jev.onMissionRestSuccess()
@@ -645,6 +653,9 @@ class CoachingMonitorService : Service() {
     private var foregroundStarted = false
     private var nightGentleAlertFired = false
     private var nightBedtimeCarePending = false
+    private var wasLandscape = false
+    private var landscapeDeferred = false
+    private val portraitReturnRunnable = Runnable { onOrientationReturnedToPortrait() }
     private var safeSince: Long?
         get() = progress.safeSince
         set(value) { progress.safeSince = value }
@@ -652,9 +663,27 @@ class CoachingMonitorService : Service() {
     private val pm by lazy { getSystemService(PowerManager::class.java) }
     private val nm by lazy { getSystemService(NotificationManager::class.java) }
     private fun unlocked() = observer.unlocked()
+    private fun isLandscapeNow(config: Configuration = resources.configuration): Boolean {
+        return when (config.orientation) {
+            Configuration.ORIENTATION_LANDSCAPE -> true
+            Configuration.ORIENTATION_PORTRAIT -> false
+            else -> try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    val b = wm.currentWindowMetrics.bounds
+                    b.width() > b.height()
+                } else {
+                    val dm = resources.displayMetrics
+                    dm.widthPixels > dm.heightPixels
+                }
+            } catch (_: Exception) {
+                false
+            }
+        }
+    }
     private fun resetOfferState() {
         progress.reset()
         resetPreInterventionSession()
+        landscapeDeferred = false
     }
     private fun observeUsage(): Boolean {
         val isUnlocked = unlocked()
@@ -772,6 +801,12 @@ class CoachingMonitorService : Service() {
             }
             lastJevMode = currentJevMode
             val nowElapsed = SystemClock.elapsedRealtime()
+            val nowLandscape = isLandscapeNow()
+            if (wasLandscape && !nowLandscape) {
+                handler.removeCallbacks(portraitReturnRunnable)
+                handler.postDelayed(portraitReturnRunnable, 350L)
+            }
+            wasLandscape = nowLandscape
             if (!unlocked()) {
                 if (screenOffSinceWallMs == null) {
                     screenOffSinceWallMs = System.currentTimeMillis()
@@ -899,17 +934,24 @@ class CoachingMonitorService : Service() {
         } else {
             usageClock.usedMs
         }
+        val resolvedBedtimeDistance = ambient.bedtimeDistanceMinutes ?: jev.state.value.context?.bedtimePassedMinutes
         val decision = com.example.itv.domain.coaching.ContextualPreInterventionPolicy.evaluate(
             ambientLux = ambient.lux,
             isOccluded = isOccluded,
-            bedtimeDistanceMinutes = ambient.bedtimeDistanceMinutes,
+            bedtimeDistanceMinutes = resolvedBedtimeDistance,
             isPastBedtime = ambient.bedtimePhase == com.example.itv.infrastructure.observation.BedtimePhase.PAST_BEDTIME,
             isApproachingBedtime = ambient.bedtimePhase == com.example.itv.infrastructure.observation.BedtimePhase.APPROACHING,
             continuousUsedMs = currentContinuousMs,
             darkAccumulatedMs = darkUsageAccumulatedMs,
             alreadyTriggeredInSession = preInterventionTriggeredInSession,
-            isTestMode = testMode()
+            isTestMode = testMode(),
+            screenBrightness = ambient.screenBrightness
         ) ?: return false
+
+        if (isLandscapeNow()) {
+            landscapeDeferred = true
+            return false
+        }
 
         return showGentlePreIntervention(decision, transition = transition)
     }
@@ -972,7 +1014,8 @@ class CoachingMonitorService : Service() {
             ::onChoice,
             listOf(decision.reason),
             intensityOverride = CharacterIntensity.GENTLE,
-            recommendation = rec
+            recommendation = rec,
+            bubbleOverride = decision.bubbleContent
         )
         return try {
             val now = SystemClock.elapsedRealtime()
@@ -982,6 +1025,7 @@ class CoachingMonitorService : Service() {
             offerIsPreIntervention = true
             preInterventionTriggeredInSession = true
             preInterventionShownAtElapsed = now
+            landscapeDeferred = false
             displayedPackage = currentFg
             responseController.offered = true
             responseController.offerId = "pre-" + java.util.UUID.randomUUID().toString().take(4)
@@ -1045,7 +1089,11 @@ class CoachingMonitorService : Service() {
             com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.isActivelyInShortsOrComments() ||
             com.example.itv.infrastructure.observation.instagram.InstagramTracker.isActivelyInReelsCommentsOrStory()
         val isWriting = WritingGuard.blockReason() != null || observer.snapshot().isActivelyWriting()
-        val isMidActivity = isGamingOrDeferred || isWatchingLongform || isWatchingShortsOrReels || isWriting
+        val isLandscape = isLandscapeNow()
+        if (isLandscape) {
+            landscapeDeferred = true
+        }
+        val isMidActivity = isGamingOrDeferred || isWatchingLongform || isWatchingShortsOrReels || isWriting || isLandscape
 
         if (isMidActivity) {
             // [비침해 배너 알림]: 게임·영상 플레이 중이므로 터치를 전혀 방해하지 않는 최상단 얇은 배너 + HUD 수면 모드 아이콘 변경
@@ -1078,9 +1126,14 @@ class CoachingMonitorService : Service() {
             val allContinuous = jev.sessionState("ALL")?.continuousMs ?: 0L
             val liveContinuous = if (allContinuous > 0L) allContinuous else usageClock.usedMs
             val displayedPkg = sample.context?.packageName ?: if (YoutubeProbe.screenState() == 1) "YouTube 쇼츠" else if (YoutubeProbe.screenState() == 0) "YouTube" else if (ReelsProbe.screenState() == 1) "Instagram 릴스" else "스마트폰 일반 사용"
+            val diagStatus = if (isLandscapeNow() && (landscapeDeferred || jev.hasTransferrableApproval())) {
+                "가로 모드 사용 중 · 세로 전환 시 개입 대기"
+            } else {
+                sample.status
+            }
             DeveloperStatus.value = DeveloperSnapshot(now, running, liveContinuous, usageClock.restMs,
                 jev.store.settings.value.continuousSeconds * 1000L, TestCoachingPolicy.naturalRestMs(jevMode()),
-                0L, displayedPkg, sample.status)
+                0L, displayedPkg, diagStatus)
             return
         }
         val guard = WritingGuard.blockReason()
@@ -1105,6 +1158,7 @@ class CoachingMonitorService : Service() {
             overlay != null -> "개입 표시 중 · 선택 대기"
             responseController.offered -> com.example.itv.composition.CoachingAccess.status(this, "표시 요청 처리됨")
             guard != null -> guard
+            isLandscapeNow() && landscapeDeferred -> "가로 모드 사용 중 · 세로 전환 시 개입 대기"
             safeSince == null || now - (safeSince ?: now) < 5000L -> "안전 상태 5초 확인 중"
             responseController.retryAt != null && now < (responseController.retryAt ?: now) -> "나중에 선택 · 재평가 대기"
             usageClock.usedMs < interventionMs -> "누적 사용시간 조건 미충족"
@@ -1148,7 +1202,62 @@ class CoachingMonitorService : Service() {
             registerReceiver(receiver, filter)
         }
         receiverRegistered = true
+        wasLandscape = isLandscapeNow()
         com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this).start()
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val nowLandscape = isLandscapeNow(newConfig)
+        val returnedToPortrait = wasLandscape && !nowLandscape
+        wasLandscape = nowLandscape
+        if (returnedToPortrait && running) {
+            handler.removeCallbacks(portraitReturnRunnable)
+            handler.postDelayed(portraitReturnRunnable, 350L)
+        }
+    }
+
+    /**
+     * 가로 모드에서 유예되었던 개입(재시도, 취침 케어, Jev/규칙 본 개입, 사전 개입)을
+     * 세로 모드로 복귀한 직후 레이아웃이 안정되면 자동으로 실행합니다.
+     */
+    private fun onOrientationReturnedToPortrait() {
+        val hadDeferred = landscapeDeferred
+        landscapeDeferred = false
+        if (!running || isLandscapeNow() || !unlocked()) return
+        if (overlay != null || feedbackView != null || completionView != null ||
+            missionController.state.id != null || bedtimeCareController.isDialogShowing()
+        ) return
+        if (retryPending) {
+            checkRetry(transition = true)
+            return
+        }
+        if (nightBedtimeCarePending && !responseController.suppressed) {
+            nightBedtimeCarePending = false
+            showPuppy(transition = true, forceNightBedtimeCare = true)
+            return
+        }
+        if (responseController.offered || responseController.suppressed) return
+        val now = SystemClock.elapsedRealtime()
+        if (responseController.retryAt != null && now < (responseController.retryAt ?: 0L)) return
+
+        if (jevMode()) {
+            val fg = JevObservationHub.foregroundPackage
+            if (jev.hasTransferrableApproval() || jev.canShow(transition = true)) {
+                jev.promotePendingTransfer(fg)
+                showPuppy(transition = true)
+            }
+        } else if (hadDeferred || waitingTransition || waitingYoutube) {
+            if (observeUsage() && WritingGuard.blockReason() == null) {
+                val safeAt = safeSince
+                if (safeAt != null && now - safeAt >= 5000L && usageClock.usedMs >= interventionMs) {
+                    showPuppy(transition = true)
+                }
+            }
+        }
+        if (overlay == null && !bedtimeCareController.isDialogShowing()) {
+            maybeShowContextualPreIntervention(now, transition = true)
+        }
     }
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == "STOP") {
@@ -1536,6 +1645,20 @@ class CoachingMonitorService : Service() {
             if (SystemClock.elapsedRealtime() - safeAt < 5000L) return
         }
         if (feedbackView != null || completionView != null || missionController.state.id != null || overlay != null || !unlocked() || !com.example.itv.composition.CoachingAccess.ready(this) || !Settings.canDrawOverlays(this)) return
+
+        // 가로 모드(전체화면 영상·게임 등)에서는 자동 개입을 보류하고 세로 모드 전환 시 재평가·표시합니다.
+        if (isLandscapeNow()) {
+            landscapeDeferred = true
+            if (shouldTriggerBedtimeCare || forceNightBedtimeCare) {
+                nightBedtimeCarePending = true
+            }
+            if (!isJev) {
+                waitingTransition = true
+            }
+            return
+        }
+        landscapeDeferred = false
+
         val jevOfferId = if (isJev && jevApprovedForShow) jev.approvedId() else null
         val responseMs = TestCoachingPolicy.responseMs(isJev)
         val shortformApp = when {
@@ -1556,9 +1679,15 @@ class CoachingMonitorService : Service() {
                     alreadyTriggeredInSession = preInterventionTriggeredInSession
                 )
             ) {
-                // 취침 시간 경과 + 암실에서는 전면 취침 케어 전에 약한 개입(GENTLE)을 사전 개입으로 먼저 보여줍니다.
+                // 취침 시간 경과 시 전면 취침 케어 전에 약한 개입(GENTLE)을 사전 개입으로 먼저 보여줍니다.
+                val passedMin = ambient.bedtimeDistanceMinutes?.takeIf { it > 0 }
+                    ?: jev.state.value.context?.bedtimePassedMinutes?.takeIf { it > 0 }
+                val isDark = com.example.itv.domain.coaching.ContextualPreInterventionPolicy.isDarkRoom(ambient.lux, isOccluded)
                 showGentlePreIntervention(
-                    decision = com.example.itv.domain.coaching.ContextualPreInterventionPolicy.bedtimeCarePrecedingDecision(),
+                    decision = com.example.itv.domain.coaching.ContextualPreInterventionPolicy.bedtimeCarePrecedingDecision(
+                        bedtimePassedMinutes = passedMin,
+                        isDarkRoom = isDark
+                    ),
                     transition = transition
                 )
                 return
@@ -1708,6 +1837,9 @@ class CoachingMonitorService : Service() {
     }
     private fun maybeShowJevFeedback() {
         if (feedbackView != null || feedbackQueryPending || feedbackSaving || !canShowJevFeedback()) return
+        val now = SystemClock.elapsedRealtime()
+        if (lastFeedbackQueryElapsed > 0L && now - lastFeedbackQueryElapsed < 15_000L) return
+        lastFeedbackQueryElapsed = now
         feedbackQueryPending = true
         jevUiScope.launch {
             try {
@@ -1754,6 +1886,7 @@ class CoachingMonitorService : Service() {
         // Clear the reference before detach callbacks to avoid reentrant removal.
         val previousOverlay = overlay
         overlay = null;displayedPackage=null;retryVisible=false;reactionInProgress=false;isRestMissionFailure=false;offerIsPreIntervention=false;offerFromJev=false
+        lastFeedbackQueryElapsed = 0L
         previousOverlay?.let { overlayFactory.removeControls(it); try { wm.removeView(it) } catch (_: Exception) {} }
         if (missionController.state.id == null) {
             com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this).stopFacedownMonitoring()

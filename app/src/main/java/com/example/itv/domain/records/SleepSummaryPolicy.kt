@@ -17,13 +17,49 @@ internal object SleepSummaryPolicy {
         if (it.isEmpty()) null else it.average()
     }
 
+    /** 성인 권장 수면 시간 범위: 7~8시간 (420~480분) */
+    const val RECOMMENDED_SLEEP_MIN_MINUTES: Long = 420L
+    const val RECOMMENDED_SLEEP_MAX_MINUTES: Long = 480L
+
+    data class RecommendedBedtimeRange(
+        val startHour: Int,
+        val startMinute: Int,
+        val endHour: Int,
+        val endMinute: Int
+    ) {
+        val startMinuteOfDay: Int get() = startHour * 60 + startMinute
+        val endMinuteOfDay: Int get() = endHour * 60 + endMinute
+        fun formatRange(): String = "%02d:%02d~%02d:%02d".format(startHour, startMinute, endHour, endMinute)
+    }
+
+    /**
+     * 다음날 예상 기상 시각과 성인 권장 수면량(7~8시간)을 조합하여 권장 취침 시간대(예: 22:00~23:00)를 계산합니다.
+     * - 가장 앞의 시간(start): 기상 시각 - 8시간 (충분한 8시간 수면 확보 기준)
+     * - 가장 뒤의 시간(end): 기상 시각 - 7시간 (최소 7시간 수면 확보 기준)
+     */
+    fun computeRecommendedBedtimeRange(wakeHour: Int, wakeMinute: Int): RecommendedBedtimeRange {
+        val wakeMinuteOfDay = ((wakeHour * 60 + wakeMinute) % 1440 + 1440) % 1440
+        val startMin = ((wakeMinuteOfDay - RECOMMENDED_SLEEP_MAX_MINUTES.toInt()) % 1440 + 1440) % 1440
+        val endMin = ((wakeMinuteOfDay - RECOMMENDED_SLEEP_MIN_MINUTES.toInt()) % 1440 + 1440) % 1440
+        return RecommendedBedtimeRange(
+            startHour = startMin / 60,
+            startMinute = startMin % 60,
+            endHour = endMin / 60,
+            endMinute = endMin % 60
+        )
+    }
+
     data class EstimatedBedtimeWindow(
         val validCount: Int,
         val avgStartHour: Int,
         val avgStartMinute: Int,
         val avgEndHour: Int,
         val avgEndMinute: Int,
-        val avgDurationMinutes: Long
+        val avgDurationMinutes: Long,
+        val recommendedBedtimeStartHour: Int = computeRecommendedBedtimeRange(avgEndHour, avgEndMinute).startHour,
+        val recommendedBedtimeStartMinute: Int = computeRecommendedBedtimeRange(avgEndHour, avgEndMinute).startMinute,
+        val recommendedBedtimeEndHour: Int = computeRecommendedBedtimeRange(avgEndHour, avgEndMinute).endHour,
+        val recommendedBedtimeEndMinute: Int = computeRecommendedBedtimeRange(avgEndHour, avgEndMinute).endMinute
     )
 
     data class DayOfWeekSleepProfile(
@@ -35,7 +71,9 @@ internal object SleepSummaryPolicy {
         val avgStartMinute: Int,
         val recommendedBedtimeHour: Int,
         val recommendedBedtimeMinute: Int,
-        val avgDurationMinutes: Long
+        val avgDurationMinutes: Long,
+        val recommendedBedtimeEndHour: Int = ((recommendedBedtimeHour * 60 + recommendedBedtimeMinute + 60) % 1440) / 60,
+        val recommendedBedtimeEndMinute: Int = (recommendedBedtimeHour * 60 + recommendedBedtimeMinute + 60) % 60
     )
 
     data class WeeklySleepProfile(
@@ -53,8 +91,16 @@ internal object SleepSummaryPolicy {
         val expectedWakeMinute: Int,
         val sourceDescription: String,
         val isDayOfWeekSpecific: Boolean,
-        val targetWakeDayOfWeek: DayOfWeek
-    )
+        val targetWakeDayOfWeek: DayOfWeek,
+        val recommendedEndHour: Int = ((recommendedHour * 60 + recommendedMinute + 60) % 1440) / 60,
+        val recommendedEndMinute: Int = (recommendedHour * 60 + recommendedMinute + 60) % 60
+    ) {
+        val recommendedStartMinuteOfDay: Int get() = recommendedHour * 60 + recommendedMinute
+        val recommendedEndMinuteOfDay: Int get() = recommendedEndHour * 60 + recommendedEndMinute
+        fun formatRecommendedRange(): String = "%02d:%02d~%02d:%02d".format(
+            recommendedHour, recommendedMinute, recommendedEndHour, recommendedEndMinute
+        )
+    }
 
     private fun circularAverageMinute(epochList: List<Long>, zone: ZoneId): Pair<Int, Int> {
         var sumSin = 0.0
@@ -169,12 +215,8 @@ internal object SleepSummaryPolicy {
             val (endH, endM) = circularAverageMinute(segs.map { it.second }, zone)
             val avgDuration = segs.map { (it.second - it.first) / 60000L }.average().toLong()
 
-            // 기상 시각에서 적정 수면 시간(개인 평균 7.0~8.5시간)을 역산하여 건강 권장 취침 시각 계산
-            val effectiveSleepMins = avgDuration.coerceIn(420L, 510L)
-            val wakeMinuteOfDay = endH * 60 + endM
-            val recBedtimeMinuteOfDay = (wakeMinuteOfDay - effectiveSleepMins + 1440L * 2) % 1440L
-            val recBedtimeH = (recBedtimeMinuteOfDay / 60).toInt()
-            val recBedtimeM = (recBedtimeMinuteOfDay % 60).toInt()
+            // 다음날 기상 시각과 성인 권장 수면량(7~8시간)을 조합하여 권장 취침 시간대 계산
+            val recRange = computeRecommendedBedtimeRange(endH, endM)
 
             dayProfiles[dow] = DayOfWeekSleepProfile(
                 wakeDayOfWeek = dow,
@@ -183,9 +225,11 @@ internal object SleepSummaryPolicy {
                 avgWakeMinute = endM,
                 avgStartHour = startH,
                 avgStartMinute = startM,
-                recommendedBedtimeHour = recBedtimeH,
-                recommendedBedtimeMinute = recBedtimeM,
-                avgDurationMinutes = avgDuration
+                recommendedBedtimeHour = recRange.startHour,
+                recommendedBedtimeMinute = recRange.startMinute,
+                avgDurationMinutes = avgDuration,
+                recommendedBedtimeEndHour = recRange.endHour,
+                recommendedBedtimeEndMinute = recRange.endMinute
             )
         }
 
@@ -210,7 +254,8 @@ internal object SleepSummaryPolicy {
     }
 
     /**
-     * 주간 수면 프로파일과 현재 시점을 바탕으로 최적의 동적 적응형 취침 목표 시각을 산출합니다.
+     * 주간 수면 프로파일과 현재 시점을 바탕으로 최적의 동적 적응형 취침 목표 시각과
+     * 성인 권장 수면량(7~8시간) 기반 권장 취침 시간대(예: 22:00~23:00)를 산출합니다.
      * 내일(또는 오늘) 기상 요일의 기록이 있으면 요일별 맞춤 패턴을 적용하고,
      * 없거나 부족하면 전체 평균으로 안전하게 fallback 합니다.
      */
@@ -231,19 +276,22 @@ internal object SleepSummaryPolicy {
 
         val dayProfile = weeklyProfile?.dayProfiles?.get(targetDow)
 
-        // 해당 기상 요일의 기록이 1건 이상 있으면 요일별 맞춤 취침 패턴 우선 적용
+        // 해당 기상 요일의 기록이 1건 이상 있으면 요일별 맞춤 취침/기상 패턴 우선 적용
         if (dayProfile != null && dayProfile.validCount >= 1) {
             val wakeTimeStr = "%02d:%02d".format(dayProfile.avgWakeHour, dayProfile.avgWakeMinute)
+            val recRange = computeRecommendedBedtimeRange(dayProfile.avgWakeHour, dayProfile.avgWakeMinute)
             return AdaptiveBedtimeTarget(
                 targetHour = dayProfile.avgStartHour,
                 targetMinute = dayProfile.avgStartMinute,
-                recommendedHour = dayProfile.recommendedBedtimeHour,
-                recommendedMinute = dayProfile.recommendedBedtimeMinute,
+                recommendedHour = recRange.startHour,
+                recommendedMinute = recRange.startMinute,
                 expectedWakeHour = dayProfile.avgWakeHour,
                 expectedWakeMinute = dayProfile.avgWakeMinute,
                 sourceDescription = "내일(${dowKorean}) 기상 패턴(${wakeTimeStr}) 기반 추정 (${dayProfile.validCount}일 기록)",
                 isDayOfWeekSpecific = true,
-                targetWakeDayOfWeek = targetDow
+                targetWakeDayOfWeek = targetDow,
+                recommendedEndHour = recRange.endHour,
+                recommendedEndMinute = recRange.endMinute
             )
         }
 
@@ -251,33 +299,36 @@ internal object SleepSummaryPolicy {
         if (weeklyProfile != null) {
             val global = weeklyProfile.globalWindow
             val wakeTimeStr = "%02d:%02d".format(global.avgEndHour, global.avgEndMinute)
-            val effSleepMins = global.avgDurationMinutes.coerceIn(420L, 510L)
-            val wakeMinuteOfDay = global.avgEndHour * 60 + global.avgEndMinute
-            val recBedtimeMinuteOfDay = (wakeMinuteOfDay - effSleepMins + 1440L * 2) % 1440L
+            val recRange = computeRecommendedBedtimeRange(global.avgEndHour, global.avgEndMinute)
             return AdaptiveBedtimeTarget(
                 targetHour = global.avgStartHour,
                 targetMinute = global.avgStartMinute,
-                recommendedHour = (recBedtimeMinuteOfDay / 60).toInt(),
-                recommendedMinute = (recBedtimeMinuteOfDay % 60).toInt(),
+                recommendedHour = recRange.startHour,
+                recommendedMinute = recRange.startMinute,
                 expectedWakeHour = global.avgEndHour,
                 expectedWakeMinute = global.avgEndMinute,
                 sourceDescription = "수면 추정/확인 기록 (${wakeTimeStr} 기상, 전체 ${global.validCount}일 평균)",
                 isDayOfWeekSpecific = false,
-                targetWakeDayOfWeek = targetDow
+                targetWakeDayOfWeek = targetDow,
+                recommendedEndHour = recRange.endHour,
+                recommendedEndMinute = recRange.endMinute
             )
         }
 
-        // 데이터가 전혀 없는 경우 기본값
+        // 데이터가 전혀 없는 경우 기본값 (기상 07:30 -> 권장 취침 23:30~00:30)
+        val defaultRange = computeRecommendedBedtimeRange(7, 30)
         return AdaptiveBedtimeTarget(
             targetHour = 23,
             targetMinute = 30,
-            recommendedHour = 23,
-            recommendedMinute = 30,
+            recommendedHour = defaultRange.startHour,
+            recommendedMinute = defaultRange.startMinute,
             expectedWakeHour = 7,
             expectedWakeMinute = 30,
             sourceDescription = "기본 기준 시각 (23:30)",
             isDayOfWeekSpecific = false,
-            targetWakeDayOfWeek = targetDow
+            targetWakeDayOfWeek = targetDow,
+            recommendedEndHour = defaultRange.endHour,
+            recommendedEndMinute = defaultRange.endMinute
         )
     }
 }

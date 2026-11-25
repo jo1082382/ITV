@@ -450,13 +450,13 @@ internal fun NightSummary(
                                     color = if (isDark) Color(0xFFCDE6D6) else Color(0xFF2D5A44)
                                 )
                                 Text(
-                                    "%02d:%02d".format(adaptiveTarget.recommendedHour, adaptiveTarget.recommendedMinute),
+                                    adaptiveTarget.formatRecommendedRange(),
                                     style = MaterialTheme.typography.labelLarge,
                                     fontWeight = FontWeight.Bold,
                                     color = if (isDark) Color(0xFF85E3B3) else Color(0xFF1B4332)
                                 )
                                 Text(
-                                    "(7~8.5시간 수면 기준)",
+                                    "(7~8시간 수면 기준)",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = if (isDark) Color(0xFFA5C4B5) else Color(0xFF52796F)
                                 )
@@ -590,9 +590,9 @@ internal fun NightSummary(
                     text = {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("• 오늘 밤 추정 취침: 내일 기상 요일의 평소 실제 취침 패턴을 바탕으로 계산한 시각입니다.", style = MaterialTheme.typography.bodyMedium)
-                            Text("• 기상 기준 권장 취침: 내일 예상 기상 시각에서 건강 수면(7~8.5시간)을 역산한 권장 시각입니다.", style = MaterialTheme.typography.bodyMedium)
-                            Text("• 장기 기록 통합: OS가 보관하는 최근 기록과 앱에 저장된 장기 아카이브·사용자 확인 기록을 함께 반영합니다.", style = MaterialTheme.typography.bodyMedium)
-                            Text("• 스탬프 점수와 야간 개입 모두 이 요일별 수면 리듬을 기준으로 자동 조절됩니다.", style = MaterialTheme.typography.bodyMedium)
+                            Text("• 기상 기준 권장 취침: 내일 예상 기상 시각에서 성인 권장 수면량(7~8시간)을 역산한 권장 취침 시간대(예: 22:00~23:00)입니다.", style = MaterialTheme.typography.bodyMedium)
+                            Text("• 취침 전 2시간 점증 가중: 권장 취침 시작 2시간 전부터 1시간 단위로 가중치(2~1시간 전 35%, 1~0시간 전 65%)가 커져 캘린더 점수에 반영됩니다.", style = MaterialTheme.typography.bodyMedium)
+                            Text("• 장기 기록 통합 & 개입 연동: OS·아카이브 수면 기록을 통합해 권장 취침 시간대에 가까워질수록 개입 기준 확률도 자동으로 민감해집니다.", style = MaterialTheme.typography.bodyMedium)
                         }
                     },
                     confirmButton = {

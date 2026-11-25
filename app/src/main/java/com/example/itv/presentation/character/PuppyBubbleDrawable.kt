@@ -13,7 +13,9 @@ class PuppyBubbleDrawable : Drawable() {
     private var below = true
 
     fun pointToward(fraction: Float, belowBubble: Boolean) {
-        targetFraction = fraction.coerceIn(0.12f, 0.88f)
+        val clamped = fraction.coerceIn(0.12f, 0.88f)
+        if (kotlin.math.abs(targetFraction - clamped) < 0.004f && below == belowBubble) return
+        targetFraction = clamped
         below = belowBubble
         invalidateSelf()
     }

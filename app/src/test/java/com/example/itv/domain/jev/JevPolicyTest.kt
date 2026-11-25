@@ -299,6 +299,67 @@ class JevPolicyTest {
         val daytimeAdj = JevCandidatePolicy.computeThresholdAdjustment(s, daytimeActive)
         assertEquals(0.15, daytimeAdj.bedtimeDelta, 0.001)
         assertEquals(0.65, daytimeAdj.effectiveThreshold, 0.001)
+
+        // 6. 권장 취침 시간대(예: 22:00~23:00, range=60m) 기반 점증 개입 확률 조정:
+        //    -90분(2~1시간 전) < -30분(1~0시간 전) < +30분(권장 구간 내) < +90분(권장 종료 경과) 순으로 더 민감(더 음수)해야 함
+        val recOuterDark = base.copy(
+            recommendedBedtimeDistanceMinutes = -90,
+            recommendedBedtimeRangeMinutes = 60,
+            ambientLux = 2f,
+            screenBrightness = 40,
+            isNearOrOccluded = false
+        )
+        val recInnerDark = base.copy(
+            recommendedBedtimeDistanceMinutes = -30,
+            recommendedBedtimeRangeMinutes = 60,
+            ambientLux = 2f,
+            screenBrightness = 40,
+            isNearOrOccluded = false
+        )
+        val recInsideDark = base.copy(
+            recommendedBedtimeDistanceMinutes = 30,
+            recommendedBedtimeRangeMinutes = 60,
+            ambientLux = 2f,
+            screenBrightness = 40,
+            isNearOrOccluded = false
+        )
+        val recPastEndDark = base.copy(
+            recommendedBedtimeDistanceMinutes = 90,
+            recommendedBedtimeRangeMinutes = 60,
+            ambientLux = 2f,
+            screenBrightness = 40,
+            isNearOrOccluded = false
+        )
+        val dOuter = JevCandidatePolicy.computeBedtimeEnvironmentDelta(recOuterDark)
+        val dInner = JevCandidatePolicy.computeBedtimeEnvironmentDelta(recInnerDark)
+        val dInside = JevCandidatePolicy.computeBedtimeEnvironmentDelta(recInsideDark)
+        val dPastEnd = JevCandidatePolicy.computeBedtimeEnvironmentDelta(recPastEndDark)
+
+        assertTrue("2~1h before rec bedtime should lower threshold ($dOuter)", dOuter < -0.04)
+        assertTrue("1~0h before rec bedtime ($dInner) should lower threshold more than 2~1h before ($dOuter)", dInner < dOuter)
+        assertTrue("Inside rec bedtime range ($dInside) should lower threshold more than pre-bedtime ($dInner)", dInside < dInner)
+        assertTrue("Past rec bedtime end ($dPastEnd) should reach max protection (-0.30)", dPastEnd <= -0.295)
+        assertTrue(JevCandidatePolicy.thresholdBreakdown(s, recPastEndDark).contains("권장취침경과암실"))
+
+        // 7. 일반 실내 조명(30 lx)에서도 권장 취침 전 2시간/구간/경과에 따라 완만하게 기준 확률이 내려가야 함
+        val recInnerIndoor = base.copy(
+            recommendedBedtimeDistanceMinutes = -30,
+            recommendedBedtimeRangeMinutes = 60,
+            ambientLux = 30f,
+            screenBrightness = 120,
+            isNearOrOccluded = false
+        )
+        val recPastEndIndoor = base.copy(
+            recommendedBedtimeDistanceMinutes = 90,
+            recommendedBedtimeRangeMinutes = 60,
+            ambientLux = 30f,
+            screenBrightness = 120,
+            isNearOrOccluded = false
+        )
+        val indoorInnerDelta = JevCandidatePolicy.computeBedtimeEnvironmentDelta(recInnerIndoor)
+        val indoorPastDelta = JevCandidatePolicy.computeBedtimeEnvironmentDelta(recPastEndIndoor)
+        assertTrue("Indoor 1h before rec bedtime should gently lower threshold ($indoorInnerDelta)", indoorInnerDelta < -0.03)
+        assertTrue("Indoor past rec bedtime ($indoorPastDelta) should lower threshold more than before ($indoorInnerDelta)", indoorPastDelta < indoorInnerDelta)
     }
     @Test fun resetSessionClearsAccumulatedTotalsAndStartsFreshSession() {
         var seq=0

@@ -85,6 +85,29 @@ object LongformDiagnosticHud {
     private var jevProbText: TextView? = null
 
     private var lastAppliedIconKey: String? = null
+    private var lastAppliedStatusColor: Int? = null
+    private var lastOutsideObserveElapsed: Long = 0L
+    private var outsideTouchWatchEnabled: Boolean = true
+    private var cachedPowerManager: PowerManager? = null
+    private var cachedKeyguardManager: KeyguardManager? = null
+
+    private fun TextView?.setTextIfChanged(newText: CharSequence) {
+        if (this != null && this.text?.toString() != newText.toString()) {
+            this.text = newText
+        }
+    }
+
+    private fun TextView?.setTextColorIfChanged(color: Int) {
+        if (this != null && this.currentTextColor != color) {
+            this.setTextColor(color)
+        }
+    }
+
+    private fun TextView?.setVisibilityIfChanged(vis: Int) {
+        if (this != null && this.visibility != vis) {
+            this.visibility = vis
+        }
+    }
 
     var previewMoodOverride: PuppyMood? = null
         private set
@@ -128,11 +151,14 @@ object LongformDiagnosticHud {
             mini?.setImageResource(R.drawable.itv_motion_sleep)
             lastAppliedIconKey = "SLEEP"
             val sleepColor = Color.parseColor("#B197FC")
-            statusDot?.setColor(sleepColor)
-            border?.setStroke((2.5f * density).toInt(), sleepColor)
+            if (lastAppliedStatusColor != sleepColor) {
+                statusDot?.setColor(sleepColor)
+                border?.setStroke((2.5f * density).toInt(), sleepColor)
+                lastAppliedStatusColor = sleepColor
+            }
             if (isExpanded) {
-                modeText?.text = "🌙 취침 권장 시간 초과 (휴식 대기)"
-                modeText?.setTextColor(sleepColor)
+                modeText.setTextIfChanged("🌙 취침 권장 시간 초과 (휴식 대기)")
+                modeText.setTextColorIfChanged(sleepColor)
             }
         } else {
             val ctx = rootContainer?.context?.applicationContext
@@ -217,6 +243,10 @@ object LongformDiagnosticHud {
         val appCtx = context.applicationContext
         val wm = appCtx.getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: return false
         windowManager = wm
+        cachedPowerManager = appCtx.getSystemService(PowerManager::class.java)
+        cachedKeyguardManager = appCtx.getSystemService(KeyguardManager::class.java)
+        lastAppliedStatusColor = if (isSleeping) Color.parseColor("#B197FC") else Color.parseColor("#48C774")
+        lastOutsideObserveElapsed = 0L
 
         val dp = appCtx.resources.displayMetrics.density
         fun Int.dp(): Int = (this * dp).toInt()
@@ -508,11 +538,18 @@ object LongformDiagnosticHud {
         val dragAndTapListener = View.OnTouchListener { _, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_OUTSIDE -> {
-                    // HUD 바깥 영역(게임 화면, 영상, 일반 앱 화면)을 사용자가 터치함!
-                    // 게임에 터치 이벤트를 전혀 방해하지 않으면서 O(1)로 조작 발생을 즉시 기록하고 HUD 색상을 즉시 갱신
-                    GeneralAppTracker.onUserInteraction()
                     val fg = JevObservationHub.foregroundPackage
-                    if (!fg.isNullOrBlank()) {
+                    // ITV 앱 내부(홈 캘린더 스크롤 등)에서는 터치할 때마다 HUD 갱신/관측을 실행하지 않아 스크롤 끊김 원천 차단
+                    if (fg.isNullOrBlank() || fg == appCtx.packageName) {
+                        return@OnTouchListener false
+                    }
+                    // 게임 등 외부 앱의 조작 타이머만 O(1)로 즉시 기록
+                    GeneralAppTracker.onUserInteraction()
+                    val now = SystemClock.elapsedRealtime()
+                    val isGame = GeneralAppTracker.snapshot.value.category == InferredAppCategory.GAME
+                    // 게임이거나 HUD가 펼쳐진 상태에서 최소 500ms 간격으로만 즉시 관측·갱신 (유튜브/인스타 스크롤 중 프레임 스파이크 방지)
+                    if ((isGame || isExpanded) && now - lastOutsideObserveElapsed >= 500L) {
+                        lastOutsideObserveElapsed = now
                         GeneralAppTracker.onObserve(appCtx, fg)
                         renderHud(appCtx)
                     }
@@ -538,11 +575,15 @@ object LongformDiagnosticHud {
                         val metrics = appCtx.resources.displayMetrics
                         val viewW = root.width.takeIf { it > 0 } ?: 52.dp()
                         val viewH = root.height.takeIf { it > 0 } ?: 52.dp()
-                        params.x = (initialX + dx).coerceIn(0, (metrics.widthPixels - viewW).coerceAtLeast(0))
-                        params.y = (initialY + dy).coerceIn(0, (metrics.heightPixels - viewH).coerceAtLeast(0))
-                        try {
-                            wm.updateViewLayout(root, params)
-                        } catch (_: Exception) {}
+                        val nextX = (initialX + dx).coerceIn(0, (metrics.widthPixels - viewW).coerceAtLeast(0))
+                        val nextY = (initialY + dy).coerceIn(0, (metrics.heightPixels - viewH).coerceAtLeast(0))
+                        if (nextX != params.x || nextY != params.y) {
+                            params.x = nextX
+                            params.y = nextY
+                            try {
+                                wm.updateViewLayout(root, params)
+                            } catch (_: Exception) {}
+                        }
                     }
                     true
                 }
@@ -571,7 +612,8 @@ object LongformDiagnosticHud {
             return false
         }
 
-        // 가벼운 UI 갱신 루프 (이미 수집된 메모리 내 StateFlow 값만 읽어 표시하므로 추가 배터리 소모 0)
+        // 가벼운 UI 갱신 루프 (dirty-check로 실제 변경이 없으면 오버레이 리드로우 0회)
+        outsideTouchWatchEnabled = true
         scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
         scope?.launch {
             while (isActive) {
@@ -579,9 +621,32 @@ object LongformDiagnosticHud {
                     hide()
                     break
                 }
+                val inOwnApp = JevObservationHub.foregroundPackage == appCtx.packageName
+                // ITV 내부 화면(홈/캘린더 스크롤 등)에서는 FLAG_WATCH_OUTSIDE_TOUCH 자체를 꺼서
+                // 모든 터치마다 InputDispatcher -> HUD 오버레이 IPC(ACTION_OUTSIDE)가 발생하지 않도록 차단
+                val shouldWatchOutside = !inOwnApp
+                if (outsideTouchWatchEnabled != shouldWatchOutside) {
+                    outsideTouchWatchEnabled = shouldWatchOutside
+                    val curParams = layoutParams
+                    val curRoot = rootContainer
+                    val curWm = windowManager
+                    if (curParams != null && curRoot != null && curWm != null) {
+                        curParams.flags = if (shouldWatchOutside) {
+                            curParams.flags or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
+                        } else {
+                            curParams.flags and WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH.inv()
+                        }
+                        try { curWm.updateViewLayout(curRoot, curParams) } catch (_: Exception) {}
+                    }
+                }
                 renderHud(appCtx)
-                // 아이콘으로 접혀 있을 때는 갱신 주기를 800ms로 늦춰 더욱 가볍게 유지
-                delay(if (isExpanded) 400L else 800L)
+                val intervalMs = when {
+                    inOwnApp && !isExpanded -> 2000L
+                    inOwnApp && isExpanded -> 1000L
+                    isExpanded -> 500L
+                    else -> 1000L
+                }
+                delay(intervalMs)
             }
         }
         // 실제 Jev 호출로 새 확률이 도착하면 주기 대기 없이 즉시(0ms 지연) 표정·퍼센트 갱신
@@ -675,9 +740,12 @@ object LongformDiagnosticHud {
             }
         }
 
-        val dp = appCtx.resources.displayMetrics.density
-        collapsedBorderDrawable?.setStroke((2.5f * dp).toInt(), statusColor)
-        collapsedStatusDotDrawable?.setColor(statusColor)
+        if (lastAppliedStatusColor != statusColor) {
+            val dp = appCtx.resources.displayMetrics.density
+            collapsedBorderDrawable?.setStroke((2.5f * dp).toInt(), statusColor)
+            collapsedStatusDotDrawable?.setColor(statusColor)
+            lastAppliedStatusColor = statusColor
+        }
 
         // Jev 확률 vs 우리 앱 보정 기준 확률 차이에 따른 5단계 표정 계산 (순수 인메모리 StateFlow 조회)
         val jevRuntime = if (JevFeature.available()) runCatching { JevRuntime.get(appCtx) }.getOrNull() else null
@@ -715,8 +783,8 @@ object LongformDiagnosticHud {
         }
 
         // HUD가 아이콘으로 접혀 있는 상태에서도 카테고리별 누적 사용 시간은 끊기지 않고 계속 집계한다.
-        val pm = appCtx.getSystemService(PowerManager::class.java)
-        val km = appCtx.getSystemService(KeyguardManager::class.java)
+        val pm = cachedPowerManager ?: appCtx.getSystemService(PowerManager::class.java).also { cachedPowerManager = it }
+        val km = cachedKeyguardManager ?: appCtx.getSystemService(KeyguardManager::class.java).also { cachedKeyguardManager = it }
         val isUnlockedNow = (pm?.isInteractive == true) && (km?.isKeyguardLocked != true)
         val isOwnOrSystemPkg = fgPkg != null && (
             fgPkg == appCtx.packageName ||
@@ -739,9 +807,9 @@ object LongformDiagnosticHud {
         when {
             previewMoodOverride != null -> {
                 val m = previewMoodOverride!!
-                jevProbText?.visibility = View.VISIBLE
-                jevProbText?.text = "🐾 HUD 테스트: ${HudPuppyFaceRenderer.stageLabel(m)} (${HudPuppyFaceRenderer.gapRangeLabel(m)})"
-                jevProbText?.setTextColor(HudPuppyFaceRenderer.accentColorInt(m))
+                jevProbText.setVisibilityIfChanged(View.VISIBLE)
+                jevProbText.setTextIfChanged("🐾 HUD 테스트: ${HudPuppyFaceRenderer.stageLabel(m)} (${HudPuppyFaceRenderer.gapRangeLabel(m)})")
+                jevProbText.setTextColorIfChanged(HudPuppyFaceRenderer.accentColorInt(m))
             }
             jevEnabled && jevProb != null && effThreshold != null && liveProbabilityMood != null -> {
                 val jevPct = (jevProb * 100.0).roundToInt()
@@ -752,9 +820,9 @@ object LongformDiagnosticHud {
                     gapPct == 0 -> "기준 도달 0%p"
                     else -> "초과 +${-gapPct}%p"
                 }
-                jevProbText?.visibility = View.VISIBLE
-                jevProbText?.text = "🐾 ${HudPuppyFaceRenderer.stageLabel(liveProbabilityMood)} · Jev $jevPct% vs 기준 $thrPct% ($gapDesc)"
-                jevProbText?.setTextColor(HudPuppyFaceRenderer.accentColorInt(liveProbabilityMood))
+                jevProbText.setVisibilityIfChanged(View.VISIBLE)
+                jevProbText.setTextIfChanged("🐾 ${HudPuppyFaceRenderer.stageLabel(liveProbabilityMood)} · Jev $jevPct% vs 기준 $thrPct% ($gapDesc)")
+                jevProbText.setTextColorIfChanged(HudPuppyFaceRenderer.accentColorInt(liveProbabilityMood))
             }
             jevEnabled && effThreshold != null -> {
                 val thrPct = (effThreshold * 100.0).roundToInt()
@@ -770,12 +838,12 @@ object LongformDiagnosticHud {
                 }
                 val isBlockedHint = !tokenConfigured || !consentGranted || CoachingAutoStart.testModeEnabled(appCtx) ||
                     liveStatus.contains("보류")
-                jevProbText?.visibility = View.VISIBLE
-                jevProbText?.text = "🐾 기준 $thrPct% · $statusHint"
-                jevProbText?.setTextColor(Color.parseColor(if (isBlockedHint) "#FFD166" else "#B0BEC5"))
+                jevProbText.setVisibilityIfChanged(View.VISIBLE)
+                jevProbText.setTextIfChanged("🐾 기준 $thrPct% · $statusHint")
+                jevProbText.setTextColorIfChanged(Color.parseColor(if (isBlockedHint) "#FFD166" else "#B0BEC5"))
             }
             else -> {
-                jevProbText?.visibility = View.GONE
+                jevProbText.setVisibilityIfChanged(View.GONE)
             }
         }
 
@@ -793,10 +861,10 @@ object LongformDiagnosticHud {
                     InstagramScreenMode.PROFILE -> "👤 인스타 프로필$powerTag" to Color.parseColor("#B39DDB")
                     else -> "📸 인스타: ${ig.mode.label}" to Color.parseColor("#AAAAAA")
                 }
-                modeText?.text = modeLabel
-                modeText?.setTextColor(modeColor)
+                modeText.setTextIfChanged(modeLabel)
+                modeText.setTextColorIfChanged(modeColor)
 
-                titleText?.text = when {
+                titleText.setTextIfChanged(when {
                     isWritingBlocked && ig.mode != InstagramScreenMode.DM ->
                         "✍️ 인스타그램에서 메시지·댓글 입력 중"
                     ig.mode == InstagramScreenMode.REELS ->
@@ -815,14 +883,14 @@ object LongformDiagnosticHud {
                         "인스타그램 프로필 화면 확인 중"
                     else ->
                         "인스타그램 사용 중"
-                }
+                })
 
-                basisText?.text = "🔎 구분: 인스타그램 ${ig.mode.label} (경량 뷰ID 확정)"
+                basisText.setTextIfChanged("🔎 구분: 인스타그램 ${ig.mode.label} (경량 뷰ID 확정)")
 
                 val reelsStr = formatDurationSec(ig.reelsWatchDurationMs / 1000L)
                 val modeStr = formatDurationSec(ig.currentModeDurationMs / 1000L)
-                timerText?.text = "⏱ 현 화면: $modeStr · 누적 릴스: $reelsStr (스와이프 ${ig.reelsSwipeCount}회)"
-                timerText?.setTextColor(Color.parseColor("#E0E0E0"))
+                timerText.setTextIfChanged("⏱ 현 화면: $modeStr · 누적 릴스: $reelsStr (스와이프 ${ig.reelsSwipeCount}회)")
+                timerText.setTextColorIfChanged(Color.parseColor("#E0E0E0"))
             }
 
             // 2. 유튜브 전면 실행 중
@@ -837,15 +905,15 @@ object LongformDiagnosticHud {
                     YoutubeWatchMode.SHORTS_COMMENTS -> "💬 유튜브 숏폼 댓글$powerTag" to Color.parseColor("#FFB74D")
                     else -> "📺 유튜브: ${yt.mode.label}" to Color.parseColor("#AAAAAA")
                 }
-                modeText?.text = modeLabel
-                modeText?.setTextColor(modeColor)
+                modeText.setTextIfChanged(modeLabel)
+                modeText.setTextColorIfChanged(modeColor)
 
                 val ytSwipes = maxOf(
                     SwipeDynamicsTracker.snapshot(ShortformApp.YOUTUBE).totalSwipesInRun,
                     YoutubeProbe.candidates
                 )
 
-                titleText?.text = when {
+                titleText.setTextIfChanged(when {
                     isWritingBlocked ->
                         "✍️ 유튜브에서 검색어·댓글 작성 중"
                     yt.mode == YoutubeWatchMode.PORTRAIT_WATCH || yt.mode == YoutubeWatchMode.LANDSCAPE_FULLSCREEN ->
@@ -858,15 +926,15 @@ object LongformDiagnosticHud {
                         "쇼츠(Shorts) 댓글 보는 중 (개입 보류)"
                     else ->
                         yt.currentTitle ?: "유튜브 화면 탐색 중"
-                }
+                })
 
                 val lfMetrics = YoutubeLongformTracker.getJevLongformMetrics()
-                basisText?.text = when (yt.mode) {
+                basisText.setTextIfChanged(when (yt.mode) {
                     YoutubeWatchMode.SHORTS -> "🔎 구분: 쇼츠 시청 · 스와이프 전환 ${ytSwipes}회"
                     YoutubeWatchMode.SHORTS_COMMENTS -> "🔎 구분: 쇼츠 댓글 열람 (개입 보류)"
                     YoutubeWatchMode.BROWSE_FEED -> "🔎 구분: 홈/피드 둘러보는 중 (시청 정지)"
                     else -> "🔎 구분: ${yt.mode.label} · 연속전환 ${lfMetrics.consecutiveChainCount}회 · 완료 ${lfMetrics.completedLongformCount}편"
-                }
+                })
 
                 val timeStr = formatDurationSec(yt.currentVideoWatchDurationMs / 1000L)
                 val modeStr = formatDurationSec(yt.currentModeDurationMs / 1000L)
@@ -896,8 +964,8 @@ object LongformDiagnosticHud {
                         "⏹ 관측 대기" to "⏹ 관측 대기 중"
                     }
                 }
-                timerText?.text = timerLine
-                timerText?.setTextColor(
+                timerText.setTextIfChanged(timerLine)
+                timerText.setTextColorIfChanged(
                     when {
                         yt.isEndscreenDetected -> Color.parseColor("#FFD166")
                         yt.mode == YoutubeWatchMode.SHORTS && yt.isPlaying -> Color.parseColor("#E8F5E9")
@@ -924,11 +992,11 @@ object LongformDiagnosticHud {
                     else -> Color.parseColor("#64B5F6")
                 }
 
-                modeText?.text = "${gen.category.badge} · ${gen.appName}$powerTag"
-                modeText?.setTextColor(headerColor)
+                modeText.setTextIfChanged("${gen.category.badge} · ${gen.appName}$powerTag")
+                modeText.setTextColorIfChanged(headerColor)
 
-                titleText?.text = gen.inferredActivity
-                basisText?.text = "🔎 확정: ${gen.classificationBasis}"
+                titleText.setTextIfChanged(gen.inferredActivity)
+                basisText.setTextIfChanged("🔎 확정: ${gen.classificationBasis}")
 
                 val stayStr = formatDurationSec(gen.currentAppDurationMs / 1000L)
                 val audioTag = when {
@@ -942,8 +1010,8 @@ object LongformDiagnosticHud {
                         "무조작 ${gen.idleSeconds}초(10초간 ${gen.recentInteractions10s}회 터치) · ${gen.inferredScreen}"
                     else -> gen.inferredScreen
                 }
-                timerText?.text = "⏱ 체류: $stayStr · $audioTag · $kbOrScreenTag"
-                timerText?.setTextColor(Color.parseColor("#DDDDDD"))
+                timerText.setTextIfChanged("⏱ 체류: $stayStr · $audioTag · $kbOrScreenTag")
+                timerText.setTextColorIfChanged(Color.parseColor("#DDDDDD"))
             }
         }
 
@@ -952,17 +1020,17 @@ object LongformDiagnosticHud {
         val totalPhysMs = SessionCategoryTracker.getTotalPhysicalMs()
         val totalWeightMs = SessionCategoryTracker.getTotalWeightedMs()
 
-        categoryUsageText?.text = if (activeCats.isNotEmpty()) {
+        categoryUsageText.setTextIfChanged(if (activeCats.isNotEmpty()) {
             "📊 카테고리: " + activeCats.joinToString(" · ") { (cat, ms) ->
                 "${cat.shortLabel} ${formatDurationSec(ms / 1000L)}"
             }
         } else {
             "📊 카테고리: 집계 대기 중"
-        }
+        })
 
         val physStr = formatDurationSec(totalPhysMs / 1000L)
         val weightStr = formatDurationSec(totalWeightMs / 1000L)
-        totalUsageText?.text = "⏱ 총 사용: $physStr (환산 $weightStr · 세션)"
+        totalUsageText.setTextIfChanged("⏱ 총 사용: $physStr (환산 $weightStr · 세션)")
     }
 
     fun hide() {
@@ -983,6 +1051,11 @@ object LongformDiagnosticHud {
         miniIconImageView = null
         defaultAppIconDrawable = null
         lastAppliedIconKey = null
+        lastAppliedStatusColor = null
+        lastOutsideObserveElapsed = 0L
+        outsideTouchWatchEnabled = true
+        cachedPowerManager = null
+        cachedKeyguardManager = null
         currentProbabilityMood = null
         previewMoodOverride = null
         isSleeping = false
