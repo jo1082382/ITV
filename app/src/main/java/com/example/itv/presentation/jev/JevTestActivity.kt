@@ -3,6 +3,7 @@ package com.example.itv.presentation.jev
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.ui.platform.LocalContext
@@ -42,12 +43,24 @@ import com.example.itv.infrastructure.storage.shortform.ShortformDailyStore
 import com.example.itv.infrastructure.storage.shortform.ReelsUsageStore
 import com.example.itv.infrastructure.coaching.InterventionJournal
 import com.example.itv.infrastructure.coaching.MissionStats
+import com.example.itv.domain.records.DailyHealthTier
 import com.example.itv.presentation.character.CompanionPreviewActivity
 import com.example.itv.presentation.coaching.CoachingMonitorService
 import com.example.itv.presentation.components.*
+import com.example.itv.presentation.usage.ChestOpeningPreviewStrip
+import com.example.itv.presentation.usage.ChestOpeningRequest
+import com.example.itv.presentation.usage.DailyStampPrefs
+import com.example.itv.presentation.usage.DailyStampRitualOverlay
+import com.example.itv.presentation.usage.MonthlyChestOpeningOverlay
+import com.example.itv.presentation.usage.StampCharacterBitmapCache
+import com.example.itv.presentation.usage.StampMotionTestBar
+import com.example.itv.presentation.usage.StampRitualRequest
 import com.example.itv.ui.theme.ITVTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.time.Instant
+import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.UUID
@@ -69,6 +82,7 @@ class JevTestActivity: ComponentActivity() {
 }
 @Composable
 private fun JevTestScreen(vm: JevTestViewModel,onBack: ()->Unit,modifier: Modifier) {
+    val context = LocalContext.current
     val s by vm.store.settings.collectAsState()
     val initialized by vm.store.initialized.collectAsState()
     val busy by vm.busy.collectAsState()
@@ -76,31 +90,63 @@ private fun JevTestScreen(vm: JevTestViewModel,onBack: ()->Unit,modifier: Modifi
     val notice by vm.store.notice.collectAsState()
     var page by rememberSaveable { mutableIntStateOf(0) }
     val holder=rememberSaveableStateHolder()
-    Column(modifier.fillMaxSize()) {
-        TextButton(onClick=onBack) { Text("‹ 설정으로 돌아가기") }
-        Text("Jev 공동 테스트",Modifier.padding(horizontal=20.dp),style=MaterialTheme.typography.headlineSmall,
-            fontWeight=FontWeight.Bold,color=ItvGreen)
-        PrimaryScrollableTabRow(selectedTabIndex=page,edgePadding=12.dp) {
-            listOf("연결","판단 설정","개입 기록","실시간 측정 테스트","카테고리 확률 테스트","개입 맥락·말풍선 테스트").forEachIndexed { i,title ->
-                Tab(selected=page==i,onClick={page=i},text={Text(title)})
-            }
+    var previewStampRitual by remember { mutableStateOf<StampRitualRequest?>(null) }
+    var previewChestRequest by remember { mutableStateOf<ChestOpeningRequest?>(null) }
+    val selectedStampCharacter = remember { DailyStampPrefs.getSelectedCharacter(context) }
+
+    BackHandler(enabled = previewStampRitual != null || previewChestRequest != null) {
+        when {
+            previewStampRitual != null -> previewStampRitual = null
+            previewChestRequest != null -> previewChestRequest = null
         }
-        if(busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-        if(!initialized) { CircularProgressIndicator(Modifier.padding(24.dp));return@Column }
-        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(20.dp),
-            verticalArrangement=Arrangement.spacedBy(16.dp)) {
-            message?.let { Text(it,style=MaterialTheme.typography.bodyMedium) }
-            notice?.let { Text(it,color=MaterialTheme.colorScheme.error) }
-            holder.SaveableStateProvider(page) {
-                when(page) {
-                    0 -> ConnectionPage(vm,s,busy)
-                    1 -> SettingsPage(vm,s,busy)
-                    2 -> InterventionHistoryPage()
-                    3 -> ObservationTestPage(vm,busy)
-                    4 -> CategoryProbabilityTestPage(vm,s,busy)
-                    else -> InterventionContextBubbleTestPage(vm,s,busy)
+    }
+
+    Box(Modifier.fillMaxSize()) {
+        Column(modifier.fillMaxSize()) {
+            TextButton(onClick=onBack) { Text("‹ 설정으로 돌아가기") }
+            Text("Jev 공동 테스트",Modifier.padding(horizontal=20.dp),style=MaterialTheme.typography.headlineSmall,
+                fontWeight=FontWeight.Bold,color=ItvGreen)
+            PrimaryScrollableTabRow(selectedTabIndex=page,edgePadding=12.dp) {
+                listOf("연결","판단 설정","개입 기록","실시간 측정 테스트","카테고리 확률 테스트","개입 맥락·말풍선 테스트","도장·상자 미리보기").forEachIndexed { i,title ->
+                    Tab(selected=page==i,onClick={page=i},text={Text(title)})
                 }
             }
+            if(busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+            if(!initialized) { CircularProgressIndicator(Modifier.padding(24.dp));return@Column }
+            Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(20.dp),
+                verticalArrangement=Arrangement.spacedBy(16.dp)) {
+                message?.let { Text(it,style=MaterialTheme.typography.bodyMedium) }
+                notice?.let { Text(it,color=MaterialTheme.colorScheme.error) }
+                holder.SaveableStateProvider(page) {
+                    when(page) {
+                        0 -> ConnectionPage(vm,s,busy)
+                        1 -> SettingsPage(vm,s,busy)
+                        2 -> InterventionHistoryPage()
+                        3 -> ObservationTestPage(vm,busy)
+                        4 -> CategoryProbabilityTestPage(vm,s,busy)
+                        5 -> InterventionContextBubbleTestPage(vm,s,busy)
+                        else -> CalendarRewardPreviewTestPage(
+                            onLaunchStampPreview = { previewStampRitual = it },
+                            onLaunchChestPreview = { previewChestRequest = it }
+                        )
+                    }
+                }
+            }
+        }
+
+        previewChestRequest?.let { req ->
+            MonthlyChestOpeningOverlay(
+                request = req,
+                character = selectedStampCharacter,
+                onDismiss = { previewChestRequest = null }
+            )
+        }
+
+        previewStampRitual?.let { req ->
+            DailyStampRitualOverlay(
+                request = req,
+                onFinished = { previewStampRitual = null }
+            )
         }
     }
 }
@@ -2106,6 +2152,71 @@ private fun LongformObservationPage() {
         }
     }
 }
+
+@Composable
+private fun CalendarRewardPreviewTestPage(
+    onLaunchStampPreview: (StampRitualRequest) -> Unit,
+    onLaunchChestPreview: (ChestOpeningRequest) -> Unit
+) {
+    val context = LocalContext.current
+    val selectedStampCharacter = remember { DailyStampPrefs.getSelectedCharacter(context) }
+    val sharedOutlineBitmap by produceState(
+        initialValue = StampCharacterBitmapCache.getCachedMonochromeOutline(selectedStampCharacter.id),
+        key1 = context,
+        key2 = selectedStampCharacter.id
+    ) {
+        if (value == null) {
+            value = withContext(Dispatchers.Default) {
+                StampCharacterBitmapCache.preload(context, selectedStampCharacter)
+                StampCharacterBitmapCache.getMonochromeOutline(context, selectedStampCharacter)
+            }
+        }
+    }
+
+    TestSection("홈 캘린더 도장·보물상자 연출 미리보기") {
+        Text(
+            text = "홈 화면 성능 최적화를 위해 테스트용 미리보기 바를 이곳으로 이동했습니다. 실제 기록이나 포인트·상자 수령 상태는 변경되지 않습니다.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        StampMotionTestBar(
+            preloadedOutlineBitmap = sharedOutlineBitmap,
+            onTestTier = { testTier ->
+                val (sampleScore, sampleHeadline) = when (testTier) {
+                    DailyHealthTier.GOLD -> 90 to "취침 전 스마트폰 절제와 숏폼 탈출이 모두 완벽한 날이었어요!"
+                    DailyHealthTier.SILVER -> 78 to "전반적으로 건강한 디지털 리듬을 잘 유지했어요."
+                    DailyHealthTier.BRONZE -> 68 to "조금 아쉽지만 괜찮아요. 내일은 취침 전 조금만 일찍 내려놔요."
+                    DailyHealthTier.WARNING -> 56 to "숏폼 연속 시청과 늦은 사용이 겹쳤어요. 잠시 쉬어갈 타이밍이에요!"
+                    else -> 42 to "야간 과사용과 숏폼 몰입이 심했어요. 오늘 밤은 꼭 푹 쉬어주세요!"
+                }
+                onLaunchStampPreview(
+                    StampRitualRequest(
+                        date = LocalDate.now(),
+                        tier = testTier,
+                        score = sampleScore,
+                        headline = sampleHeadline,
+                        isMorningAuto = false,
+                        isTestPreview = true,
+                        character = selectedStampCharacter,
+                        sourceCellBounds = null
+                    )
+                )
+            }
+        )
+        ChestOpeningPreviewStrip(
+            onPreviewChest = { tier ->
+                onLaunchChestPreview(
+                    ChestOpeningRequest(
+                        tier = tier,
+                        isPreview = true,
+                        claimResult = null
+                    )
+                )
+            }
+        )
+    }
+}
+
 
 
 

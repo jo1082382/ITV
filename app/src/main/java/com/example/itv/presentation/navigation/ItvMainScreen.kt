@@ -17,7 +17,6 @@ import com.example.itv.presentation.permissions.PermissionSettingsActivity
 import com.example.itv.infrastructure.theme.UserThemeStore
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -46,15 +45,18 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.foundation.Image
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onPlaced
@@ -120,11 +122,14 @@ fun ItvMainScreen(
     var morningCheckTick by remember { mutableIntStateOf(0) }
     var checkingMorningRitual by remember { mutableStateOf(false) }
 
-    // Root coordinates + live calendar day cell coordinates stored via onPlaced (0 scroll & 0 recomposition overhead!)
+    // Root coordinates + single calendar grid bounds resolver (0 per-cell callbacks & 0 map churn during scroll!)
     val overlayRootCoordsRef = remember { arrayOfNulls<LayoutCoordinates>(1) }
-    val dayCellCoords = remember { mutableMapOf<LocalDate, LayoutCoordinates>() }
+    val calendarCellBoundsResolverRef = remember { arrayOfNulls<(LocalDate) -> Rect?>(1) }
+    val homeListState = androidx.compose.foundation.lazy.rememberLazyListState()
+    val sleepListState = androidx.compose.foundation.lazy.rememberLazyListState()
     fun LayoutCoordinates?.liveBounds(): Rect? =
         this?.takeIf { it.isAttached }?.boundsInRoot()?.takeUnless { it.isEmpty }
+    fun resolveCalendarCellBounds(date: LocalDate): Rect? = calendarCellBoundsResolverRef[0]?.invoke(date)
 
     // Trigger morning stamp check on BOTH cold start and returning from background on a new day
     val rootLifecycleOwner = LocalLifecycleOwner.current
@@ -145,6 +150,15 @@ fun ItvMainScreen(
             if (!DailyStampPrefs.hasAutoRitualShownForToday(rootContext, LocalDate.now())) {
                 morningCheckTick++
             }
+        }
+    }
+
+    // Delayed low-priority background backfill of recent 24-hour usage distributions (throttled to 30m, 0 UI impact)
+    LaunchedEffect(resumeTick) {
+        if (resumeTick == 0) return@LaunchedEffect
+        delay(1800L)
+        runCatching {
+            MonthlyUsageArchiveStore.backfillRecentHourlyIfNeeded(rootContext)
         }
     }
 
@@ -171,7 +185,18 @@ fun ItvMainScreen(
             withContext(Dispatchers.IO) {
                 val todayRep = runCatching { rootContext.queryUsageReport(1, today) }.getOrNull()
                 val periodRep = runCatching { rootContext.queryUsageReport(7) }.getOrNull()
-                val nightRep = runCatching { queryNightReport(rootContext, 45) }.getOrNull()
+                val nightRep = runCatching {
+                    queryNightReport(rootContext, 45, finalizeActiveWake = true)
+                }.getOrNull()
+                // 기상 직후 6시간 이상 수면이 감지되면 취침 시간대 상태도 즉시 초기화
+                val todayWakeSeg = nightRep?.segments
+                    ?.firstOrNull { it.wakeDate == today && it.end != null }
+                    ?: nightRep?.candidates?.firstOrNull { it.wakeDate == today && it.end != null }
+                if (todayWakeSeg != null && todayWakeSeg.end != null) {
+                    com.example.itv.infrastructure.observation.LightAndBrightnessTracker
+                        .getInstance(rootContext)
+                        .onWakeUpFromSleep(todayWakeSeg.start, todayWakeSeg.end, source = "MORNING_CHECK")
+                }
                 runCatching {
                     MonthlyUsageArchiveStore.syncDailySnapshot(
                         context = rootContext,
@@ -194,6 +219,7 @@ fun ItvMainScreen(
             assessment.tier != DailyHealthTier.NO_DATA &&
             assessment.tier != DailyHealthTier.IN_PROGRESS
         ) {
+            CalendarHealthLoader.clearCache()
             // Focus yesterday on the Home calendar so the cell zooms out straight from yesterday's slot
             settingsOpen = false
             showAccountSettings = false
@@ -208,7 +234,7 @@ fun ItvMainScreen(
             var cellBounds: Rect? = null
             var waitedMs = 0
             while (waitedMs < 4500) {
-                val candidate = dayCellCoords[yesterday].liveBounds()
+                val candidate = resolveCalendarCellBounds(yesterday)
                 val root = overlayRootCoordsRef[0].liveBounds()
                 if (candidate != null &&
                     (root == null || (candidate.bottom > root.top && candidate.top < root.bottom))
@@ -225,7 +251,7 @@ fun ItvMainScreen(
 
             if (activeStampRitual == null && !DailyStampPrefs.hasAutoRitualShownForToday(rootContext, today)) {
                 DailyStampPrefs.markAutoRitualShownForToday(rootContext, today)
-                val latestBounds = dayCellCoords[yesterday].liveBounds() ?: cellBounds
+                val latestBounds = resolveCalendarCellBounds(yesterday) ?: cellBounds
                 activeStampRitual = StampRitualRequest(
                     date = yesterday,
                     tier = assessment.tier,
@@ -496,29 +522,41 @@ fun ItvMainScreen(
             }
         }
     ) { padding ->
-        // Each tab owns its scroll position; bottom navigation never scrolls away.
-        when (activeTab) {
-            "home" -> Box(Modifier.fillMaxSize().padding(padding)) {
-                HomeScreen(
+        // Lazy keep-alive tab host:
+        // - Cold start only composes "home" (zero startup/memory overhead).
+        // - Once a tab is visited, its remembered data stays warm across switches (no 150-800ms reload stutter).
+        // - Inactive tabs are neither measured nor placed (0 GPU draw, 0 touch interception, 0 semantics cost).
+        val visitedTabs = remember { LinkedHashSet<String>().apply { add("home") } }
+        visitedTabs.add(activeTab)
+        KeepAliveTabHost(
+            activeKey = activeTab,
+            orderedKeys = visitedTabs.toList(),
+            modifier = Modifier.fillMaxSize().padding(padding)
+        ) { tabKey ->
+            when (tabKey) {
+                "home" -> HomeScreen(
                     initialSelectedDate = calendarFocusDate,
                     focusRequestVersion = calendarFocusVersion,
                     stampRefreshVersion = stampRefreshVersion,
                     calendarReloadVersion = calendarReloadVersion,
                     daySyncTick = resumeTick,
                     activeRitualDate = activeStampRitual?.date,
-                    onDayCellPlaced = { date, coords -> dayCellCoords[date] = coords },
-                    onDayCellDisposed = { date -> dayCellCoords.remove(date) },
+                    listState = homeListState,
+                    onCalendarCellBoundsResolverChanged = { resolver ->
+                        calendarCellBoundsResolverRef[0] = resolver
+                    },
                     onLaunchStampRitual = { ritual ->
-                        val resolvedBounds = ritual.sourceCellBounds ?: dayCellCoords[ritual.date].liveBounds()
+                        val resolvedBounds = ritual.sourceCellBounds ?: resolveCalendarCellBounds(ritual.date)
                         activeStampRitual = ritual.copy(sourceCellBounds = resolvedBounds)
                     }
                 )
-            }
-            "records" -> Box(Modifier.fillMaxSize().padding(padding)) {
-                SleepTabScreen(onSleepDataChanged = { calendarReloadVersion++ })
-            }
-            "character" -> Box(Modifier.fillMaxSize().padding(padding)) {
-                CharacterScreen(
+                "records" -> SleepTabScreen(
+                    isActive = activeTab == "records",
+                    listState = sleepListState,
+                    onSleepDataChanged = { calendarReloadVersion++ }
+                )
+                "character" -> CharacterScreen(
+                    isActive = activeTab == "character",
                     calendarReloadVersion = calendarReloadVersion,
                     stampRefreshVersion = stampRefreshVersion,
                     daySyncTick = resumeTick
@@ -586,10 +624,17 @@ fun ItvMainScreen(
 
     // Full-screen cinematic stamp ritual overlay (above Scaffold & bottom navigation bar)
     activeStampRitual?.let { ritual ->
+        BackHandler {
+            if (!ritual.isTestPreview) {
+                DailyStampPrefs.markDateStamped(rootContext, ritual.date)
+                stampRefreshVersion++
+            }
+            activeStampRitual = null
+        }
         DailyStampRitualOverlay(
             request = ritual,
             overlayRootBounds = overlayRootCoordsRef[0].liveBounds(),
-            resolveCellBounds = { date -> dayCellCoords[date].liveBounds() },
+            resolveCellBounds = { date -> resolveCalendarCellBounds(date) },
             onStampCommitted = {
                 if (!ritual.isTestPreview) {
                     DailyStampPrefs.markDateStamped(rootContext, ritual.date)
@@ -610,8 +655,16 @@ fun ItvMainScreen(
 }
 
 @Composable
-private fun SleepTabScreen(onSleepDataChanged: () -> Unit) {
-    SleepEstimationTabContent(onSleepDataChanged = onSleepDataChanged)
+private fun SleepTabScreen(
+    isActive: Boolean,
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    onSleepDataChanged: () -> Unit
+) {
+    SleepEstimationTabContent(
+        isTabActive = isActive,
+        listState = listState,
+        onSleepDataChanged = onSleepDataChanged
+    )
 }
 
 internal fun DailyHealthTier?.toPuppyMoodOrNull(): PuppyMood? = when (this) {
@@ -632,7 +685,39 @@ internal fun PuppyMood.toHealthTier(): DailyHealthTier = when (this) {
 }
 
 @Composable
+private fun KeepAliveTabHost(
+    activeKey: String,
+    orderedKeys: List<String>,
+    modifier: Modifier = Modifier,
+    content: @Composable (String) -> Unit
+) {
+    val activeIndex = orderedKeys.indexOf(activeKey)
+    Layout(
+        modifier = modifier,
+        content = {
+            orderedKeys.forEach { tabKey ->
+                key(tabKey) {
+                    Box(Modifier.fillMaxSize()) {
+                        content(tabKey)
+                    }
+                }
+            }
+        }
+    ) { measurables, constraints ->
+        val activePlaceable = if (activeIndex in measurables.indices) {
+            measurables[activeIndex].measure(constraints)
+        } else {
+            null
+        }
+        layout(constraints.maxWidth, constraints.maxHeight) {
+            activePlaceable?.place(0, 0)
+        }
+    }
+}
+
+@Composable
 private fun CharacterScreen(
+    isActive: Boolean,
     calendarReloadVersion: Int,
     stampRefreshVersion: Int,
     daySyncTick: Int
@@ -668,7 +753,7 @@ private fun CharacterScreen(
             viewMonth = yesterdayMonth,
             today = today,
             stampedDates = stampedDates
-        )
+        )?.takeUnless { it.assessments[yesterday]?.tier == DailyHealthTier.IN_PROGRESS }
         val resolvedTier = cached?.assessments?.get(yesterday)?.tier ?: runCatching {
             withContext(Dispatchers.IO) {
                 val todayRep = if (yesterdayMonth == YearMonth.from(today)) {
@@ -676,7 +761,7 @@ private fun CharacterScreen(
                 } else {
                     null
                 }
-                val nightRep = runCatching { queryNightReport(context, 45) }.getOrNull()
+                val nightRep = runCatching { queryNightReport(context, 45, finalizeActiveWake = true) }.getOrNull()
                 CalendarHealthLoader.loadMonth(
                     context = context,
                     viewMonth = yesterdayMonth,
@@ -726,7 +811,9 @@ private fun CharacterScreen(
                 val botSlotTop = (safeTop + safeHeight * 0.72f - slotSize / 2f).coerceAtLeast(midSlotTop + slotSize + 10.dp)
 
                 // Piece 4: Full illustrated seasonal trees & cozy ground hill behind the puppy
-                ItvCharacterSeasonalStageBackdrop(modifier = Modifier.fillMaxSize())
+                if (isActive) {
+                    ItvCharacterSeasonalStageBackdrop(modifier = Modifier.fillMaxSize())
+                }
 
                 // 중앙 안전 무대: 5가지 표정/자세와 4초 모션이 코디 슬롯 영역 밖으로 겹치지 않도록 배치
                 Box(
@@ -741,6 +828,7 @@ private fun CharacterScreen(
                         mood = activeMood,
                         replayKey = moodReplayKey,
                         showGroundShadow = true,
+                        animateMood = isActive,
                         modifier = Modifier
                             .fillMaxSize()
                             .clickable(
@@ -1233,55 +1321,58 @@ private fun EquipSlotCard(
 
 @Composable
 private fun SleepTabIcon(color: Color) {
-    Canvas(Modifier.size(28.dp)) {
-        val w = size.width
-        val h = size.height
-        val stroke = 1.7.dp.toPx()
-
-        // Clean vector crescent moon
-        val moonPath = androidx.compose.ui.graphics.Path().apply {
-            moveTo(w * 0.56f, h * 0.16f)
-            cubicTo(
-                w * 0.25f, h * 0.18f,
-                w * 0.14f, h * 0.52f,
-                w * 0.34f, h * 0.74f
-            )
-            cubicTo(
-                w * 0.52f, h * 0.90f,
-                w * 0.80f, h * 0.82f,
-                w * 0.84f, h * 0.62f
-            )
-            cubicTo(
-                w * 0.64f, h * 0.68f,
-                w * 0.44f, h * 0.54f,
-                w * 0.46f, h * 0.34f
-            )
-            cubicTo(
-                w * 0.47f, h * 0.26f,
-                w * 0.51f, h * 0.20f,
-                w * 0.56f, h * 0.16f
-            )
-            close()
-        }
-        drawPath(
-            path = moonPath,
-            color = color,
-            style = androidx.compose.ui.graphics.drawscope.Stroke(
-                width = stroke,
-                cap = androidx.compose.ui.graphics.StrokeCap.Round,
-                join = androidx.compose.ui.graphics.StrokeJoin.Round
-            )
-        )
-
-        // Two subtle stars inside the crescent opening
-        val s1x = w * 0.74f
-        val s1y = h * 0.26f
-        val s1r = w * 0.08f
-        drawLine(color, Offset(s1x - s1r, s1y), Offset(s1x + s1r, s1y), stroke * 0.85f)
-        drawLine(color, Offset(s1x, s1y - s1r), Offset(s1x, s1y + s1r), stroke * 0.85f)
-
-        drawCircle(color, radius = stroke * 0.65f, center = Offset(w * 0.66f, h * 0.43f))
-    }
+    Spacer(
+        modifier = Modifier
+            .size(28.dp)
+            .drawWithCache {
+                val w = size.width
+                val h = size.height
+                val strokeWidth = 1.7.dp.toPx()
+                val moonPath = androidx.compose.ui.graphics.Path().apply {
+                    moveTo(w * 0.56f, h * 0.16f)
+                    cubicTo(
+                        w * 0.25f, h * 0.18f,
+                        w * 0.14f, h * 0.52f,
+                        w * 0.34f, h * 0.74f
+                    )
+                    cubicTo(
+                        w * 0.52f, h * 0.90f,
+                        w * 0.80f, h * 0.82f,
+                        w * 0.84f, h * 0.62f
+                    )
+                    cubicTo(
+                        w * 0.64f, h * 0.68f,
+                        w * 0.44f, h * 0.54f,
+                        w * 0.46f, h * 0.34f
+                    )
+                    cubicTo(
+                        w * 0.47f, h * 0.26f,
+                        w * 0.51f, h * 0.20f,
+                        w * 0.56f, h * 0.16f
+                    )
+                    close()
+                }
+                val strokeStyle = androidx.compose.ui.graphics.drawscope.Stroke(
+                    width = strokeWidth,
+                    cap = androidx.compose.ui.graphics.StrokeCap.Round,
+                    join = androidx.compose.ui.graphics.StrokeJoin.Round
+                )
+                val s1x = w * 0.74f
+                val s1y = h * 0.26f
+                val s1r = w * 0.08f
+                val star1HStart = Offset(s1x - s1r, s1y)
+                val star1HEnd = Offset(s1x + s1r, s1y)
+                val star1VStart = Offset(s1x, s1y - s1r)
+                val star1VEnd = Offset(s1x, s1y + s1r)
+                val star2Center = Offset(w * 0.66f, h * 0.43f)
+                onDrawBehind {
+                    drawPath(path = moonPath, color = color, style = strokeStyle)
+                    drawLine(color, star1HStart, star1HEnd, strokeWidth * 0.85f)
+                    drawLine(color, star1VStart, star1VEnd, strokeWidth * 0.85f)
+                    drawCircle(color, radius = strokeWidth * 0.65f, center = star2Center)
+                }
+            }
+    )
 }
 
 
@@ -1293,16 +1384,21 @@ private fun HomeSettingsDrawer(
     onOpenAccountSettings: () -> Unit,
     onOpenCoachingSettings: () -> Unit
 ) {
+    // Unmount the drawer & BoxWithConstraints completely once closed (zero idle subcomposition cost)
+    val visibleState = remember { MutableTransitionState(open) }
+    visibleState.targetState = open
+    if (!visibleState.currentState && !visibleState.targetState) return
+
     val context = LocalContext.current
     val development = (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
-    AnimatedVisibility(visible = open, enter = fadeIn(tween(240)), exit = fadeOut(tween(240))) {
+    AnimatedVisibility(visibleState = visibleState, enter = fadeIn(tween(240)), exit = fadeOut(tween(240))) {
         Surface(Modifier.fillMaxSize().clickable(
             interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClose
         ), color = Color.Black.copy(alpha = 0.18f)) {}
     }
     BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterEnd) {
         val panelWidth = minOf(maxWidth * 0.84f, 340.dp)
-        AnimatedVisibility(visible = open,
+        AnimatedVisibility(visibleState = visibleState,
             enter = slideInHorizontally(tween(280)) { it },
             exit = slideOutHorizontally(tween(240)) { it }) {
             Surface(Modifier.width(panelWidth).fillMaxHeight(),

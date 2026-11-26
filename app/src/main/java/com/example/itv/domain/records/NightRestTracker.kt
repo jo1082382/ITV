@@ -36,6 +36,16 @@ internal class NightRestTracker {
         restStart = null; useStart = null; briefCount = 0
     }
 
+    fun pendingWakeInterval(): RestInterval? {
+        val rest = restStart ?: return null
+        val use = useStart ?: return null
+        return RestInterval(rest, use, briefCount)
+    }
+
+    fun openRestStart(): Long? = restStart
+
+    fun openBriefCount(): Int = briefCount
+
     fun snapshot(now: Long): List<RestInterval> {
         advance(now)
         return completed.toList() + listOfNotNull(restStart?.let { RestInterval(it, null, briefCount) })

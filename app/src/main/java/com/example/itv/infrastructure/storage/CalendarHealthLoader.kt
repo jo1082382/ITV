@@ -108,6 +108,10 @@ internal object CalendarHealthLoader {
         if (entry.viewMonth != viewMonth || entry.today != today || entry.stampedDates != stampedDates) {
             return null
         }
+        val yesterday = today.minusDays(1)
+        if (entry.bundle.assessments[yesterday]?.tier == DailyHealthTier.IN_PROGRESS && ageMs > 5_000L) {
+            return null
+        }
         return entry.bundle
     }
 
@@ -142,7 +146,7 @@ internal object CalendarHealthLoader {
         val today = LocalDate.now(zone)
         val viewMonth = YearMonth.from(today)
         val todayRep = runCatching { appCtx.queryUsageReport(1, today) }.getOrNull()
-        val nightRep = runCatching { queryNightReport(appCtx, 45) }.getOrNull()
+        val nightRep = runCatching { queryNightReport(appCtx, 45, finalizeActiveWake = true) }.getOrNull()
         val stampedDates = DailyStampPrefs.getStampedDates(appCtx)
         val bundle = loadMonth(
             context = appCtx,

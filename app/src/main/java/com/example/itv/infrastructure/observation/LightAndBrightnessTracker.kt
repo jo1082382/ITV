@@ -15,8 +15,10 @@ import android.net.NetworkCapabilities
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.os.PowerManager
+import android.os.Process
 import android.provider.Settings
 import kotlin.math.abs
 import kotlin.math.max
@@ -31,7 +33,6 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.LocalDate
-import java.time.LocalTime
 import java.time.ZoneId
 import java.time.ZonedDateTime
 
@@ -86,7 +87,8 @@ data class AmbientSnapshot(
     val isWifiConnected: Boolean? = null,
     val bedtimeScore: Int = 0,
     val isBedtimeCandidate: Boolean = false,
-    val bedtimeScoreBreakdown: String = ""
+    val bedtimeScoreBreakdown: String = "",
+    val hasWokenUpFromSleep: Boolean = false
 )
 
 class LightAndBrightnessTracker(context: Context) : SensorEventListener {
@@ -100,19 +102,19 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
-    private var currentLux: Float? = null
-    private var currentProximity: Float? = null
-    private var currentGx: Float? = null
-    private var currentGy: Float? = null
-    private var currentGz: Float? = null
-    private var facedownMonitoring = false
-    private var facedownObserved = false
-    private var facedownAccumulatedMs = 0L
-    private var lastFacedownSampleAt = 0L
-    private var lastSampleWasFacedown = false
+    @Volatile private var currentLux: Float? = null
+    @Volatile private var currentProximity: Float? = null
+    @Volatile private var currentGx: Float? = null
+    @Volatile private var currentGy: Float? = null
+    @Volatile private var currentGz: Float? = null
+    @Volatile private var facedownMonitoring = false
+    @Volatile private var facedownObserved = false
+    @Volatile private var facedownAccumulatedMs = 0L
+    @Volatile private var lastFacedownSampleAt = 0L
+    @Volatile private var lastSampleWasFacedown = false
 
     private val motionSamples = java.util.ArrayDeque<FloatArray>(20)
-    private var isCurrentlyStationary = false
+    @Volatile private var isCurrentlyStationary = false
 
     private fun trackMotion(gx: Float, gy: Float, gz: Float) {
         synchronized(motionSamples) {
@@ -138,21 +140,64 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         }
     }
 
-    private var refCount = 0
-    private var isScreenOn = powerManager?.isInteractive ?: true
-    private var isSensorsRegistered = false
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val sensorLifecycleLock = Any()
+    private val updateLock = Any()
+    private val facedownLock = Any()
+    @Volatile private var sensorThread: HandlerThread? = null
+    @Volatile private var sensorHandler: Handler? = null
+
+    @Volatile private var refCount = 0
+    @Volatile private var isScreenOn = powerManager?.isInteractive ?: true
+    @Volatile private var isSensorsRegistered = false
+    private var screenOffAtWallMs: Long? = null
+    @Volatile private var lastEstimateLoadDate: LocalDate? = null
 
     private var sampleJob: Job? = null
     private var periodicJob: Job? = null
-    private var lastObservedBrightness: Int? = null
+    @Volatile private var lastObservedBrightness: Int? = null
+    @Volatile private var cachedScreenBrightness: Int? = null
+    @Volatile private var lastBrightnessReadElapsed: Long = 0L
+    @Volatile private var cachedIsCharging: Boolean? = null
+    @Volatile private var cachedIsWifi: Boolean? = null
+    @Volatile private var lastNightContextFetchElapsed: Long = 0L
+    @Volatile private var lastSensorUpdateDispatchElapsed: Long = 0L
 
-    private var estimatedStartHour: Int? = null
-    private var estimatedStartMinute: Int? = null
-    private var recommendedStartHour: Int? = null
-    private var recommendedStartMinute: Int? = null
-    private var recommendedEndHour: Int? = null
-    private var recommendedEndMinute: Int? = null
-    private var estimatedSource: String = "미측정"
+    private fun ensureSensorHandler(): Handler {
+        sensorHandler?.let { existing ->
+            if (sensorThread?.isAlive == true) return existing
+        }
+        synchronized(sensorLifecycleLock) {
+            sensorHandler?.let { existing ->
+                if (sensorThread?.isAlive == true) return existing
+            }
+            val thread = HandlerThread("ItvSensorWorker", Process.THREAD_PRIORITY_BACKGROUND).apply {
+                start()
+            }
+            val handler = Handler(thread.looper)
+            sensorThread = thread
+            sensorHandler = handler
+            return handler
+        }
+    }
+
+    private fun releaseSensorThread() {
+        synchronized(sensorLifecycleLock) {
+            if (isSensorsRegistered || continuousPostureClients > 0 || facedownMonitoring) return
+            sensorHandler?.removeCallbacksAndMessages(null)
+            sensorThread?.quitSafely()
+            sensorThread = null
+            sensorHandler = null
+        }
+    }
+
+    @Volatile private var estimatedStartHour: Int? = null
+    @Volatile private var estimatedStartMinute: Int? = null
+    @Volatile private var recommendedStartHour: Int? = null
+    @Volatile private var recommendedStartMinute: Int? = null
+    @Volatile private var recommendedEndHour: Int? = null
+    @Volatile private var recommendedEndMinute: Int? = null
+    @Volatile private var estimatedSource: String = "미측정"
 
     private val _snapshot = MutableStateFlow(
         readCurrent(
@@ -260,6 +305,7 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         sampleJob = null
 
         stopSensors()
+        releaseSensorThread()
     }
 
     fun refresh() {
@@ -278,6 +324,33 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
                 val nightReport = try {
                     com.example.itv.composition.queryNightReport(appContext, 30)
                 } catch (_: Exception) { null }
+
+                // Sync completed sleep (>= 3h) into SleepWakeCycleStore so post-wake morning usage
+                // never gets misclassified as "취침 +448분 지연" even after process restarts.
+                val todayConf = confirmations[today.toString()]
+                if (todayConf != null && todayConf.choice == "SLEEP" &&
+                    todayConf.startMs != null && todayConf.endMs != null
+                ) {
+                    com.example.itv.infrastructure.sleep.SleepWakeCycleStore.recordWakeUp(
+                        context = appContext,
+                        sleepStartWallMs = todayConf.startMs,
+                        sleepEndWallMs = todayConf.endMs,
+                        source = "CONFIRMATION"
+                    )
+                } else {
+                    val latestSegment = (nightReport?.segments.orEmpty() + nightReport?.candidates.orEmpty())
+                        .filter { it.end != null && (it.end - it.start) >= com.example.itv.domain.sleep.SleepWakeCyclePolicy.MIN_SLEEP_CYCLE_MS }
+                        .maxByOrNull { it.end ?: 0L }
+                    if (latestSegment != null && latestSegment.end != null) {
+                        com.example.itv.infrastructure.sleep.SleepWakeCycleStore.recordWakeUp(
+                            context = appContext,
+                            sleepStartWallMs = latestSegment.start,
+                            sleepEndWallMs = latestSegment.end,
+                            source = "NIGHT_REPORT"
+                        )
+                    }
+                }
+                lastEstimateLoadDate = today
 
                 val coachingSettings = com.example.itv.infrastructure.coaching.UserCoachingSettingsStore(appContext).loadSettings()
 
@@ -373,8 +446,30 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         triggerSampleWindow(durationMs = 3500L, reason = "앱 전환 감지", force = false)
     }
 
+    fun onWakeUpFromSleep(
+        sleepStartWallMs: Long,
+        sleepEndWallMs: Long,
+        source: String = "LIVE_WAKE"
+    ) {
+        val updated = com.example.itv.infrastructure.sleep.SleepWakeCycleStore.recordWakeUp(
+            context = appContext,
+            sleepStartWallMs = sleepStartWallMs,
+            sleepEndWallMs = sleepEndWallMs,
+            source = source
+        )
+        scope.launch(Dispatchers.Main.immediate) {
+            update(force = true, isSampling = _snapshot.value.isSampling, triggerReason = "기상 감지 (취침 상태 초기화)")
+        }
+        if (updated) {
+            loadBedtimeEstimates()
+        }
+    }
+
     private fun onScreenOff() {
         isScreenOn = false
+        if (screenOffAtWallMs == null) {
+            screenOffAtWallMs = System.currentTimeMillis()
+        }
         // 화면이 꺼지면 즉시 센서 등록 해제 및 타이머 취소 (배터리 소모 0)
         periodicJob?.cancel()
         periodicJob = null
@@ -389,13 +484,21 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
 
     private fun onScreenOn() {
         isScreenOn = true
+        val offAt = screenOffAtWallMs
+        screenOffAtWallMs = null
+        val nowWall = System.currentTimeMillis()
+        val offDuration = if (offAt != null) (nowWall - offAt).coerceAtLeast(0L) else 0L
+        val today = LocalDate.now()
+        if (offDuration >= 60 * 60 * 1000L || lastEstimateLoadDate != today) {
+            loadBedtimeEstimates()
+        }
         triggerSampleWindow(durationMs = 3500L, reason = "화면 켜짐 감지", force = false)
         schedulePeriodicSampling()
     }
 
     private fun onBrightnessChanged() {
         if (refCount <= 0 || !isScreenOn) return
-        val currentBrightness = readScreenBrightness()
+        val currentBrightness = readScreenBrightness(forceRefresh = true) ?: return
         val last = lastObservedBrightness
         lastObservedBrightness = currentBrightness
         if (last == null || abs(currentBrightness - last) >= 15) {
@@ -433,41 +536,54 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
     }
 
     private fun startSensors() {
-        if (isSensorsRegistered) return
-        if (sm != null) {
-            lightSensor?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL) }
-            proximitySensor?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL) }
-            gravitySensor?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
-            isSensorsRegistered = true
+        synchronized(sensorLifecycleLock) {
+            if (isSensorsRegistered) return
+            if (sm != null) {
+                val worker = ensureSensorHandler()
+                lightSensor?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL, worker) }
+                proximitySensor?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL, worker) }
+                gravitySensor?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_UI, worker) }
+                isSensorsRegistered = true
+            }
         }
     }
 
-    private var continuousPostureClients = 0
+    @Volatile private var continuousPostureClients = 0
 
     fun startContinuousPostureListening() {
-        continuousPostureClients++
+        synchronized(sensorLifecycleLock) {
+            continuousPostureClients++
+        }
         startSensors()
     }
 
     fun stopContinuousPostureListening() {
-        continuousPostureClients = maxOf(0, continuousPostureClients - 1)
-        if (continuousPostureClients == 0 && sampleJob?.isActive != true && !facedownMonitoring) {
+        val shouldStop = synchronized(sensorLifecycleLock) {
+            continuousPostureClients = maxOf(0, continuousPostureClients - 1)
+            continuousPostureClients == 0 && sampleJob?.isActive != true && !facedownMonitoring
+        }
+        if (shouldStop) {
             stopSensors()
         }
     }
 
     private fun stopSensors() {
-        if (continuousPostureClients > 0 || facedownMonitoring) return
-        if (!isSensorsRegistered) return
-        sm?.unregisterListener(this)
-        isSensorsRegistered = false
+        synchronized(sensorLifecycleLock) {
+            if (continuousPostureClients > 0 || facedownMonitoring) return
+            if (!isSensorsRegistered) return
+            sm?.unregisterListener(this)
+            isSensorsRegistered = false
+            if (refCount <= 0) {
+                releaseSensorThread()
+            }
+        }
     }
 
-    var onFacedownDetectedWhileScreenOn: (() -> Unit)? = null
+    @Volatile var onFacedownDetectedWhileScreenOn: (() -> Unit)? = null
 
     fun currentPosture(): com.example.itv.domain.coaching.UserPosture = _snapshot.value.posture
 
-    private var facedownOnscreenStartTime = 0L
+    @Volatile private var facedownOnscreenStartTime = 0L
     private var facedownTickerJob: Job? = null
 
     fun isFacedown(): Boolean {
@@ -509,12 +625,14 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
     }
 
     fun startFacedownMonitoring() {
-        facedownMonitoring = true
-        facedownObserved = false
-        facedownAccumulatedMs = 0L
-        facedownOnscreenStartTime = 0L
-        lastFacedownSampleAt = android.os.SystemClock.elapsedRealtime()
-        lastSampleWasFacedown = !(powerManager?.isInteractive ?: isScreenOn) && isFacedown()
+        synchronized(facedownLock) {
+            facedownMonitoring = true
+            facedownObserved = false
+            facedownAccumulatedMs = 0L
+            facedownOnscreenStartTime = 0L
+            lastFacedownSampleAt = android.os.SystemClock.elapsedRealtime()
+            lastSampleWasFacedown = !(powerManager?.isInteractive ?: isScreenOn) && isFacedown()
+        }
         startSensors()
         facedownTickerJob?.cancel()
         facedownTickerJob = scope.launch {
@@ -526,12 +644,14 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
     }
 
     fun onMissionScreenOff() {
-        facedownMonitoring = true
-        facedownObserved = false
-        facedownAccumulatedMs = 0L
-        facedownOnscreenStartTime = 0L
-        lastFacedownSampleAt = android.os.SystemClock.elapsedRealtime()
-        lastSampleWasFacedown = isFacedown()
+        synchronized(facedownLock) {
+            facedownMonitoring = true
+            facedownObserved = false
+            facedownAccumulatedMs = 0L
+            facedownOnscreenStartTime = 0L
+            lastFacedownSampleAt = android.os.SystemClock.elapsedRealtime()
+            lastSampleWasFacedown = isFacedown()
+        }
         startSensors()
         facedownTickerJob?.cancel()
         facedownTickerJob = scope.launch {
@@ -546,69 +666,81 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         facedownTickerJob?.cancel()
         facedownTickerJob = null
         onFacedownDetectedWhileScreenOn = null
-        facedownOnscreenStartTime = 0L
-        val now = android.os.SystemClock.elapsedRealtime()
-        if (facedownMonitoring && lastSampleWasFacedown && isFacedown() && lastFacedownSampleAt > 0L) {
-            val dt = (now - lastFacedownSampleAt).coerceIn(0L, 5000L)
-            facedownAccumulatedMs += dt
+        val wasFacedown = synchronized(facedownLock) {
+            facedownOnscreenStartTime = 0L
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (facedownMonitoring && lastSampleWasFacedown && isFacedown() && lastFacedownSampleAt > 0L) {
+                val dt = (now - lastFacedownSampleAt).coerceIn(0L, 5000L)
+                facedownAccumulatedMs += dt
+            }
+            // 화면이 꺼진 상태에서 최소 3초 이상 실제로 스마트폰이 바닥에 엎어져 있었으면 성공으로 인정
+            val result = facedownObserved || facedownAccumulatedMs >= 3_000L
+            facedownMonitoring = false
+            facedownObserved = false
+            facedownAccumulatedMs = 0L
+            lastFacedownSampleAt = 0L
+            lastSampleWasFacedown = false
+            result
         }
-        // 화면이 꺼진 상태에서 최소 3초 이상 실제로 스마트폰이 바닥에 엎어져 있었으면 성공으로 인정
-        val wasFacedown = facedownObserved || facedownAccumulatedMs >= 3_000L
-        facedownMonitoring = false
-        facedownObserved = false
-        facedownAccumulatedMs = 0L
-        lastFacedownSampleAt = 0L
-        lastSampleWasFacedown = false
-        if (!isScreenOn && continuousPostureClients == 0) stopSensors()
+        if ((!isScreenOn || refCount <= 0) && continuousPostureClients == 0) stopSensors()
         return wasFacedown
     }
 
     private fun checkFacedownProgress(now: Long) {
-        if (!facedownMonitoring) return
-        val screenOff = !(powerManager?.isInteractive ?: isScreenOn)
-        if (!screenOff) {
-            if (isFacedown()) {
-                if (facedownOnscreenStartTime == 0L) {
-                    facedownOnscreenStartTime = now
-                } else if (now - facedownOnscreenStartTime >= 1000L) {
-                    onFacedownDetectedWhileScreenOn?.invoke()
+        var callbackToInvoke: (() -> Unit)? = null
+        synchronized(facedownLock) {
+            if (!facedownMonitoring) return
+            val screenOff = !(powerManager?.isInteractive ?: isScreenOn)
+            if (!screenOff) {
+                if (isFacedown()) {
+                    if (facedownOnscreenStartTime == 0L) {
+                        facedownOnscreenStartTime = now
+                    } else if (now - facedownOnscreenStartTime >= 1000L) {
+                        callbackToInvoke = onFacedownDetectedWhileScreenOn
+                        facedownOnscreenStartTime = 0L
+                    }
+                } else {
                     facedownOnscreenStartTime = 0L
                 }
             } else {
                 facedownOnscreenStartTime = 0L
-            }
-        } else {
-            facedownOnscreenStartTime = 0L
-            val currentlyFacedown = isFacedown()
-            if (currentlyFacedown) {
-                val dt = if (lastFacedownSampleAt > 0L && lastSampleWasFacedown) {
-                    (now - lastFacedownSampleAt).coerceIn(0L, 5000L)
-                } else {
-                    60L
+                val currentlyFacedown = isFacedown()
+                if (currentlyFacedown) {
+                    val dt = if (lastFacedownSampleAt > 0L && lastSampleWasFacedown) {
+                        (now - lastFacedownSampleAt).coerceIn(0L, 5000L)
+                    } else {
+                        60L
+                    }
+                    facedownAccumulatedMs += dt
+                    if (facedownAccumulatedMs >= 3_000L) {
+                        facedownObserved = true
+                    }
                 }
-                facedownAccumulatedMs += dt
-                if (facedownAccumulatedMs >= 3_000L) {
-                    facedownObserved = true
-                }
+                lastSampleWasFacedown = currentlyFacedown
+                lastFacedownSampleAt = now
             }
-            lastSampleWasFacedown = currentlyFacedown
-            lastFacedownSampleAt = now
         }
+        callbackToInvoke?.let { cb -> mainHandler.post { cb.invoke() } }
     }
 
     override fun onSensorChanged(event: SensorEvent?) {
         val isContinuous = continuousPostureClients > 0
         val now = android.os.SystemClock.elapsedRealtime()
+        var reasonForUpdate: String? = null
+        var immediate = false
         when (event?.sensor?.type) {
             Sensor.TYPE_LIGHT -> {
+                val prevLux = currentLux
                 currentLux = event.values.firstOrNull()
                 checkFacedownProgress(now)
-                update(force = isContinuous, isSampling = true, triggerReason = if (isContinuous) "실시간 조도 갱신" else _snapshot.value.lastTriggerReason)
+                immediate = prevLux == null
+                reasonForUpdate = if (isContinuous) "실시간 조도 갱신" else _snapshot.value.lastTriggerReason
             }
             Sensor.TYPE_PROXIMITY -> {
                 currentProximity = event.values.firstOrNull()
                 checkFacedownProgress(now)
-                update(force = isContinuous, isSampling = true, triggerReason = if (isContinuous) "실시간 근접 갱신" else _snapshot.value.lastTriggerReason)
+                immediate = true
+                reasonForUpdate = if (isContinuous) "실시간 근접 갱신" else _snapshot.value.lastTriggerReason
             }
             Sensor.TYPE_GRAVITY, Sensor.TYPE_ACCELEROMETER -> {
                 val gx = event.values.getOrNull(0)
@@ -621,35 +753,41 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
                     trackMotion(gx, gy, gz)
                 }
                 checkFacedownProgress(now)
-                update(force = isContinuous, isSampling = true, triggerReason = if (isContinuous) "실시간 자세 감지" else _snapshot.value.lastTriggerReason)
+                reasonForUpdate = if (isContinuous) "실시간 자세 감지" else _snapshot.value.lastTriggerReason
             }
+        }
+        if (reasonForUpdate != null && (immediate || now - lastSensorUpdateDispatchElapsed >= 180L)) {
+            lastSensorUpdateDispatchElapsed = now
+            update(force = isContinuous, isSampling = true, triggerReason = reasonForUpdate)
         }
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
-    private var lastContinuousUpdateMs = 0L
+    @Volatile private var lastContinuousUpdateMs = 0L
 
     private fun update(force: Boolean, isSampling: Boolean, triggerReason: String) {
-        val candidate = readCurrent(currentLux, currentProximity, isSampling, triggerReason)
-        val current = _snapshot.value
-        val now = android.os.SystemClock.elapsedRealtime()
+        synchronized(updateLock) {
+            val candidate = readCurrent(currentLux, currentProximity, isSampling, triggerReason)
+            val current = _snapshot.value
+            val now = android.os.SystemClock.elapsedRealtime()
 
-        val isContinuous = continuousPostureClients > 0
-        if (isContinuous) {
-            // 실시간 감지 중에는 최소 200ms 스로틀링 적용 (초당 50~60회 방출로 인한 Compose 전체 리컴포지션 렉 방지)
-            if (now - lastContinuousUpdateMs < 200L) {
+            val isContinuous = continuousPostureClients > 0
+            if (isContinuous) {
+                // 실시간 감지 중에는 최소 200ms 스로틀링 적용 (초당 50~60회 방출로 인한 Compose 전체 리컴포지션 렉 방지)
+                if (!force && now - lastContinuousUpdateMs < 200L) {
+                    return
+                }
+                if (force || shouldPublishUpdate(current, candidate) || (now - lastContinuousUpdateMs >= 1000L) || current.isSampling != isSampling) {
+                    lastContinuousUpdateMs = now
+                    _snapshot.value = candidate
+                }
                 return
             }
-            if (shouldPublishUpdate(current, candidate) || (now - lastContinuousUpdateMs >= 1000L) || current.isSampling != isSampling) {
-                lastContinuousUpdateMs = now
+
+            if (force || shouldPublishUpdate(current, candidate) || current.isSampling != isSampling) {
                 _snapshot.value = candidate
             }
-            return
-        }
-
-        if (force || shouldPublishUpdate(current, candidate) || current.isSampling != isSampling) {
-            _snapshot.value = candidate
         }
     }
 
@@ -701,19 +839,20 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         return false
     }
 
-    private fun readScreenBrightness(): Int {
-        return try {
+    private fun readScreenBrightness(forceRefresh: Boolean = false): Int? {
+        val now = android.os.SystemClock.elapsedRealtime()
+        val existing = cachedScreenBrightness
+        if (!forceRefresh && existing != null && now - lastBrightnessReadElapsed < 5_000L) {
+            return existing
+        }
+        val fetched = try {
             Settings.System.getInt(appContext.contentResolver, Settings.System.SCREEN_BRIGHTNESS)
         } catch (_: Exception) {
-            0
+            existing
         }
-    }
-
-    private fun circularMinuteDiff(currentMinute: Int, targetMinute: Int): Int {
-        var diff = (currentMinute - targetMinute) % 1440
-        if (diff > 720) diff -= 1440
-        if (diff < -720) diff += 1440
-        return diff
+        cachedScreenBrightness = fetched
+        lastBrightnessReadElapsed = now
+        return fetched
     }
 
     private fun readCurrent(
@@ -722,11 +861,7 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         isSampling: Boolean,
         triggerReason: String
     ): AmbientSnapshot {
-        val brightness = try {
-            Settings.System.getInt(appContext.contentResolver, Settings.System.SCREEN_BRIGHTNESS)
-        } catch (_: Exception) {
-            null
-        }
+        val brightness = readScreenBrightness(forceRefresh = false)
 
         val nightModeFlags = appContext.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
         val nightMode = nightModeFlags == Configuration.UI_MODE_NIGHT_YES
@@ -741,30 +876,47 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         val isDarkScreen = brightness != null && brightness <= com.example.itv.domain.coaching.ContextualPreInterventionPolicy.DARK_SCREEN_BRIGHTNESS_THRESHOLD
         val isBrightScreen = brightness != null && brightness > 180
 
-        // 평소 추정 취침 시각 연계 계산
-        val nowTime = LocalTime.now()
-        val currentMinuteOfDay = nowTime.hour * 60 + nowTime.minute
+        // 평소 추정 취침 시각 연계 계산 (이미 수면 완료 후 기상한 경우 전날 취침 경과를 초기화하고 다음 취침까지 남은 시간으로 전환)
+        val nowWallMs = System.currentTimeMillis()
+        val zone = ZoneId.systemDefault()
+        val lastSleep = com.example.itv.infrastructure.sleep.SleepWakeCycleStore.getLastCompletedSleep(appContext)
 
         val h = estimatedStartHour
         val m = estimatedStartMinute
         val hasBedtime = h != null && m != null
         val targetMinuteOfDay = if (hasBedtime) (h!! * 60 + m!!) else (23 * 60 + 30)
-        val diffMinutes = circularMinuteDiff(currentMinuteOfDay, targetMinuteOfDay)
+        val estResolved = com.example.itv.domain.sleep.SleepWakeCyclePolicy.resolveEffectiveBedtimeDistance(
+            nowWallMs = nowWallMs,
+            targetMinuteOfDay = targetMinuteOfDay,
+            zone = zone,
+            lastSleepEndWallMs = lastSleep?.sleepEndWallMs,
+            lastSleepDurationMs = lastSleep?.durationMs
+        )
+        val diffMinutes = estResolved.effectiveDiffMinutes
 
         val recStartH = recommendedStartHour
         val recStartM = recommendedStartMinute
         val recEndH = recommendedEndHour
         val recEndM = recommendedEndMinute
-        val recDiffMinutes = if (recStartH != null && recStartM != null) {
-            circularMinuteDiff(currentMinuteOfDay, recStartH * 60 + recStartM)
+        val recResolved = if (recStartH != null && recStartM != null) {
+            com.example.itv.domain.sleep.SleepWakeCyclePolicy.resolveEffectiveBedtimeDistance(
+                nowWallMs = nowWallMs,
+                targetMinuteOfDay = recStartH * 60 + recStartM,
+                zone = zone,
+                lastSleepEndWallMs = lastSleep?.sleepEndWallMs,
+                lastSleepDurationMs = lastSleep?.durationMs
+            )
         } else {
             null
         }
+        val recDiffMinutes = recResolved?.effectiveDiffMinutes
+        val hasWokenUp = estResolved.hasWokenUpForCycle || (recResolved?.hasWokenUpForCycle == true)
 
         val bedtimePhase = when {
             !hasBedtime -> BedtimePhase.UNKNOWN
+            hasWokenUp -> BedtimePhase.ACTIVE_HOURS
             diffMinutes in -60..-1 -> BedtimePhase.APPROACHING // 취침 1시간 이내(60분)만 임박으로 인정 (2시간 전 등 먼 시간대는 일상 활동)
-            diffMinutes in 0..360 -> BedtimePhase.PAST_BEDTIME
+            diffMinutes in 0..com.example.itv.domain.sleep.SleepWakeCyclePolicy.MAX_POST_BEDTIME_MINUTES -> BedtimePhase.PAST_BEDTIME
             else -> BedtimePhase.ACTIVE_HOURS
         }
 
@@ -920,20 +1072,27 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         var isWifi: Boolean? = null
 
         if (isLikelyNight) {
-            try {
-                val batteryIntent = appContext.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-                val plugged = batteryIntent?.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1) ?: -1
-                isCharging = plugged == BatteryManager.BATTERY_PLUGGED_AC ||
-                             plugged == BatteryManager.BATTERY_PLUGGED_USB ||
-                             plugged == BatteryManager.BATTERY_PLUGGED_WIRELESS
-            } catch (_: Exception) {}
+            val nowElapsed = android.os.SystemClock.elapsedRealtime()
+            if (cachedIsCharging == null || cachedIsWifi == null || nowElapsed - lastNightContextFetchElapsed >= 15_000L) {
+                try {
+                    val batteryIntent = appContext.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+                    val plugged = batteryIntent?.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1) ?: -1
+                    cachedIsCharging = plugged == BatteryManager.BATTERY_PLUGGED_AC ||
+                        plugged == BatteryManager.BATTERY_PLUGGED_USB ||
+                        plugged == BatteryManager.BATTERY_PLUGGED_WIRELESS
+                } catch (_: Exception) {}
 
-            try {
-                val cm = appContext.getSystemService(ConnectivityManager::class.java)
-                val activeNetwork = cm?.activeNetwork
-                val caps = cm?.getNetworkCapabilities(activeNetwork)
-                isWifi = caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
-            } catch (_: Exception) {}
+                try {
+                    val cm = appContext.getSystemService(ConnectivityManager::class.java)
+                    val activeNetwork = cm?.activeNetwork
+                    val caps = cm?.getNetworkCapabilities(activeNetwork)
+                    cachedIsWifi = caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+                } catch (_: Exception) {}
+
+                lastNightContextFetchElapsed = nowElapsed
+            }
+            isCharging = cachedIsCharging
+            isWifi = cachedIsWifi
         }
 
         // 취침 확신도 점수 계산 (100점 만점)
@@ -1036,7 +1195,8 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
             isWifiConnected = isWifi,
             bedtimeScore = bedtimeScore,
             isBedtimeCandidate = isBedtimeCandidate,
-            bedtimeScoreBreakdown = bedtimeScoreBreakdown
+            bedtimeScoreBreakdown = bedtimeScoreBreakdown,
+            hasWokenUpFromSleep = hasWokenUp
         )
     }
 

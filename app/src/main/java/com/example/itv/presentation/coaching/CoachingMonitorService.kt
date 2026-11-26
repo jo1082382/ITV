@@ -47,6 +47,18 @@ class CoachingMonitorService : Service() {
             }
         }
 
+        /** Immediately resumes normal 1-second tick cadence when the user leaves ITV for an external app. */
+        fun notifyOwnAppExited() {
+            instanceRef?.get()?.let { service ->
+                service.handler.post {
+                    if (service.running) {
+                        service.handler.removeCallbacks(service.tick)
+                        service.handler.post(service.tick)
+                    }
+                }
+            }
+        }
+
         fun triggerTest(
             context: android.content.Context,
             forceStrong: Boolean = false,
@@ -160,11 +172,22 @@ class CoachingMonitorService : Service() {
     private fun onChoice(title: String, @Suppress("UNUSED_PARAMETER") message: String) {
         if(reactionInProgress)return
         if(retryVisible) {
-            if(missionFromJev && !canContinueJevRetry()) { removeOverlay();return }
+            if(!isRestMissionFailure && missionFromJev && !canContinueJevRetry()) { removeOverlay();return }
             when (title) {
                 "쉬기" -> {
-                    val retryId = missionController.state.id ?: java.util.UUID.randomUUID().toString().take(8)
-                    startRestMission(retryId)
+                    val activeIncompleteMission = missionController.state.id != null && !missionController.state.pending
+                    if (activeIncompleteMission) {
+                        if (missionController.state.requireFacedown || currentRecommendation?.isFacedownRequired == true) {
+                            val tracker = com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this)
+                            tracker.onFacedownDetectedWhileScreenOn = {
+                                com.example.itv.infrastructure.observation.accessibility.WritingGuardService.lockScreen()
+                            }
+                            tracker.startFacedownMonitoring()
+                        }
+                    } else {
+                        val retryId = missionController.state.id ?: java.util.UUID.randomUUID().toString().take(8)
+                        startRestMission(retryId, rewardEligible = true)
+                    }
                     selectedAnimation("쉬기") {
                         removeOverlay()
                         missionController.refreshStartDeadline(SystemClock.elapsedRealtime(), missionFromJev)
@@ -294,7 +317,7 @@ class CoachingMonitorService : Service() {
         )
     }
 
-    private fun startRestMission(id: String) {
+    private fun startRestMission(id: String, rewardEligible: Boolean = true) {
         if(!running || !com.example.itv.composition.CoachingAccess.ready(this))return
         val tracker = com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this)
         val posture = tracker.currentPosture()
@@ -324,8 +347,54 @@ class CoachingMonitorService : Service() {
             requireFacedown = rec.isFacedownRequired,
             isStrong = isStrong,
             continuousUsedMs = usageClock.usedMs,
-            customRestMs = calculatedRestMs
+            customRestMs = calculatedRestMs,
+            rewardEligible = rewardEligible
         )
+    }
+    /**
+     * 강한 개입 표시 중 사용자가 '쉬기'를 누르지 않고 화면만 꺼버린 경우,
+     * 개입이 사라져 우회되는 것을 막기 위해 보상 미지급(rewardEligible = false) 조건으로
+     * 자동 휴식 측정을 시작합니다.
+     */
+    private fun autoStartStrongMissionOnScreenOff() {
+        if (missionController.state.id != null) return
+        val currentOverlay = overlay ?: return
+        if (!overlayFactory.isStrong(currentOverlay)) return
+
+        val autoId = responseController.offerId ?: java.util.UUID.randomUUID().toString().take(8)
+        val isJev = offerFromJev && JevFeature.available() && jev.hasActiveOffer()
+        if (isJev) {
+            jev.respond("REST")
+        }
+        handler.removeCallbacks(offerTimeout)
+        missionFromJev = isJev
+        missionJevSettings = if (isJev) jev.store.settings.value else null
+        missionJevContext = if (isJev) jev.state.value.context else null
+
+        // 이후 removeOverlay()가 제안을 CANCELLED 처리하지 않도록 제안 상태를 먼저 정리합니다.
+        responseController.suppressed = true
+        responseController.offered = false
+        responseController.offerId = null
+        responseController.deadline = 0L
+        responseController.retryAt = null
+        offerFromJev = false
+        nm.cancel(7102)
+
+        startRestMission(autoId, rewardEligible = false)
+        com.example.itv.composition.CoachingAccess.state(
+            this,
+            "강한 개입 중 화면 꺼짐 · 자동 휴식 측정 시작 (미션 미수락 · 보상 미지급)"
+        )
+    }
+    private fun handleStrongOverlayWhenLocked() {
+        autoStartStrongMissionOnScreenOff()
+        if (!pm.isInteractive) {
+            missionScreenOff()
+        } else if (missionController.state.id != null && !missionController.state.pending && missionController.state.offAt == null) {
+            retryPending = true
+            isRestMissionFailure = true
+        }
+        removeOverlay()
     }
     private fun canContinueJevRetry(): Boolean {
         val original=missionJevContext ?: return false
@@ -351,7 +420,7 @@ class CoachingMonitorService : Service() {
         val reminderSec=TestCoachingPolicy.reminderMs(useJev)/1000L
         val prepSec=TestCoachingPolicy.missionStartMs(useJev)/1000L
         val restMs = if (title == "쉬기" && missionController.state.id != null) {
-            missionController.state.requiredRestMs
+            missionController.state.remainingRestMs.takeIf { it > 0L } ?: missionController.state.requiredRestMs
         } else {
             TestCoachingPolicy.calculateRestMs(useJev, usageClock.usedMs)
         }
@@ -446,7 +515,7 @@ class CoachingMonitorService : Service() {
             isStrong,
             missionContext
         ).also { currentRecommendation = it }
-        val remainingSec = (missionController.state.remainingRestMs / 1000L).takeIf { it > 0L }
+        val remainingSec = ((missionController.state.remainingRestMs + 999L) / 1000L).takeIf { it > 0L }
         val (root, params) = overlayFactory.retryOffer(
             ::onChoice,
             intensityOverride = effectiveIntensity,
@@ -551,25 +620,36 @@ class CoachingMonitorService : Service() {
 
             if (isStrong) {
                 // [강한 개입 전용]: 휴식을 다 채우지 않고 다시 킨 경우 카운트다운 없이 어두운 배경 + 남은 휴식 안내 창 + 캐릭터를 다시 띄워 휴식을 완료하도록 유도
-                removeOverlay()
-                val (root, params) = overlayFactory.retryOffer(
-                    onChoice = ::onChoice,
-                    intensityOverride = CharacterIntensity.STRONG,
-                    recommendation = rec,
-                    remainingRestSeconds = remainingSec,
-                    prepareSeconds = prepareSeconds
-                )
-                try {
-                    wm.addView(root, params)
-                    overlay = root
-                    retryVisible = true
-                    overlayFactory.attachControls(root)
-                } catch (_: Exception) {}
+                if (!unlocked()) {
+                    // 잠금 화면 상태에서는 오버레이를 바로 붙이지 않고 잠금 해제 즉시 강한 개입 재시도 창을 표시합니다.
+                    retryPending = true
+                    isRestMissionFailure = true
+                } else {
+                    removeOverlay()
+                    val (root, params) = overlayFactory.retryOffer(
+                        onChoice = ::onChoice,
+                        intensityOverride = CharacterIntensity.STRONG,
+                        recommendation = rec,
+                        remainingRestSeconds = remainingSec,
+                        prepareSeconds = prepareSeconds
+                    )
+                    try {
+                        wm.addView(root, params)
+                        overlay = root
+                        retryVisible = true
+                        isRestMissionFailure = true
+                        retryPending = false
+                        overlayFactory.attachControls(root)
+                    } catch (_: Exception) {
+                        retryPending = true
+                        isRestMissionFailure = true
+                    }
 
-                tracker.onFacedownDetectedWhileScreenOn = {
-                    com.example.itv.infrastructure.observation.accessibility.WritingGuardService.lockScreen()
+                    tracker.onFacedownDetectedWhileScreenOn = {
+                        com.example.itv.infrastructure.observation.accessibility.WritingGuardService.lockScreen()
+                    }
+                    tracker.startFacedownMonitoring()
                 }
-                tracker.startFacedownMonitoring()
             } else {
                 // [약한/보통 개입]: 화면을 어둡게 막지 않고 상단 카운트다운 HUD만 띄우며, 카운트다운 만료 시 사라짐
                 overlayFactory.showMissionCountdownHud(
@@ -590,9 +670,18 @@ class CoachingMonitorService : Service() {
                 handler.postDelayed(missionResumeTimeout, prepareSeconds * 1000L)
             }
         } else if (wake == com.example.itv.domain.coaching.TestMissionWake.SUCCESS) {
+            val rewardEligible = missionController.state.rewardEligible
             handler.removeCallbacks(missionResumeTimeout)
             overlayFactory.dismissMissionCountdownHud()
             onMissionRestSuccess()
+            if (!rewardEligible) {
+                // 미션을 수락하지 않고 강한 개입 중 화면을 꺼서 자동 휴식한 경우 보상을 지급하지 않습니다.
+                missionController.completionDisplayed()
+                com.example.itv.composition.CoachingAccess.state(
+                    this,
+                    "강한 개입 자동 휴식 완료 · 미션 미수락으로 보상 미지급"
+                )
+            }
         }
     }
     private fun onMissionRestSuccess() {
@@ -614,8 +703,17 @@ class CoachingMonitorService : Service() {
         }
     }
     private fun checkMission() {
-        if (!pm.isInteractive) missionScreenOff() else missionScreenOn()
+        if (!pm.isInteractive) {
+            autoStartStrongMissionOnScreenOff()
+            missionScreenOff()
+        } else {
+            missionScreenOn()
+        }
         if (!missionController.state.pending || !unlocked() || completionView != null) return
+        if (!missionController.state.rewardEligible) {
+            missionController.completionDisplayed()
+            return
+        }
         if (!com.example.itv.composition.CoachingAccess.ready(this) || !Settings.canDrawOverlays(this)) return
         val reason = WritingGuard.blockReason()
         if (reason != null && reason.contains("작성 중")) return
@@ -688,14 +786,19 @@ class CoachingMonitorService : Service() {
     private fun observeUsage(): Boolean {
         val isUnlocked = unlocked()
         val nowElapsed = SystemClock.elapsedRealtime()
-        val rawFgPkg = JevObservationHub.foregroundPackage
-        val fgPkg = rawFgPkg.takeIf { nowElapsed - JevObservationHub.checkedAt in 0..4000 }
+        val ownAppFg = WritingGuard.inAppForeground
+        val rawFgPkg = if (ownAppFg) packageName else JevObservationHub.foregroundPackage
+        val fgPkg = if (ownAppFg) {
+            packageName
+        } else {
+            rawFgPkg.takeIf { nowElapsed - JevObservationHub.checkedAt in 0..4000 }
+        }
         val activePkg = fgPkg ?: rawFgPkg
-        val isOwnApp = activePkg != null && (
+        val isOwnApp = ownAppFg || (activePkg != null && (
             activePkg == packageName ||
             activePkg.startsWith("com.team.itv") ||
             activePkg.startsWith("com.example.itv")
-        )
+        ))
         val isNonCountedSystem = fgPkg != null && (
             JevSettings.isLauncherPackage(fgPkg) ||
             JevSettings.isExcludedSystemPackage(fgPkg)
@@ -735,6 +838,7 @@ class CoachingMonitorService : Service() {
                 if (screenOffSinceWallMs == null) {
                     screenOffSinceWallMs = System.currentTimeMillis()
                 }
+                autoStartStrongMissionOnScreenOff()
                 missionScreenOff()
                 if (overlayFactory.isStrong(overlay)) {
                     removeOverlay()
@@ -749,12 +853,17 @@ class CoachingMonitorService : Service() {
             } else {
                 if (intent.action == Intent.ACTION_SCREEN_ON) {
                     lastUnlockedElapsed = SystemClock.elapsedRealtime()
-                    applyWallClockScreenOffRestIfNeeded()
                     missionScreenOn()
+                    applyWallClockScreenOffRestIfNeeded()
                     bedtimeCareController.showMorningBriefingIfNeeded(JevObservationHub.foregroundPackage)
+                } else if (intent.action == Intent.ACTION_USER_PRESENT) {
+                    lastUnlockedElapsed = SystemClock.elapsedRealtime()
+                    missionScreenOn()
+                    applyWallClockScreenOffRestIfNeeded()
                 }
                 observeUsage()
                 checkMission()
+                checkRetry(transition = true)
             }
         }
     }
@@ -765,7 +874,21 @@ class CoachingMonitorService : Service() {
      */
     private fun applyWallClockScreenOffRestIfNeeded() {
         val offAt = screenOffSinceWallMs ?: return
+        // 미완료 휴식 미션(특히 엎어두기 필수 강한 개입)이 남아있는 경우 자연 휴식으로 상태를 초기화하지 않습니다.
+        if (missionController.state.id != null && !missionController.state.pending) {
+            if (unlocked()) {
+                screenOffSinceWallMs = null
+            }
+            return
+        }
         val nowWall = System.currentTimeMillis()
+        val isUnlockedNow = unlocked()
+        if (isUnlockedNow && (nowWall - offAt) >= com.example.itv.domain.sleep.SleepWakeCyclePolicy.MIN_SLEEP_CYCLE_MS) {
+            // 3시간 이상 화면 꺼짐 후 잠금 해제 -> 수면 완료 기상으로 간주하고 취침 시간대·캐시 즉시 초기화
+            com.example.itv.infrastructure.observation.LightAndBrightnessTracker
+                .getInstance(this)
+                .onWakeUpFromSleep(offAt, nowWall, source = "SERVICE_SCREEN_OFF")
+        }
         val naturalRestMs = TestCoachingPolicy.naturalRestMs(jevMode())
         if (nowWall - offAt >= naturalRestMs) {
             usageClock.clear()
@@ -780,7 +903,7 @@ class CoachingMonitorService : Service() {
                 jev.resetProbability("SCREEN_OFF_NATURAL_REST")
             }
         }
-        if (unlocked()) {
+        if (isUnlockedNow) {
             screenOffSinceWallMs = null
         }
     }
@@ -814,6 +937,7 @@ class CoachingMonitorService : Service() {
             } else {
                 if (screenOffSinceWallMs != null) {
                     lastUnlockedElapsed = nowElapsed
+                    missionScreenOn()
                     applyWallClockScreenOffRestIfNeeded()
                 }
             }
@@ -822,12 +946,16 @@ class CoachingMonitorService : Service() {
             val usageObserved = observeUsage()
             val using = if (currentJevMode) unlocked() else (if (isStrong) unlocked() else usageObserved)
             val observation = observer.snapshot()
-            val fgPkg = JevObservationHub.foregroundPackage.takeIf { nowElapsed - JevObservationHub.checkedAt in 0..JevRuntime.FOREGROUND_FRESHNESS_MS }
+            val fgPkg = if (WritingGuard.inAppForeground) {
+                packageName
+            } else {
+                JevObservationHub.foregroundPackage.takeIf { nowElapsed - JevObservationHub.checkedAt in 0..JevRuntime.FOREGROUND_FRESHNESS_MS }
+            }
             val leftDisplayedApp = !isRestMissionFailure && displayedPackage != null && fgPkg != null && fgPkg != displayedPackage && !JevObservationHub.isTransientSystemPackage(fgPkg)
             val isWriting = observation.isActivelyWriting()
             if (overlay != null) {
                 if (isStrong) {
-                    if (!unlocked()) removeOverlay()
+                    if (!unlocked()) handleStrongOverlayWhenLocked()
                 } else {
                     if (!using || isWriting || leftDisplayedApp) {
                         val isAppSwitch = leftDisplayedApp && offerFromJev && !offerIsPreIntervention
@@ -847,7 +975,7 @@ class CoachingMonitorService : Service() {
                 }
                 if (overlay != null) {
                     if (isStrong) {
-                        if (!unlocked()) removeOverlay()
+                        if (!unlocked()) handleStrongOverlayWhenLocked()
                     } else {
                         if (!using || isWriting || !current) {
                             val isAppSwitch = !current && leftDisplayedApp && offerFromJev && !offerIsPreIntervention
@@ -864,14 +992,28 @@ class CoachingMonitorService : Service() {
                     progress.tick(nowElapsed, using, observation, overlay != null)
                 }
             }
-            updateDarkUsageAccumulation(nowElapsed, using, fgPkg)
-            maybeShowContextualPreIntervention(nowElapsed, transition = false)
-            checkNightContinuousBudget(nowElapsed)
-            checkRetry()
-            if (feedbackView != null && (!using || !canShowJevFeedback())) dismissJevFeedback()
-            maybeShowJevFeedback()
+            val ownAppIdle = WritingGuard.inAppForeground &&
+                overlay == null &&
+                feedbackView == null &&
+                completionView == null &&
+                missionController.state.id == null &&
+                !reactionInProgress &&
+                !retryPending &&
+                !retryVisible &&
+                !bedtimeCareController.isDialogShowing()
+            if (!ownAppIdle) {
+                updateDarkUsageAccumulation(nowElapsed, using, fgPkg)
+                maybeShowContextualPreIntervention(nowElapsed, transition = false)
+                checkNightContinuousBudget(nowElapsed)
+                checkRetry()
+                if (feedbackView != null && (!using || !canShowJevFeedback())) dismissJevFeedback()
+                maybeShowJevFeedback()
+            } else {
+                lastDarkTickElapsed = null
+            }
             publishDiagnostics()
-            if (running) handler.postDelayed(this, 1000)
+            val nextTickDelayMs = if (ownAppIdle) 2500L else 1000L
+            if (running) handler.postDelayed(this, nextTickDelayMs)
         }
     }
 
@@ -934,13 +1076,19 @@ class CoachingMonitorService : Service() {
         } else {
             usageClock.usedMs
         }
-        val resolvedBedtimeDistance = ambient.bedtimeDistanceMinutes ?: jev.state.value.context?.bedtimePassedMinutes
+        val resolvedBedtimeDistance = if (ambient.hasWokenUpFromSleep) {
+            ambient.bedtimeDistanceMinutes
+        } else {
+            ambient.bedtimeDistanceMinutes ?: jev.state.value.context?.bedtimePassedMinutes
+        }
         val decision = com.example.itv.domain.coaching.ContextualPreInterventionPolicy.evaluate(
             ambientLux = ambient.lux,
             isOccluded = isOccluded,
             bedtimeDistanceMinutes = resolvedBedtimeDistance,
-            isPastBedtime = ambient.bedtimePhase == com.example.itv.infrastructure.observation.BedtimePhase.PAST_BEDTIME,
-            isApproachingBedtime = ambient.bedtimePhase == com.example.itv.infrastructure.observation.BedtimePhase.APPROACHING,
+            isPastBedtime = !ambient.hasWokenUpFromSleep &&
+                ambient.bedtimePhase == com.example.itv.infrastructure.observation.BedtimePhase.PAST_BEDTIME,
+            isApproachingBedtime = !ambient.hasWokenUpFromSleep &&
+                ambient.bedtimePhase == com.example.itv.infrastructure.observation.BedtimePhase.APPROACHING,
             continuousUsedMs = currentContinuousMs,
             darkAccumulatedMs = darkUsageAccumulatedMs,
             alreadyTriggeredInSession = preInterventionTriggeredInSession,
@@ -1143,6 +1291,7 @@ class CoachingMonitorService : Service() {
         val ytShortsOrComments = youtube == 1 || com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.isActivelyInShortsOrComments()
         val genDeferred = com.example.itv.infrastructure.observation.GeneralAppTracker.blockingOrWaitingReason(JevObservationHub.foregroundPackage)
         val screen = when {
+            WritingGuard.inAppForeground -> "ITV 내부 화면 (접근성 휴면)"
             !WritingGuard.connected || now - WritingGuard.checkedAt > 3000L -> "판별 불가 · 접근성 관측 없음/지연"
             ytShortsOrComments -> "확인된 YouTube 쇼츠/댓글"
             ytLongform -> "확인된 YouTube 롱폼 시청 중"
@@ -1180,18 +1329,18 @@ class CoachingMonitorService : Service() {
         instanceRef = java.lang.ref.WeakReference(this)
         com.example.itv.composition.CoachingAccess.channels(this)
         MissionStats.recoverInterrupted(this)
-        ReelsProbe.onTransition = { onReelsTransition() }
+        ReelsProbe.onTransition = { handler.post { onReelsTransition() } }
         YoutubeProbe.coachingObservation = true
         YoutubeProbe.clearBaseline()
-        YoutubeProbe.onTransition = { onYoutubeTransition() }
+        YoutubeProbe.onTransition = { handler.post { onYoutubeTransition() } }
         com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.onLongformTransition = { event ->
-            onYoutubeLongformTransition(event)
+            handler.post { onYoutubeLongformTransition(event) }
         }
         com.example.itv.infrastructure.observation.instagram.InstagramTracker.onInstagramTransition = { event ->
-            onInstagramModeTransition(event)
+            handler.post { onInstagramModeTransition(event) }
         }
         com.example.itv.infrastructure.observation.GeneralAppTracker.onGeneralAppEligibleTransition = { event ->
-            onGeneralAppEligibleTransition(event)
+            handler.post { onGeneralAppEligibleTransition(event) }
         }
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_USER_PRESENT)

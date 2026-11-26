@@ -61,6 +61,7 @@ internal class TestRestMission {
     var pending = false
     var requireFacedown = false
     var isStrong = false
+    var rewardEligible = true
 
     val remainingRestMs: Long
         get() = (requiredRestMs - accumulatedRestMs).coerceAtLeast(0L)
@@ -71,7 +72,8 @@ internal class TestRestMission {
         startMs: Long = TestCoachingPolicy.MISSION_START_MS,
         restMs: Long = TestCoachingPolicy.REST_MS,
         requireFacedown: Boolean = false,
-        isStrong: Boolean = false
+        isStrong: Boolean = false,
+        rewardEligible: Boolean = true
     ) {
         id = value; offAt = null; pending = false; started = false
         startWindowMs = startMs
@@ -80,9 +82,10 @@ internal class TestRestMission {
         startDeadline = now + startMs
         this.requireFacedown = requireFacedown
         this.isStrong = isStrong
+        this.rewardEligible = rewardEligible
     }
     fun isLate(now: Long) = false // 휴식하기 전까지는 개입이 사라지지 않고 유지됨
-    fun failStart() { id = null; offAt = null; startDeadline = 0L; accumulatedRestMs = 0L; requireFacedown = false; isStrong = false }
+    fun failStart() { id = null; offAt = null; startDeadline = 0L; accumulatedRestMs = 0L; requireFacedown = false; isStrong = false; rewardEligible = true }
     fun screenOff(now: Long): Boolean {
         if (id == null || pending || offAt != null) return false
         val first = !started
@@ -106,6 +109,6 @@ internal class TestRestMission {
             TestMissionWake.INCOMPLETE to totalRest
         }
     }
-    fun displayed() { pending = false; id = null; accumulatedRestMs = 0L; requireFacedown = false; isStrong = false }
-    fun clear() { id = null; pending = false; offAt = null; accumulatedRestMs = 0L; requireFacedown = false; isStrong = false }
+    fun displayed() { pending = false; id = null; accumulatedRestMs = 0L; requireFacedown = false; isStrong = false; rewardEligible = true }
+    fun clear() { id = null; pending = false; offAt = null; accumulatedRestMs = 0L; requireFacedown = false; isStrong = false; rewardEligible = true }
 }

@@ -927,6 +927,10 @@ object GeneralAppTracker {
             val delta = if (lastTickElapsed > 0L) (nowElapsed - lastTickElapsed).coerceIn(0L, 3500L) else 0L
             currentAppDurationMs += delta
             lastTickElapsed = nowElapsed
+            // ITV 앱 내부에 머무는 동안에는 AudioManager/PackageManager Binder IPC를 반복 호출하지 않음
+            if (pkg == context.packageName) {
+                return
+            }
         }
 
         val meta = resolveAppMeta(context, pkg)

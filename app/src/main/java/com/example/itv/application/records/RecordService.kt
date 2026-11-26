@@ -5,9 +5,22 @@ import java.time.*
 
 /** Orchestrates reads; does not access Android, Compose or Room. */
 internal class RecordService(private val source: RecordSource) {
-    fun nightReport(days: Int, now: Long, zone: ZoneId): NightReport {
+    fun nightReport(
+        days: Int,
+        now: Long,
+        zone: ZoneId,
+        finalizeActiveWake: Boolean = false,
+        fallbackLiveSleep: Pair<Long, Long>? = null
+    ): NightReport {
         source.requireUsagePermission()
-        return calculateNightReport(source.events(0L, now), days, zone, now)
+        return calculateNightReport(
+            events = source.events(0L, now),
+            days = days,
+            zone = zone,
+            now = now,
+            finalizeActiveWake = finalizeActiveWake,
+            fallbackLiveSleep = fallbackLiveSleep
+        )
     }
     fun usageReport(days: Int, targetDate: LocalDate?, now: Long, zone: ZoneId): Report {
         source.requireCollectionConsent()

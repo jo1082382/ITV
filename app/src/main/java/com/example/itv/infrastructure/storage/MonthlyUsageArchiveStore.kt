@@ -1,11 +1,17 @@
 package com.example.itv.infrastructure.storage
 
+import android.app.AppOpsManager
 import android.content.Context
+import android.os.Process
+import android.os.SystemClock
 import android.util.AtomicFile
 import com.example.itv.data.local.ItvDatabase
 import com.example.itv.domain.records.AppHourUsage
+import com.example.itv.domain.records.DailyHourlyBreakdown
 import com.example.itv.domain.records.NightReport
 import com.example.itv.domain.records.Report
+import com.example.itv.domain.records.calculateDailyHourlyBreakdowns
+import com.example.itv.infrastructure.coaching.CoachingConsentStore
 import com.example.itv.infrastructure.records.AndroidRecordSource
 import com.example.itv.infrastructure.storage.shortform.ShortformPersonalStatsStore
 import kotlinx.coroutines.Dispatchers
@@ -112,12 +118,16 @@ internal object MonthlyUsageArchiveStore {
     internal const val MAX_RETENTION_MONTHS = 6L
     private const val MIN_PHONE_SESSION_MS = 120_000L
     private const val MAX_TOP_APPS_PER_DAY = 15
+    private const val RECENT_HOURLY_BACKFILL_DAYS = 10L
+    private const val DEFAULT_BACKFILL_THROTTLE_MS = 30 * 60 * 1000L
     private val mutex = Mutex()
 
     @Volatile
     private var cachedSummaries: Map<String, MonthlyArchiveSummary> = emptyMap()
     @Volatile
     private var cachedDailyRecords: Map<String, DailyArchiveRecord> = emptyMap()
+    @Volatile
+    private var lastAutoBackfillElapsedMs: Long = 0L
     private var initialized = false
 
     @Synchronized
@@ -211,6 +221,7 @@ internal object MonthlyUsageArchiveStore {
             val appCtx = context.applicationContext
             cachedDailyRecords = emptyMap()
             cachedSummaries = emptyMap()
+            lastAutoBackfillElapsedMs = 0L
             initialized = false
             val base = File(appCtx.noBackupFilesDir, FILE_NAME)
             runCatching { AtomicFile(base).delete() }
@@ -449,6 +460,152 @@ internal object MonthlyUsageArchiveStore {
     }
 
     /**
+     * Lightweight, throttled background backfill that persists the last ~10 days of 24-hour
+     * phone usage distributions & top apps into the 6-month on-device archive in a single
+     * OS UsageEvents scan (so past dates never lose hourly charts even if never tapped).
+     */
+    @Suppress("DEPRECATION")
+    suspend fun backfillRecentHourlyIfNeeded(
+        context: Context,
+        minIntervalMs: Long = DEFAULT_BACKFILL_THROTTLE_MS,
+        today: LocalDate = LocalDate.now()
+    ): Boolean = withContext(Dispatchers.IO) {
+        val appCtx = context.applicationContext
+        if (!CoachingConsentStore.granted(appCtx)) return@withContext false
+        val hasUsagePermission = runCatching {
+            val ops = appCtx.getSystemService(Context.APP_OPS_SERVICE) as? AppOpsManager
+            ops?.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), appCtx.packageName) == AppOpsManager.MODE_ALLOWED
+        }.getOrDefault(false)
+        if (!hasUsagePermission) return@withContext false
+
+        ensureLoaded(appCtx)
+        val nowElapsed = SystemClock.elapsedRealtime()
+        val yesterdayKey = today.minusDays(1).toString()
+        val yesterdayMissingHourly = cachedDailyRecords[yesterdayKey]?.hourlyPhoneMinutes.isNullOrEmpty()
+        if (!yesterdayMissingHourly &&
+            minIntervalMs > 0L &&
+            lastAutoBackfillElapsedMs > 0L &&
+            (nowElapsed - lastAutoBackfillElapsedMs) in 0L until minIntervalMs
+        ) {
+            return@withContext false
+        }
+
+        mutex.withLock {
+            ensureLoaded(appCtx)
+            val recheckedElapsed = SystemClock.elapsedRealtime()
+            val recheckedYesterdayMissing = cachedDailyRecords[yesterdayKey]?.hourlyPhoneMinutes.isNullOrEmpty()
+            if (!recheckedYesterdayMissing &&
+                minIntervalMs > 0L &&
+                lastAutoBackfillElapsedMs > 0L &&
+                (recheckedElapsed - lastAutoBackfillElapsedMs) in 0L until minIntervalMs
+            ) {
+                return@withLock false
+            }
+
+            val zone = ZoneId.systemDefault()
+            val cutoffDate = today.minusMonths(MAX_RETENTION_MONTHS)
+            val boundaryMs = AccountDataBoundaryStore.getFreshStartEpochMs(appCtx)
+            val boundaryDate = AccountDataBoundaryStore.getFreshStartDate(appCtx, zone)
+            val nowMs = System.currentTimeMillis()
+            val scanStartMs = AccountDataBoundaryStore.clampStartWallMs(
+                today.minusDays(RECENT_HOURLY_BACKFILL_DAYS).atStartOfDay(zone).toInstant().toEpochMilli(),
+                boundaryMs
+            )
+            if (scanStartMs >= nowMs) {
+                lastAutoBackfillElapsedMs = recheckedElapsed
+                return@withLock false
+            }
+
+            val recordSource = AndroidRecordSource(appCtx)
+            val events = runCatching { recordSource.events(scanStartMs, nowMs) }.getOrDefault(emptyList())
+            val breakdowns = calculateDailyHourlyBreakdowns(events, zone, scanStartMs, nowMs)
+            val updatedDailies = cachedDailyRecords.toMutableMap()
+            val changed = mergeHourlyBreakdownsIntoMap(
+                updatedDailies = updatedDailies,
+                breakdowns = breakdowns,
+                cutoffDate = cutoffDate,
+                today = today,
+                boundaryDate = boundaryDate,
+                labelProvider = recordSource::appLabel
+            )
+            lastAutoBackfillElapsedMs = SystemClock.elapsedRealtime()
+            if (changed) {
+                commitUpdatedDailiesLocked(appCtx, updatedDailies, today)
+            }
+            changed
+        }
+    }
+
+    internal fun mergeHourlyBreakdownsIntoMap(
+        updatedDailies: MutableMap<String, DailyArchiveRecord>,
+        breakdowns: Map<LocalDate, DailyHourlyBreakdown>,
+        cutoffDate: LocalDate,
+        today: LocalDate,
+        boundaryDate: LocalDate?,
+        labelProvider: (String) -> String
+    ): Boolean {
+        if (breakdowns.isEmpty()) return false
+        val labelCache = mutableMapOf<String, String>()
+        var changed = false
+        breakdowns.forEach { (date, breakdown) ->
+            if (date.isBefore(cutoffDate) || date.isAfter(today)) return@forEach
+            if (AccountDataBoundaryStore.isDateBeforeBoundary(date, boundaryDate)) return@forEach
+            val hasHourly = breakdown.hourlyMinutes.size == 24 && breakdown.hourlyMinutes.any { it > 0.0 }
+            if (!hasHourly && breakdown.totalMinutes <= 0.0) return@forEach
+
+            val dateKey = date.toString()
+            val existing = updatedDailies[dateKey]
+            val existingHourlySum = existing?.hourlyPhoneMinutes?.sum() ?: 0.0
+            val shouldUpdateHourly = hasHourly && (
+                existing == null ||
+                    existing.hourlyPhoneMinutes.size != 24 ||
+                    existingHourlySum <= 0.0 ||
+                    date == today ||
+                    breakdown.totalMinutes > existingHourlySum + 0.1
+                )
+
+            val shouldUpdateTopApps = breakdown.appMinutes.isNotEmpty() && (
+                existing == null ||
+                    existing.topApps.isEmpty() ||
+                    date == today ||
+                    breakdown.totalMinutes > existingHourlySum + 0.1
+                )
+
+            val resolvedTopApps = if (shouldUpdateTopApps) {
+                breakdown.appMinutes.entries
+                    .asSequence()
+                    .filter { it.value >= 1.0 }
+                    .sortedByDescending { it.value }
+                    .take(MAX_TOP_APPS_PER_DAY)
+                    .map { (pkg, mins) ->
+                        val label = labelCache.getOrPut(pkg) { labelProvider(pkg) }
+                        ArchivedAppUsage(packageName = pkg, label = label, minutes = mins)
+                    }
+                    .toList()
+            } else {
+                existing?.topApps.orEmpty()
+            }
+
+            val reportMs = (breakdown.totalMinutes * 60_000.0).toLong()
+            val merged = (existing ?: DailyArchiveRecord(
+                date = dateKey,
+                totalPhoneMs = reportMs,
+                shortformMs = 0L,
+                dayType = if (date.dayOfWeek.value in 6..7) "REST_DAY" else "WORKDAY"
+            )).copy(
+                totalPhoneMs = maxOf(existing?.totalPhoneMs ?: 0L, reportMs),
+                hourlyPhoneMinutes = if (shouldUpdateHourly) breakdown.hourlyMinutes else existing?.hourlyPhoneMinutes.orEmpty(),
+                topApps = if (resolvedTopApps.isNotEmpty()) resolvedTopApps else existing?.topApps.orEmpty()
+            )
+            if (merged != existing) {
+                updatedDailies[dateKey] = merged
+                changed = true
+            }
+        }
+        return changed
+    }
+
+    /**
      * Synchronizes and archives all self-measured daily data for long-term (up to 6 months) retention.
      * Integrates OS usage stats, phone sessions, shortform sessions & Room history,
      * sleep estimates & confirmations, and hourly/app snapshots.
@@ -583,15 +740,20 @@ internal object MonthlyUsageArchiveStore {
                 }
             }
 
-            // 5. Incorporate Phone Session Stats (count, total session time, avg, max) from recent OS UsageEvents
+            // 5. Incorporate Phone Session Stats AND 24-hour distributions + top apps from a single OS UsageEvents pass
             val phoneEventsStart = AccountDataBoundaryStore.clampStartWallMs(
                 today.minusDays(35).atStartOfDay(zone).toInstant().toEpochMilli(),
                 boundaryMs
             )
-            val phoneSessionsByDate = if (phoneEventsStart < nowMs) {
+            val recordSource = AndroidRecordSource(appCtx)
+            val rawPhoneEvents = if (phoneEventsStart < nowMs) {
+                runCatching { recordSource.events(phoneEventsStart, nowMs) }.getOrDefault(emptyList())
+            } else {
+                emptyList()
+            }
+            val phoneSessionsByDate = if (rawPhoneEvents.isNotEmpty()) {
                 runCatching {
-                    val events = AndroidRecordSource(appCtx).events(phoneEventsStart, nowMs)
-                    ShortformPersonalStatsStore.parsePhoneSessions(events).groupBy { it.date }
+                    ShortformPersonalStatsStore.parsePhoneSessions(rawPhoneEvents).groupBy { it.date }
                 }.getOrDefault(emptyMap())
             } else {
                 emptyMap()
@@ -623,6 +785,20 @@ internal object MonthlyUsageArchiveStore {
                         phoneMaxSessionMs = maxOfNullable(existing?.phoneMaxSessionMs, maxSessionMs)
                     )
                 }
+            }
+
+            // 5.5 Automatically backfill 24h hourly distributions & top apps for all recent OS dates (zero extra Binder IPC)
+            if (rawPhoneEvents.isNotEmpty()) {
+                val hourlyBreakdowns = calculateDailyHourlyBreakdowns(rawPhoneEvents, zone, phoneEventsStart, nowMs)
+                mergeHourlyBreakdownsIntoMap(
+                    updatedDailies = updatedDailies,
+                    breakdowns = hourlyBreakdowns,
+                    cutoffDate = cutoffDate,
+                    today = today,
+                    boundaryDate = boundaryDate,
+                    labelProvider = recordSource::appLabel
+                )
+                lastAutoBackfillElapsedMs = SystemClock.elapsedRealtime()
             }
 
             // 6. Incorporate NightReport Sleep / Non-Use Observations (respecting fresh-start boundary)

@@ -14,10 +14,10 @@ import com.example.itv.infrastructure.storage.shortform.ShortformPersonalStatsSt
 
 /** Structure-only detection. Never reads message text, images or video identities. */
 internal object ReelsProbe {
-    // Main-thread callback: no broadcast, polling delay or persisted video identity.
-    var onTransition: (() -> Unit)? = null
-    private var frameAt = 0L
-    private var frameKnown = false
+    // Callback invoked on Reels transition (may be called from worker thread).
+    @Volatile var onTransition: (() -> Unit)? = null
+    @Volatile private var frameAt = 0L
+    @Volatile private var frameKnown = false
 
     // 기본 릴스 식별 ID (표본 미수집 시 보조용 · clips 전용 ID)
     private val DEFAULT_REELS_MARKERS = setOf(
@@ -56,25 +56,25 @@ internal object ReelsProbe {
         return if (valid) 1 else 0
     }
 
-    private var appContext: Context? = null
-    var enabled = false
-    var latest = emptySet<String>()
-    private var currentInstagram = false
-    var latestAt = 0L
-    var valid = false
-    var status = "테스트 중지"
-    var reels: Set<String>? = null
-    var feed: Set<String>? = null
-    var dm: Set<String>? = null
-    var comments: Set<String>? = null
-    var events = 0
-    var candidates = 0
+    @Volatile private var appContext: Context? = null
+    @Volatile var enabled = false
+    @Volatile var latest = emptySet<String>()
+    @Volatile private var currentInstagram = false
+    @Volatile var latestAt = 0L
+    @Volatile var valid = false
+    @Volatile var status = "테스트 중지"
+    @Volatile var reels: Set<String>? = null
+    @Volatile var feed: Set<String>? = null
+    @Volatile var dm: Set<String>? = null
+    @Volatile var comments: Set<String>? = null
+    @Volatile var events = 0
+    @Volatile var candidates = 0
     /** Swipe count of the most recent viewing run; survives the 15s idle reset for test inspection. */
-    var lastRunCandidates = 0
-    var lastScroll = 0L
-    var candidateMs = 0L
-    private var lastTick = 0L
-    private var lastScan = 0L
+    @Volatile var lastRunCandidates = 0
+    @Volatile var lastScroll = 0L
+    @Volatile var candidateMs = 0L
+    @Volatile private var lastTick = 0L
+    @Volatile private var lastScan = 0L
 
     fun markers(): Set<String> {
         val positive = reels?.takeIf { it.isNotEmpty() } ?: DEFAULT_REELS_MARKERS

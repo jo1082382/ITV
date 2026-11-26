@@ -150,6 +150,9 @@ class SixMonthArchiveAndWiperTest {
         assertFalse("coaching_test" in LocalDataWiper.SIGN_OUT_PREF_NAMES_TO_CLEAR)
         assertTrue("login_completed_v1" in LocalDataWiper.SIGN_OUT_FILES_TO_DELETE)
         assertTrue(MonthlyUsageArchiveStore.FILE_NAME in LocalDataWiper.SIGN_OUT_FILES_TO_DELETE)
+        assertTrue(
+            com.example.itv.infrastructure.reward.CalendarRewardStore.PREF_NAME in LocalDataWiper.SIGN_OUT_PREF_NAMES_TO_CLEAR
+        )
 
         // Full account deletion still removes consent, intro, dev test settings, and auth prefs
         assertTrue("consent_guest_v1.json" in LocalDataWiper.NO_BACKUP_FILES_TO_DELETE)
@@ -158,6 +161,9 @@ class SixMonthArchiveAndWiperTest {
         assertTrue("itv_auth_prefs" in LocalDataWiper.SHARED_PREF_NAMES_TO_CLEAR)
         assertTrue("jev_test_settings_v1" in LocalDataWiper.SHARED_PREF_NAMES_TO_CLEAR)
         assertTrue("coaching_test" in LocalDataWiper.SHARED_PREF_NAMES_TO_CLEAR)
+        assertTrue(
+            com.example.itv.infrastructure.reward.CalendarRewardStore.PREF_NAME in LocalDataWiper.SHARED_PREF_NAMES_TO_CLEAR
+        )
     }
 
     @Test

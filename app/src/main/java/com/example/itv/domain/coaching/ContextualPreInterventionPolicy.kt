@@ -108,12 +108,14 @@ object ContextualPreInterventionPolicy {
 
         val isDark = isDarkRoom(ambientLux, isOccluded)
         val isBrightScreen = isBrightScreenInDark(screenBrightness)
-        val postBedtime = isPastBedtime || (bedtimeDistanceMinutes != null && bedtimeDistanceMinutes >= 0)
+        val maxPostMin = com.example.itv.domain.sleep.SleepWakeCyclePolicy.MAX_POST_BEDTIME_MINUTES
+        val postBedtime = isPastBedtime ||
+            (bedtimeDistanceMinutes != null && bedtimeDistanceMinutes in 0..maxPostMin)
         val preBedtimePrep = !postBedtime && (
             isApproachingBedtime ||
                 (bedtimeDistanceMinutes != null && bedtimeDistanceMinutes in -PRE_BEDTIME_PREP_WINDOW_MINUTES..-1)
             )
-        val passedMin = bedtimeDistanceMinutes?.takeIf { it > 0 }
+        val passedMin = if (postBedtime) bedtimeDistanceMinutes?.takeIf { it > 0 } else null
         val remainMin = bedtimeDistanceMinutes?.takeIf { it in -PRE_BEDTIME_PREP_WINDOW_MINUTES..-1 }?.let { -it }
 
         // 1순위: 추정·추천·목표 취침 시각 이후 (암실이면 더 빠르게, 밝은 방이어도 경고)

@@ -78,3 +78,90 @@ internal fun calculateUsageReport(events: List<UsageObservation>, days: Int, zon
         }
         return Report(buckets.map { it/days },buckets.sum(),days,dates.size,instagramMinutes,hourlyApps,dailyTotals)
     }
+
+internal data class DailyHourlyBreakdown(
+    val date: LocalDate,
+    val hourlyMinutes: List<Double>,
+    val totalMinutes: Double,
+    val appMinutes: Map<String, Double>
+)
+
+/**
+ * Splits a multi-day [UsageObservation] stream into per-day 24-hour distributions and per-app totals
+ * in a single O(N) pass, using identical deduplication and interval-closing rules as [calculateUsageReport].
+ */
+internal fun calculateDailyHourlyBreakdowns(
+    events: List<UsageObservation>,
+    zone: ZoneId,
+    start: Long,
+    end: Long
+): Map<LocalDate, DailyHourlyBreakdown> {
+    if (events.isEmpty() || end <= start) return emptyMap()
+    var pkg: String? = null
+    var active: Long? = null
+    var lastEventTime = Long.MIN_VALUE
+    var lastEventType: ObservationKind? = null
+    var lastEventPackage: String? = null
+
+    val dayBuckets = linkedMapOf<LocalDate, DoubleArray>()
+    val dayApps = linkedMapOf<LocalDate, MutableMap<String, Double>>()
+
+    fun close(at: Long) {
+        val a = active ?: return
+        var t = maxOf(start, a)
+        val stop = minOf(end, at)
+        while (t < stop) {
+            val local = Instant.ofEpochMilli(t).atZone(zone)
+            val next = local.truncatedTo(java.time.temporal.ChronoUnit.HOURS)
+                .plusHours(1)
+                .toInstant()
+                .toEpochMilli()
+            val until = minOf(stop, next)
+            if (until <= t) break
+            val minutes = (until - t) / 60_000.0
+            val date = local.toLocalDate()
+            val buckets = dayBuckets.getOrPut(date) { DoubleArray(24) }
+            buckets[local.hour] += minutes
+            pkg?.let { name ->
+                val apps = dayApps.getOrPut(date) { mutableMapOf() }
+                apps[name] = (apps[name] ?: 0.0) + minutes
+            }
+            t = until
+        }
+        active = null
+        pkg = null
+    }
+
+    for (e in events) {
+        if (e.timeStamp == lastEventTime && e.eventType == lastEventType && e.packageName == lastEventPackage) continue
+        lastEventTime = e.timeStamp
+        lastEventType = e.eventType
+        lastEventPackage = e.packageName
+        when (e.eventType) {
+            ObservationKind.ACTIVITY_RESUMED -> {
+                close(e.timeStamp)
+                pkg = e.packageName
+                active = e.timeStamp
+            }
+            ObservationKind.ACTIVITY_PAUSED -> {
+                if (pkg == e.packageName) close(e.timeStamp)
+            }
+            ObservationKind.SCREEN_NON_INTERACTIVE, ObservationKind.KEYGUARD_SHOWN -> {
+                close(e.timeStamp)
+            }
+            else -> Unit
+        }
+    }
+
+    return dayBuckets.mapValues { (date, buckets) ->
+        val hourly = buckets.toList()
+        val total = buckets.sum()
+        val apps = dayApps[date]?.toMap().orEmpty()
+        DailyHourlyBreakdown(
+            date = date,
+            hourlyMinutes = hourly,
+            totalMinutes = total,
+            appMinutes = apps
+        )
+    }
+}

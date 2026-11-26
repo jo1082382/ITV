@@ -288,7 +288,9 @@ object JevCandidatePolicy {
         //   * 암실: 시작 전 2시간 점증(-15%p max), 권장 구간 [0, rangeWidth] (-20%p -> -25%p), 권장 종료 경과 (-25%p -> -30%p)
         //   * 일반 실내(어둡지도 아주 밝지도 않은 조명): 권장 취침 전 2시간/구간/경과에 따라 완만하게 -2%p ~ -12%p 민감화
         // - 레거시(recD == null): 기존 취침 시각 기준 유지
-        val isPostBedtime = (d != null && d >= 0) || (c.bedtimePassedMinutes != null && c.bedtimePassedMinutes >= 0)
+        val maxPostBedtimeMin = com.example.itv.domain.sleep.SleepWakeCyclePolicy.MAX_POST_BEDTIME_MINUTES
+        val isPostBedtime = (d != null && d in 0..maxPostBedtimeMin) ||
+            (c.bedtimePassedMinutes != null && c.bedtimePassedMinutes in 0..maxPostBedtimeMin)
         val maxDarkPenalty = when {
             recD != null && recD >= rangeWidth -> {
                 val pastEndMin = (recD - rangeWidth).coerceAtLeast(0)
@@ -606,7 +608,9 @@ object JevCandidatePolicy {
             val rangeWidth = c.recommendedBedtimeRangeMinutes.coerceIn(30, 120)
             val isDarkRoom = c.ambientLux != null &&
                 c.ambientLux <= com.example.itv.domain.coaching.ContextualPreInterventionPolicy.DARK_LUX_THRESHOLD
-            val isPostBedtime = (c.bedtimeDistanceMinutes ?: -1) >= 0 || (c.bedtimePassedMinutes ?: -1) >= 0
+            val maxPostBedtimeMin = com.example.itv.domain.sleep.SleepWakeCyclePolicy.MAX_POST_BEDTIME_MINUTES
+            val isPostBedtime = (c.bedtimeDistanceMinutes ?: -1) in 0..maxPostBedtimeMin ||
+                (c.bedtimePassedMinutes ?: -1) in 0..maxPostBedtimeMin
             val envDesc = when {
                 c.isNearOrOccluded -> "센서가림"
                 adj.bedtimeDelta < 0 && recD != null && recD >= rangeWidth ->

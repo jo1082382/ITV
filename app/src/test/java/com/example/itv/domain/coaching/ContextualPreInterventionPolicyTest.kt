@@ -200,6 +200,33 @@ class ContextualPreInterventionPolicyTest {
                 screenBrightness = 40
             )
         )
+        // 이미 6시간 이상 지난 기상 후 시간대(+448분 / +460분, isPastBedtime = false)에서는 취침 초과 사전 개입이 절대 발동하지 않음
+        assertNull(
+            ContextualPreInterventionPolicy.evaluate(
+                ambientLux = 150f,
+                isOccluded = false,
+                bedtimeDistanceMinutes = 448,
+                isPastBedtime = false,
+                isApproachingBedtime = false,
+                continuousUsedMs = 15 * 60_000L,
+                darkAccumulatedMs = 0L,
+                alreadyTriggeredInSession = false,
+                screenBrightness = 180
+            )
+        )
+        assertNull(
+            ContextualPreInterventionPolicy.evaluate(
+                ambientLux = 150f,
+                isOccluded = false,
+                bedtimeDistanceMinutes = 460,
+                isPastBedtime = false,
+                isApproachingBedtime = false,
+                continuousUsedMs = 15 * 60_000L,
+                darkAccumulatedMs = 0L,
+                alreadyTriggeredInSession = false,
+                screenBrightness = 180
+            )
+        )
     }
 
     @Test

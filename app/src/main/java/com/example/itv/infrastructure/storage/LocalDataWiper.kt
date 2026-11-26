@@ -7,6 +7,7 @@ import com.example.itv.infrastructure.cloud.CloudSyncRepository
 import com.example.itv.infrastructure.cloud.DailyCloudBackupWorker
 import com.example.itv.infrastructure.coaching.UserCoachingSettingsStore
 import com.example.itv.infrastructure.equip.UserEquipStore
+import com.example.itv.infrastructure.reward.CalendarRewardStore
 import com.example.itv.infrastructure.reward.UserRewardStore
 import com.example.itv.infrastructure.sleep.BedtimeMemoStore
 import com.example.itv.infrastructure.storage.shortform.ReelsUsageStore
@@ -47,6 +48,7 @@ internal object LocalDataWiper {
     internal val SIGN_OUT_PREF_NAMES_TO_CLEAR = listOf(
         "itv_puppy_stamps_v1",
         "itv_user_reward_store_v1",
+        CalendarRewardStore.PREF_NAME,
         "itv_user_equip_store_v1",
         "user_coaching_settings_prefs",
         "itv_bedtime_memo",
@@ -116,7 +118,9 @@ internal object LocalDataWiper {
 
         // 4. Reset in-memory StateFlow / singleton preference stores
         runCatching { DailyStampPrefs.clear(appCtx) }
+        runCatching { com.example.itv.infrastructure.sleep.SleepWakeCycleStore.clear(appCtx) }
         runCatching { UserRewardStore.reset(appCtx) }
+        runCatching { CalendarRewardStore.reset(appCtx) }
         runCatching { UserEquipStore.reset(appCtx) }
         runCatching { UserCoachingSettingsStore.getInstance(appCtx).reset() }
         runCatching { BedtimeMemoStore.getInstance(appCtx).clear() }

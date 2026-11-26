@@ -143,7 +143,7 @@ class JevStore private constructor(context: Context) {
     internal fun token(): String = tokenFile.read()?.takeIf { it.isNotBlank() } ?: error("테스트 토큰을 입력해 주세요.")
     internal fun readControl(key: String): String? = prefs.getString("control_$key",null)
     internal suspend fun writeControl(key: String, value: String?) = withContext(Dispatchers.IO) {
-        check(prefs.edit().putString("control_$key",value).commit()) { "상태 저장 실패" }
+        prefs.edit().putString("control_$key", value).apply()
     }
     companion object {
         @Volatile private var instance: JevStore?=null

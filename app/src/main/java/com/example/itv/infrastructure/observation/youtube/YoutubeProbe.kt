@@ -14,11 +14,11 @@ import com.example.itv.infrastructure.storage.shortform.ShortformPersonalStatsSt
 
 /** Row-position diagnostic & YouTube longform state observer. */
 internal object YoutubeProbe {
-    var onTransition: (() -> Unit)? = null
-    var coachingObservation = false
-    private var appContext: Context? = null
-    private var stateAt = 0L
-    private var state = -1
+    @Volatile var onTransition: (() -> Unit)? = null
+    @Volatile var coachingObservation = false
+    @Volatile private var appContext: Context? = null
+    @Volatile private var stateAt = 0L
+    @Volatile private var state = -1
     // 1 shorts, 0 another app, -1 unknown or YouTube non-shorts (conservative hold).
     // Clear comparison baseline on exit, never count ITV entry as a transition.
     fun onOwnApp() {
@@ -33,17 +33,17 @@ internal object YoutubeProbe {
     }
 
     fun screenState(): Int = if (SystemClock.elapsedRealtime() - stateAt <= 4000L) state else -1
-    var enabled = false
-    var status = "감시 중지"
-    var candidates = 0
+    @Volatile var enabled = false
+    @Volatile var status = "감시 중지"
+    @Volatile var candidates = 0
     /** Swipe count of the most recent viewing run; survives the 15s idle reset for test inspection. */
-    var lastRunCandidates = 0
-    var row: Int? = null
-    var detail = "관측 대기"
-    private var pending: Int? = null
-    private var pendingAt = 0L
-    private var previousAt = 0L
-    private var lastScan = 0L
+    @Volatile var lastRunCandidates = 0
+    @Volatile var row: Int? = null
+    @Volatile var detail = "관측 대기"
+    @Volatile private var pending: Int? = null
+    @Volatile private var pendingAt = 0L
+    @Volatile private var previousAt = 0L
+    @Volatile private var lastScan = 0L
     private val log = java.util.ArrayDeque<String>()
 
     private val SHORTS_SURFACE_IDS = setOf(

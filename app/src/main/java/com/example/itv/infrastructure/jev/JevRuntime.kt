@@ -141,6 +141,7 @@ class JevRuntime private constructor(context: Context) {
     private var networkRetryAfterElapsed: Long=0L
     private var pendingTransferApproval: Approval?=null
     private var savedAt=0L
+    private var lastPersistedJson: String? = null
     private var loggedAt=0L
     private var loggedReason=""
     val missionActiveState=MutableStateFlow(false)
@@ -231,19 +232,38 @@ class JevRuntime private constructor(context: Context) {
     }
     private fun bedtime(settings: JevSettings): Int? {
         if(!settings.bedtimeEnabled)return null
+        val nowWall = System.currentTimeMillis()
+        val zone = java.time.ZoneId.systemDefault()
+        val lastSleep = com.example.itv.infrastructure.sleep.SleepWakeCycleStore.getLastCompletedSleep(appContext)
         val minute=bedtimeMinute
         if (minute != null) {
-            val now=ZonedDateTime.now()
+            if (com.example.itv.domain.sleep.SleepWakeCyclePolicy.hasCompletedSleepForBedtimeCycle(
+                    nowWallMs = nowWall,
+                    targetMinuteOfDay = minute,
+                    zone = zone,
+                    lastSleepEndWallMs = lastSleep?.sleepEndWallMs,
+                    lastSleepDurationMs = lastSleep?.durationMs
+                )
+            ) {
+                return null
+            }
+            val now=ZonedDateTime.now(zone)
             var start=now.toLocalDate().atStartOfDay(now.zone).plusMinutes(minute.toLong())
             if(now.isBefore(start))start=start.minusDays(1)
             val elapsed=Duration.between(start,now).toMinutes()
             return elapsed.takeIf { it in 0 until settings.bedtimeWindowMinutes.toLong() }?.toInt()
         }
         // 수동 취침 목표가 없는 경우에도 자동 추정/권장 취침 시각 경과분을 폴백으로 연동합니다.
+        // 단, 이미 3시간 이상 수면을 완료하고 기상했다면 전날 취침 경과로 간주하지 않습니다.
         val ambientSnap = com.example.itv.infrastructure.observation.LightAndBrightnessTracker
             .getInstance(appContext).snapshot.value
+        if (ambientSnap.hasWokenUpFromSleep) return null
         val autoDist = ambientSnap.recommendedBedtimeDistanceMinutes ?: ambientSnap.bedtimeDistanceMinutes
-        return autoDist?.takeIf { it in 0 until settings.bedtimeWindowMinutes }
+        val maxWindow = minOf(
+            settings.bedtimeWindowMinutes,
+            com.example.itv.domain.sleep.SleepWakeCyclePolicy.MAX_POST_BEDTIME_MINUTES + 1
+        )
+        return autoDist?.takeIf { it in 0 until maxWindow }
     }
     fun enrichContext(base: JevContext, nowElapsed: Long = SystemClock.elapsedRealtime()): JevContext {
         val personal = ShortformPersonalStatsStore.quickContextMetrics(
@@ -389,11 +409,21 @@ class JevRuntime private constructor(context: Context) {
                     resetContentSwitchCounters()
                     resetProbability("SCREEN_OFF_NATURAL_REST")
                 }
+                if ((nowWall - offSince) >= com.example.itv.domain.sleep.SleepWakeCyclePolicy.MIN_SLEEP_CYCLE_MS) {
+                    com.example.itv.infrastructure.observation.LightAndBrightnessTracker
+                        .getInstance(appContext)
+                        .onWakeUpFromSleep(offSince, nowWall, source = "JEV_SCREEN_OFF")
+                }
             }
             screenOffSinceWallMs = null
             screenOffRestResetDone = false
         }
-        val pkg=if(!unlocked)"LOCKED" else JevObservationHub.foregroundPackage.takeIf { now-JevObservationHub.checkedAt in 0..FOREGROUND_FRESHNESS_MS }
+        val ownAppFg = WritingGuard.inAppForeground
+        val pkg = when {
+            !unlocked -> "LOCKED"
+            ownAppFg -> appContext.packageName
+            else -> JevObservationHub.foregroundPackage.takeIf { now - JevObservationHub.checkedAt in 0..FOREGROUND_FRESHNESS_MS }
+        }
         val trackedPkgs = (listOf(JevSettings.INSTAGRAM, JevSettings.YOUTUBE, "ALL") + tracker.states.keys + controls.keys).distinct()
         for(targetPkg in trackedPkgs) {
             val prevDate=lastActiveDate[targetPkg]
@@ -672,7 +702,12 @@ class JevRuntime private constructor(context: Context) {
                 }
             }
         }
-        if(now-savedAt>=5000)persist()
+        val persistIntervalMs = if (com.example.itv.infrastructure.observation.accessibility.WritingGuard.inAppForeground) {
+            30_000L
+        } else {
+            5_000L
+        }
+        if (now - savedAt >= persistIntervalMs) persist()
     }
     /** Called when approved and ready to display (on transition or when navigating within the same app). */
     fun canShow(transition: Boolean = true): Boolean {
@@ -733,6 +768,7 @@ class JevRuntime private constructor(context: Context) {
     fun approvedPackage(): String? = approval?.captured?.packageName
     fun hasActiveOffer() = active != null
     fun canKeepDisplayed(): Boolean {
+        if (WritingGuard.inAppForeground) return false
         val displayed = displayedApproval ?: return false
         val now = SystemClock.elapsedRealtime()
         val currentFg = JevObservationHub.foregroundPackage
@@ -1069,9 +1105,12 @@ class JevRuntime private constructor(context: Context) {
                 .put("dynInterval", c.dynamicIntervalSeconds).put("lastGap", c.lastGap ?: -1.0)
                 .put("lastOutcome", c.lastOutcome ?: ""))
         }
+        val serialized = json.toString()
+        if (serialized == lastPersistedJson) return
+        lastPersistedJson = serialized
         scope.launch {
             persistMutex.lock()
-            try { runCatching { store.writeControl("runtime",json.toString()) }.onFailure { store.notice.value="관측 상태 저장 실패" } }
+            try { runCatching { store.writeControl("runtime", serialized) }.onFailure { store.notice.value="관측 상태 저장 실패" } }
             finally { persistMutex.unlock() }
         }
     }

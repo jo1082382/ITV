@@ -13,15 +13,17 @@ internal class TestMissionController(private val journal: CoachingJournal,
         requireFacedown: Boolean = false,
         isStrong: Boolean = false,
         continuousUsedMs: Long = 0L,
-        customRestMs: Long? = null
+        customRestMs: Long? = null,
+        rewardEligible: Boolean = true
     ) {
         val startMs = TestCoachingPolicy.missionStartMs(isJev)
         val restMs = customRestMs ?: TestCoachingPolicy.calculateRestMs(isJev, continuousUsedMs)
         journal.structured(id,"MISSION_REQUESTED")
-        state.begin(id, now, startMs, restMs, requireFacedown, isStrong); history.begin(id)
+        state.begin(id, now, startMs, restMs, requireFacedown, isStrong, rewardEligible); history.begin(id)
         scheduler.cancelStartTimeout(); scheduler.scheduleStartTimeout(startMs)
         val typeDesc = if (requireFacedown) "스마트폰 바닥에 엎어두기" else "화면을 연속 ${restMs / 1000L}초 끄기"
-        journal.add(id, "휴식 미션 시작 · $typeDesc (${restMs / 1000L}초)")
+        val rewardSuffix = if (rewardEligible) "" else " · 미션 미수락(보상 미지급)"
+        journal.add(id, "휴식 미션 시작 · $typeDesc (${restMs / 1000L}초)$rewardSuffix")
     }
     fun refreshStartDeadline(now: Long, isJev: Boolean = false) {
         if (state.id == null || state.started || state.pending) return
@@ -82,7 +84,9 @@ internal class TestMissionController(private val journal: CoachingJournal,
     }
     fun completionDisplayed() {
         val id = state.id ?: return
-        state.displayed(); journal.add(id, "미션 완료 안내 표시")
+        val rewardEligible = state.rewardEligible
+        state.displayed()
+        journal.add(id, if (rewardEligible) "미션 완료 안내 표시" else "자동 휴식 완료 · 미션 미수락으로 보상 미지급")
     }
     fun stop() {
         state.id?.let { journal.structured(it,"INTERRUPTED"); history.finish(it, "interrupted") }

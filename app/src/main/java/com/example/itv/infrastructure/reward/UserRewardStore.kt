@@ -75,6 +75,62 @@ object UserRewardStore {
         )
     }
 
+    /**
+     * 월간 보물상자 등 추가 보상 지급 (완료 미션 횟수는 변경하지 않고 경험치·포인트만 적립합니다).
+     */
+    fun grantBonusReward(context: Context, expGain: Long, pointGain: Long): RewardGrantResult {
+        val p = prefs(context)
+        val oldExp = p.getLong(KEY_TOTAL_EXP, 0L)
+        val oldPoints = p.getLong(KEY_POINTS, 0L)
+        val missions = p.getInt(KEY_TOTAL_MISSIONS, 0)
+        val oldReward = LevelCalculator.calculate(oldExp, oldPoints, missions)
+
+        val safeExp = expGain.coerceAtLeast(0L)
+        val safePoints = pointGain.coerceAtLeast(0L)
+        val newExp = oldExp + safeExp
+        val newPoints = oldPoints + safePoints
+
+        p.edit()
+            .putLong(KEY_TOTAL_EXP, newExp)
+            .putLong(KEY_POINTS, newPoints)
+            .apply()
+
+        val newReward = LevelCalculator.calculate(newExp, newPoints, missions)
+        _rewardState.value = newReward
+
+        return RewardGrantResult(
+            expGained = safeExp,
+            pointsGained = safePoints,
+            didLevelUp = newReward.currentLevel > oldReward.currentLevel,
+            oldLevel = oldReward.currentLevel,
+            newLevel = newReward.currentLevel,
+            currentLevelExp = newReward.currentLevelExp,
+            nextLevelExpRequired = newReward.nextLevelExpRequired,
+            totalExp = newExp,
+            currentPoints = newPoints
+        )
+    }
+
+    /**
+     * 스트릭 보호권 구매 등에 포인트를 차감합니다. 보유 포인트가 부족하면 false를 반환합니다.
+     */
+    fun spendPoints(context: Context, cost: Long): Boolean {
+        if (cost <= 0L) return true
+        val p = prefs(context)
+        val currentExp = p.getLong(KEY_TOTAL_EXP, 0L)
+        val currentPoints = p.getLong(KEY_POINTS, 0L)
+        val missions = p.getInt(KEY_TOTAL_MISSIONS, 0)
+        if (currentPoints < cost) return false
+
+        val nextPoints = (currentPoints - cost).coerceAtLeast(0L)
+        p.edit()
+            .putLong(KEY_POINTS, nextPoints)
+            .apply()
+
+        _rewardState.value = LevelCalculator.calculate(currentExp, nextPoints, missions)
+        return true
+    }
+
     fun restoreState(
         context: Context,
         totalExp: Long,

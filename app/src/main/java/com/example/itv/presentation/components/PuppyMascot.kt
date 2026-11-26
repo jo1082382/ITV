@@ -561,9 +561,6 @@ fun EquippedPuppyMascot(
         )
     }
 
-    val progress = animProgress.value
-    val motion = evaluateMoodMotion(mood, if (animateMood) progress else 0.35f)
-
     BoxWithConstraints(
         modifier = modifier,
         contentAlignment = Alignment.BottomCenter
@@ -588,8 +585,10 @@ fun EquippedPuppyMascot(
 
         val spriteLeft = (maxWidth - spriteW) / 2f
         val spriteTop = maxHeight - spriteH
+        val spriteWPx = with(density) { spriteW.toPx() }
+        val maxHeightPx = with(density) { maxHeight.toPx() }
 
-        // Ground shadow anchored underneath the puppy's paws/curled body
+        // Ground shadow anchored underneath the puppy's paws/curled body (reads animProgress in Draw phase only!)
         if (showGroundShadow) {
             val shadowBaseW = (spriteW * spec.shadowWidthFraction).coerceAtMost(maxWidth * 0.88f)
             val shadowBaseH = (spriteH * 0.11f).coerceIn(14.dp, 22.dp)
@@ -599,43 +598,48 @@ fun EquippedPuppyMascot(
                     .align(Alignment.BottomCenter)
                     .offset(y = spriteH * spec.shadowOffsetYFraction)
             ) {
-                val w = size.width * motion.shadowScale
-                val h = size.height * motion.shadowScale
+                val p = if (animateMood) animProgress.value else 0.35f
+                val m = evaluateMoodMotion(mood, p)
+                val w = size.width * m.shadowScale
+                val h = size.height * m.shadowScale
                 drawOval(
-                    color = Color.Black.copy(alpha = 0.085f * motion.shadowScale),
+                    color = Color.Black.copy(alpha = 0.085f * m.shadowScale),
                     topLeft = Offset((size.width - w) / 2f, (size.height - h) / 2f),
                     size = Size(w, h)
                 )
             }
         }
 
-        val txPx = with(density) { (spriteW * motion.txFraction).toPx() }
-        val tyPx = with(density) { (maxHeight * motion.tyFraction).toPx() }
-
-        // Soft ambient mood aura centered behind the character's active silhouette
+        // Soft ambient mood aura centered behind the character's active silhouette (Draw phase only!)
         Canvas(modifier = Modifier.size(maxWidth, maxHeight)) {
+            val p = if (animateMood) animProgress.value else 0.35f
+            val m = evaluateMoodMotion(mood, p)
+            val txPx = spriteWPx * m.txFraction
+            val tyPx = maxHeightPx * m.tyFraction
             val auraCy = if (mood == PuppyMood.SICK) size.height * 0.72f else size.height * 0.56f
             drawMoodBackAura(
                 mood = mood,
                 cx = size.width * 0.5f + txPx * 0.4f,
                 cy = auraCy + tyPx * 0.4f,
                 radius = minOf(size.width, size.height) * 0.44f,
-                progress = progress,
-                isPlaying = motion.isPlaying
+                progress = p,
+                isPlaying = m.isPlaying
             )
         }
 
-        // Character pose + expression overlay + all 5 equipped cosmetic slots transformed together
+        // Character pose + expression overlay + all 5 equipped cosmetic slots transformed in Layer phase (0 recompositions!)
         Box(
             modifier = Modifier
                 .size(maxWidth, maxHeight)
                 .graphicsLayer {
+                    val p = if (animateMood) animProgress.value else 0.35f
+                    val m = evaluateMoodMotion(mood, p)
                     transformOrigin = TransformOrigin(0.5f, 0.92f)
-                    translationX = txPx
-                    translationY = tyPx
-                    rotationZ = motion.rotDeg
-                    scaleX = motion.scaleX
-                    scaleY = motion.scaleY
+                    translationX = spriteWPx * m.txFraction
+                    translationY = maxHeightPx * m.tyFraction
+                    rotationZ = m.rotDeg
+                    scaleX = m.scaleX
+                    scaleY = m.scaleY
                 }
         ) {
             // 1. 표정별 전용 자세 캐릭터 (원본 눈·코·입만 피부톤으로 깨끗하게 제거된 블랭크 페이스 버전)
@@ -661,16 +665,18 @@ fun EquippedPuppyMascot(
                     )
                 }
 
-                // 1.5 표정 오버레이 + 감정 이펙트 (각 자세의 실제 눈/코/입 좌표와 고개 각도에 정밀 정렬)
+                // 1.5 표정 오버레이 + 감정 이펙트 (Draw phase only — zero recompositions!)
                 Canvas(modifier = Modifier.matchParentSize()) {
+                    val p = if (animateMood) animProgress.value else 0.35f
+                    val m = evaluateMoodMotion(mood, p)
                     drawPoseMoodExpressionAndEffects(
                         mood = mood,
                         spec = spec,
                         furColor = asset?.furColor ?: PuppyPoseCatalog.DEFAULT_FUR_COLOR,
                         needsFallbackMask = asset == null,
-                        progress = if (animateMood) progress else 0.35f,
-                        barkPulse = motion.barkPulse,
-                        isPlaying = motion.isPlaying
+                        progress = p,
+                        barkPulse = m.barkPulse,
+                        isPlaying = m.isPlaying
                     )
                 }
             }
@@ -1351,14 +1357,63 @@ private fun DrawScope.drawRedAngerMark(center: Offset, r: Float, strokeW: Float)
     }
 }
 
+private object PuppyFaceThumbnailCache {
+    @Volatile
+    private var cached: ImageBitmap? = null
+
+    fun peek(): ImageBitmap? = cached
+
+    fun getOrLoad(context: Context): ImageBitmap? {
+        cached?.let { return it }
+        return synchronized(this) {
+            cached?.let { return@synchronized it }
+            runCatching {
+                val res = context.applicationContext.resources
+                val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeResource(res, R.drawable.itv_puppy_face, boundsOpts)
+                var sampleSize = 1
+                val maxTargetPx = 192
+                while (boundsOpts.outWidth / (sampleSize * 2) >= maxTargetPx &&
+                    boundsOpts.outHeight / (sampleSize * 2) >= maxTargetPx
+                ) {
+                    sampleSize *= 2
+                }
+                val decodeOpts = BitmapFactory.Options().apply {
+                    inSampleSize = sampleSize
+                    inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
+                }
+                val bmp = BitmapFactory.decodeResource(res, R.drawable.itv_puppy_face, decodeOpts)
+                    ?: return@runCatching null
+                bmp.asImageBitmap().also { cached = it }
+            }.getOrNull()
+        }
+    }
+}
+
 @Composable
 fun PuppyFaceMascot(modifier: Modifier = Modifier) {
-    Image(
-        painter = painterResource(R.drawable.itv_puppy_face),
-        contentDescription = "정면을 바라보는 강아지 얼굴",
-        modifier = modifier,
-        contentScale = ContentScale.Fit
-    )
+    val context = LocalContext.current
+    val cachedNow = PuppyFaceThumbnailCache.peek()
+    val bitmap: ImageBitmap? = if (cachedNow != null) {
+        cachedNow
+    } else {
+        val loaded by produceState<ImageBitmap?>(initialValue = null, key1 = context) {
+            value = withContext(Dispatchers.Default) {
+                PuppyFaceThumbnailCache.getOrLoad(context)
+            }
+        }
+        loaded
+    }
+    if (bitmap != null) {
+        Image(
+            bitmap = bitmap,
+            contentDescription = "정면을 바라보는 강아지 얼굴",
+            modifier = modifier,
+            contentScale = ContentScale.Fit
+        )
+    } else {
+        Box(modifier = modifier)
+    }
 }
 
 @Preview(showBackground = true, backgroundColor = 0xFFF8FAF9, widthDp = 700, heightDp = 240)

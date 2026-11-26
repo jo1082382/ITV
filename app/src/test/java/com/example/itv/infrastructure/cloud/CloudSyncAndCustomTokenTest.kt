@@ -103,4 +103,56 @@ class CloudSyncAndCustomTokenTest {
         assertEquals("NAVER", CloudSyncRepository.resolveCloudProvider(null, "naver_abcde"))
         assertEquals("GOOGLE", CloudSyncRepository.resolveCloudProvider(AuthProvider.GOOGLE, "gUid123"))
     }
+
+    @Test
+    fun calendarRewardMergeSnapshots_supportsFreshRestoreAndGuestMerge() {
+        val d1 = LocalDate.of(2026, 11, 10)
+        val d2 = LocalDate.of(2026, 11, 18)
+        val local = com.example.itv.infrastructure.reward.CalendarRewardSnapshot(
+            streakShieldCount = 1,
+            bestStreak = 5,
+            protectedDates = setOf(d1),
+            claimedChestKeys = setOf("2026-11:BRONZE"),
+            recentDayTiers = mapOf(d1 to com.example.itv.domain.records.DailyHealthTier.GOLD),
+            lastAutoProtectedDate = d1,
+            lastAutoProtectionSource = com.example.itv.domain.reward.StreakProtectionSource.SHIELD
+        )
+        val remote = com.example.itv.infrastructure.reward.CalendarRewardSnapshot(
+            streakShieldCount = 5, // exceeds MAX_STREAK_SHIELDS (2), should clamp cleanly
+            bestStreak = 14,
+            protectedDates = setOf(d2),
+            claimedChestKeys = setOf("2026-11:SILVER"),
+            recentDayTiers = mapOf(d2 to com.example.itv.domain.records.DailyHealthTier.SILVER),
+            lastAutoProtectedDate = d2,
+            lastAutoProtectionSource = com.example.itv.domain.reward.StreakProtectionSource.POINTS
+        )
+
+        val expectedClampedShields = com.example.itv.domain.reward.CalendarStreakPolicy.MAX_STREAK_SHIELDS
+
+        // Fresh install login (mergeWithLocal = false): takes remote authoritatively & clamps shields
+        val fresh = com.example.itv.infrastructure.reward.CalendarRewardStore.mergeSnapshots(
+            local = local,
+            remote = remote,
+            mergeWithLocal = false
+        )
+        assertEquals(expectedClampedShields, fresh.streakShieldCount)
+        assertEquals(14, fresh.bestStreak)
+        assertEquals(setOf(d2), fresh.protectedDates)
+        assertEquals(setOf("2026-11:SILVER"), fresh.claimedChestKeys)
+        assertEquals(d2, fresh.lastAutoProtectedDate)
+        assertEquals(com.example.itv.domain.reward.StreakProtectionSource.POINTS, fresh.lastAutoProtectionSource)
+
+        // Guest -> Social merge (mergeWithLocal = true): combines both without losing either
+        val merged = com.example.itv.infrastructure.reward.CalendarRewardStore.mergeSnapshots(
+            local = local,
+            remote = remote,
+            mergeWithLocal = true
+        )
+        assertEquals(expectedClampedShields, merged.streakShieldCount)
+        assertEquals(14, merged.bestStreak)
+        assertEquals(setOf(d1, d2), merged.protectedDates)
+        assertEquals(setOf("2026-11:BRONZE", "2026-11:SILVER"), merged.claimedChestKeys)
+        assertEquals(2, merged.recentDayTiers.size)
+        assertEquals(d2, merged.lastAutoProtectedDate)
+    }
 }

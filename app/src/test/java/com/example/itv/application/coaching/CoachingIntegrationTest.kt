@@ -344,5 +344,83 @@ class CoachingIntegrationTest {
         assertNull(mission.state.id)
         assertEquals(0L, mission.state.accumulatedRestMs)
     }
+
+    @Test fun autoStartedStrongMissionBlocksBypassAndWithholdsRewardOnCompletion() {
+        val journal = Journal()
+        val outcomes = mutableListOf<String>()
+        val mission = TestMissionController(journal, object : MissionHistory {
+            override fun begin(id: String) {}
+            override fun finish(id: String, result: String) { outcomes.add(result) }
+        }, object : MissionScheduler {
+            override fun cancelStartTimeout() {}
+            override fun scheduleStartTimeout(delayMs: Long) {}
+        })
+
+        // 강한 개입 표시 중 미션을 수락하지 않고 화면만 껐을 때 (rewardEligible = false)
+        mission.begin(
+            id = "strong-auto-1",
+            now = 0L,
+            isJev = false,
+            requireFacedown = true,
+            isStrong = true,
+            customRestMs = 15_000L,
+            rewardEligible = false
+        )
+        assertFalse(mission.state.rewardEligible)
+        assertTrue(mission.state.isStrong)
+        assertTrue(journal.text.any { it.contains("미션 미수락(보상 미지급)") })
+
+        // 잠깐 2초 껐다 켜면(엎어둠 미유지) INCOMPLETE 반환 -> 강한 개입 재표시 대상 유지
+        mission.screenOff(1_000L)
+        val bypassWake = mission.screenOn(3_000L, isFacedownObserved = false)
+        assertEquals(com.example.itv.domain.coaching.TestMissionWake.INCOMPLETE, bypassWake)
+        assertEquals(0L, mission.state.accumulatedRestMs)
+        assertEquals(15_000L, mission.state.remainingRestMs)
+        assertFalse(mission.state.rewardEligible)
+
+        // 이후 실제로 엎어두고 15초 휴식 완료 시 SUCCESS, 단 rewardEligible은 여전히 false
+        mission.screenOff(5_000L)
+        val fullWake = mission.screenOn(20_000L, isFacedownObserved = true)
+        assertEquals(com.example.itv.domain.coaching.TestMissionWake.SUCCESS, fullWake)
+        assertTrue(mission.state.pending)
+        assertFalse(mission.state.rewardEligible)
+        assertEquals(listOf("success"), outcomes)
+
+        // 보상 팝업 없이 완료 정리 시 보상 미지급 로그 기록 후 다음 미션을 위해 rewardEligible 복원
+        mission.completionDisplayed()
+        assertTrue(journal.text.any { it.contains("보상 미지급") })
+        assertNull(mission.state.id)
+        assertFalse(mission.state.pending)
+        assertTrue(mission.state.rewardEligible)
+    }
+
+    @Test fun explicitlyAcceptedStrongMissionRemainsRewardEligible() {
+        val journal = Journal()
+        val mission = TestMissionController(journal, object : MissionHistory {
+            override fun begin(id: String) {}
+            override fun finish(id: String, result: String) {}
+        }, object : MissionScheduler {
+            override fun cancelStartTimeout() {}
+            override fun scheduleStartTimeout(delayMs: Long) {}
+        })
+
+        mission.begin(
+            id = "strong-accepted-1",
+            now = 0L,
+            isJev = false,
+            requireFacedown = true,
+            isStrong = true,
+            customRestMs = 15_000L,
+            rewardEligible = true
+        )
+        assertTrue(mission.state.rewardEligible)
+
+        mission.screenOff(1_000L)
+        val wake = mission.screenOn(16_000L, isFacedownObserved = true)
+        assertEquals(com.example.itv.domain.coaching.TestMissionWake.SUCCESS, wake)
+        assertTrue(mission.state.rewardEligible)
+        mission.completionDisplayed()
+        assertTrue(journal.text.any { it.contains("미션 완료 안내 표시") })
+    }
 }
 

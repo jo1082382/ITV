@@ -10,9 +10,12 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import android.os.SystemClock
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -79,21 +82,44 @@ private fun Context.findHostActivity(): ComponentActivity? = when (this) {
 }
 
 /**
+ * Lightweight in-memory snapshot cache for the Sleep tab so switching tabs renders instantaneously
+ * without blocking on UsageStatsManager/Room IO or re-measuring from empty state.
+ */
+private object SleepTabMemoryCache {
+    @Volatile var nightReport: NightReport? = null
+    @Volatile var archivedRecords: List<ArchivedSleepRecord> = emptyList()
+    @Volatile var confirmations: Map<String, SleepConfirmation> = emptyMap()
+    @Volatile var loadedAtElapsedMs: Long = 0L
+
+    fun isFresh(nowElapsed: Long = SystemClock.elapsedRealtime()): Boolean =
+        nightReport != null && (nowElapsed - loadedAtElapsedMs) in 0L..30_000L
+}
+
+/**
  * Dedicated Sleep tab ("취침") displaying monthly sleep records with month-by-month navigation
  * matching the Calendar tab ("‹ YYYY년 M월 ›").
- * Detailed policy explanations (e.g. user-confirmation priority, averages, archive integration) live inside `?` help dialogs.
+ * Each major section is split into its own LazyColumn item so entering & scrolling never incurs
+ * a monolithic single-item layout/JIT spike.
  */
 @Composable
 fun SleepEstimationTabContent(
     modifier: Modifier = Modifier,
+    isTabActive: Boolean = true,
+    listState: LazyListState = rememberLazyListState(),
     onSleepDataChanged: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val isDark = LocalDarkTheme.current
     val inkColor = if (isDark) Color(0xFFE2EBE4) else Color(0xFF241E19)
-    var nights by remember { mutableStateOf<NightReport?>(null) }
+    val cardContentColor = if (isDark) Color(0xFFE6EFE8) else Color(0xFF241E19)
+
+    var nights by remember { mutableStateOf(SleepTabMemoryCache.nightReport) }
+    var archivedRecords by remember { mutableStateOf(SleepTabMemoryCache.archivedRecords) }
+    var confirmations by remember { mutableStateOf(SleepTabMemoryCache.confirmations) }
     var nightError by remember { mutableStateOf<String?>(null) }
+    var summaryError by remember { mutableStateOf<String?>(null) }
     var revision by remember { mutableIntStateOf(0) }
+    var forceReloadTick by remember { mutableIntStateOf(0) }
     var showOverviewHelp by remember { mutableStateOf(false) }
 
     val today = remember(revision) { LocalDate.now() }
@@ -103,11 +129,16 @@ fun SleepEstimationTabContent(
         runCatching { YearMonth.parse(selectedMonthStr) }.getOrDefault(currentMonth)
     }
 
+    val confirmationService = remember(context) { com.example.itv.composition.sleepConfirmationService(context) }
+
     val owner = context.findHostActivity()
-    LaunchedEffect(owner) {
+    LaunchedEffect(owner, isTabActive) {
+        if (!isTabActive) return@LaunchedEffect
         val host = owner ?: return@LaunchedEffect
         host.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-            revision++
+            if (!SleepTabMemoryCache.isFresh()) {
+                revision++
+            }
             while (isActive) {
                 delay(60.seconds)
                 revision++
@@ -115,30 +146,108 @@ fun SleepEstimationTabContent(
         }
     }
 
-    LaunchedEffect(revision) {
-        nightError = null
-        try {
-            val loadedNights = withContext(Dispatchers.IO) {
-                val raw = queryNightReport(context, 0)
-                val boundaryMs = com.example.itv.infrastructure.storage.AccountDataBoundaryStore.getFreshStartEpochMs(context)
-                com.example.itv.infrastructure.storage.AccountDataBoundaryStore.filterNightReport(raw, boundaryMs)
-            }
-            nights = loadedNights
-            withContext(Dispatchers.IO) {
-                runCatching {
-                    MonthlyUsageArchiveStore.syncDailySnapshot(
-                        context = context,
-                        todayUsageReport = null,
-                        periodUsageReport = null,
-                        nightReport = loadedNights
-                    )
+    LaunchedEffect(revision, forceReloadTick, viewMonth) {
+        val mustFetchNights = nights == null || forceReloadTick > 0 || !SleepTabMemoryCache.isFresh()
+        var currentNights = nights
+        if (mustFetchNights) {
+            nightError = null
+            try {
+                val loadedNights = withContext(Dispatchers.IO) {
+                    val raw = queryNightReport(context, 0, finalizeActiveWake = true)
+                    val boundaryMs = com.example.itv.infrastructure.storage.AccountDataBoundaryStore.getFreshStartEpochMs(context)
+                    com.example.itv.infrastructure.storage.AccountDataBoundaryStore.filterNightReport(raw, boundaryMs)
                 }
+                currentNights = loadedNights
+                nights = loadedNights
+                SleepTabMemoryCache.nightReport = loadedNights
+                SleepTabMemoryCache.loadedAtElapsedMs = SystemClock.elapsedRealtime()
+                withContext(Dispatchers.IO) {
+                    runCatching {
+                        MonthlyUsageArchiveStore.syncDailySnapshot(
+                            context = context,
+                            todayUsageReport = null,
+                            periodUsageReport = null,
+                            nightReport = loadedNights
+                        )
+                    }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                nightError = "화면 기록을 조회하지 못했습니다."
             }
+        }
+
+        try {
+            val zone = currentNights?.zone ?: ZoneId.systemDefault()
+            val summaryToday = Instant.ofEpochMilli(currentNights?.now ?: System.currentTimeMillis())
+                .atZone(zone).toLocalDate()
+            val days = viewMonth.lengthOfMonth()
+            val loaded = withContext(Dispatchers.IO) {
+                val allArchived = MonthlyUsageArchiveStore.getAllDailyRecords(context)
+                val parsedArchived = allArchived.values.mapNotNull { rec ->
+                    val bed = rec.bedtimeMinute ?: return@mapNotNull null
+                    val wake = rec.wakeupMinute ?: return@mapNotNull null
+                    val d = runCatching { LocalDate.parse(rec.date) }.getOrNull() ?: return@mapNotNull null
+                    ArchivedSleepRecord(wakeDate = d, bedtimeMinute = bed, wakeupMinute = wake)
+                }
+                val monthDates = (1..viewMonth.lengthOfMonth()).map { viewMonth.atDay(it).toString() }
+                val dates = (
+                    (0L..maxOf(30L, days.toLong())).map { summaryToday.minusDays(it).toString() } +
+                        monthDates +
+                        currentNights?.segments.orEmpty().map { it.wakeDate.toString() } +
+                        allArchived.keys
+                    ).distinct()
+                val confs = confirmationService.readDates(dates)
+                parsedArchived to confs
+            }
+            archivedRecords = loaded.first
+            confirmations = loaded.second
+            SleepTabMemoryCache.archivedRecords = loaded.first
+            SleepTabMemoryCache.confirmations = loaded.second
+            summaryError = null
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (_: Exception) {
-            nightError = "화면 기록을 조회하지 못했습니다."
+            summaryError = "수면 확인 기록 조회 실패 · 아래 값은 갱신되지 않았을 수 있습니다"
         }
+    }
+
+    val zone = nights?.zone ?: ZoneId.systemDefault()
+    val summaryToday = remember(nights?.now, zone) {
+        Instant.ofEpochMilli(nights?.now ?: System.currentTimeMillis()).atZone(zone).toLocalDate()
+    }
+    val nowZdt = remember(nights?.now, zone) {
+        Instant.ofEpochMilli(nights?.now ?: System.currentTimeMillis()).atZone(zone)
+    }
+    val mergedSleep = remember(nights, archivedRecords, confirmations, zone) {
+        CalendarDayCyclePolicy.mergeArchivedSleepData(
+            liveSegments = nights?.segments.orEmpty(),
+            liveCandidates = nights?.candidates.orEmpty(),
+            archivedRecords = archivedRecords,
+            confirmations = confirmations,
+            zone = zone
+        )
+    }
+    val bedtimeEstimate = remember(confirmations, mergedSleep.candidates, zone) {
+        SleepSummaryPolicy.estimateBedtimeWindow(
+            confirmations = confirmations,
+            candidates = mergedSleep.candidates,
+            zone = zone
+        )
+    }
+    val weeklySleepProfile = remember(confirmations, mergedSleep.candidates, zone) {
+        SleepSummaryPolicy.estimateWeeklySleepProfile(
+            confirmations = confirmations,
+            candidates = mergedSleep.candidates,
+            zone = zone
+        )
+    }
+    val adaptiveTarget = remember(weeklySleepProfile, nowZdt) {
+        SleepSummaryPolicy.getAdaptiveBedtimeTarget(
+            weeklyProfile = weeklySleepProfile,
+            now = nowZdt
+        )
     }
 
     if (showOverviewHelp) {
@@ -149,6 +258,7 @@ fun SleepEstimationTabContent(
     }
 
     LazyColumn(
+        state = listState,
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 28.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -269,17 +379,85 @@ fun SleepEstimationTabContent(
             }
         }
 
-        item(key = "sleep_estimation_body", contentType = "sleep_estimation_body") {
-            NightSummary(
-                report = nights,
-                error = nightError,
-                days = viewMonth.lengthOfMonth(),
-                selectedMonth = viewMonth,
-                onSleepDataChanged = {
-                    revision++
-                    onSleepDataChanged()
+        // Split into 3 lightweight LazyColumn cards to avoid monolithic 700-line composition/JIT stalls!
+        item(key = "sleep_weekly_rhythm_card", contentType = "sleep_weekly_rhythm_card") {
+            ItvTactileCard(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(22.dp),
+                containerColor = ItvCardSurface,
+                contentColor = cardContentColor,
+                borderColor = ItvInkBorder,
+                shadowColor = ItvInkShadow,
+                borderWidth = 2.dp,
+                shadowOffsetX = 2.dp,
+                shadowOffsetY = 4.dp
+            ) {
+                Column(Modifier.padding(14.dp)) {
+                    SleepWeeklyRhythmSection(
+                        adaptiveTarget = adaptiveTarget,
+                        weeklySleepProfile = weeklySleepProfile,
+                        isDark = isDark,
+                        cardContentColor = cardContentColor
+                    )
                 }
-            )
+            }
+        }
+
+        if (bedtimeEstimate != null) {
+            item(key = "sleep_average_bedtime_card", contentType = "sleep_average_bedtime_card") {
+                ItvTactileCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(22.dp),
+                    containerColor = ItvCardSurface,
+                    contentColor = cardContentColor,
+                    borderColor = ItvInkBorder,
+                    shadowColor = ItvInkShadow,
+                    borderWidth = 2.dp,
+                    shadowOffsetX = 2.dp,
+                    shadowOffsetY = 4.dp
+                ) {
+                    Column(Modifier.padding(14.dp)) {
+                        SleepAverageBedtimeSection(
+                            bedtimeEstimate = bedtimeEstimate,
+                            isDark = isDark
+                        )
+                    }
+                }
+            }
+        }
+
+        item(key = "sleep_records_and_clock_card", contentType = "sleep_records_and_clock_card") {
+            ItvTactileCard(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(22.dp),
+                containerColor = ItvCardSurface,
+                contentColor = cardContentColor,
+                borderColor = ItvInkBorder,
+                shadowColor = ItvInkShadow,
+                borderWidth = 2.dp,
+                shadowOffsetX = 2.dp,
+                shadowOffsetY = 4.dp
+            ) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    SleepRecordsAndClockSection(
+                        report = nights,
+                        error = nightError,
+                        summaryError = summaryError,
+                        days = viewMonth.lengthOfMonth(),
+                        selectedMonth = viewMonth,
+                        summaryToday = summaryToday,
+                        zone = zone,
+                        mergedSleep = mergedSleep,
+                        confirmations = confirmations,
+                        isDark = isDark,
+                        cardContentColor = cardContentColor,
+                        onSaved = {
+                            forceReloadTick++
+                            onSleepDataChanged()
+                        }
+                    )
+                }
+            }
         }
     }
 }
@@ -346,6 +524,30 @@ internal fun NightSummary(
 
     val isDark = LocalDarkTheme.current
     val cardContentColor = if (isDark) Color(0xFFE6EFE8) else Color(0xFF241E19)
+    val nowZdt = remember(report?.now, zone) {
+        Instant.ofEpochMilli(report?.now ?: System.currentTimeMillis()).atZone(zone)
+    }
+    val bedtimeEstimate = remember(confirmations, mergedSleep.candidates, zone) {
+        SleepSummaryPolicy.estimateBedtimeWindow(
+            confirmations = confirmations,
+            candidates = mergedSleep.candidates,
+            zone = zone
+        )
+    }
+    val weeklySleepProfile = remember(confirmations, mergedSleep.candidates, zone) {
+        SleepSummaryPolicy.estimateWeeklySleepProfile(
+            confirmations = confirmations,
+            candidates = mergedSleep.candidates,
+            zone = zone
+        )
+    }
+    val adaptiveTarget = remember(weeklySleepProfile, nowZdt) {
+        SleepSummaryPolicy.getAdaptiveBedtimeTarget(
+            weeklyProfile = weeklySleepProfile,
+            now = nowZdt
+        )
+    }
+
     ItvTactileCard(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(22.dp),
@@ -358,33 +560,47 @@ internal fun NightSummary(
         shadowOffsetY = 4.dp
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            var showSleepRhythmHelp by remember { mutableStateOf(false) }
-            var showBedtimeEstimateHelp by remember { mutableStateOf(false) }
-            var showSleepClockHelp by remember { mutableStateOf(false) }
+            SleepWeeklyRhythmSection(
+                adaptiveTarget = adaptiveTarget,
+                weeklySleepProfile = weeklySleepProfile,
+                isDark = isDark,
+                cardContentColor = cardContentColor
+            )
+            if (bedtimeEstimate != null) {
+                SleepAverageBedtimeSection(
+                    bedtimeEstimate = bedtimeEstimate,
+                    isDark = isDark
+                )
+            }
+            SleepRecordsAndClockSection(
+                report = report,
+                error = error,
+                summaryError = summaryError,
+                days = days,
+                selectedMonth = selectedMonth,
+                summaryToday = summaryToday,
+                zone = zone,
+                mergedSleep = mergedSleep,
+                confirmations = confirmations,
+                isDark = isDark,
+                cardContentColor = cardContentColor,
+                onSaved = {
+                    revision++
+                    onSleepDataChanged()
+                }
+            )
+        }
+    }
+}
 
-            val nowZdt = remember(report?.now, zone) {
-                Instant.ofEpochMilli(report?.now ?: System.currentTimeMillis()).atZone(zone)
-            }
-            val bedtimeEstimate = remember(confirmations, mergedSleep.candidates, zone) {
-                SleepSummaryPolicy.estimateBedtimeWindow(
-                    confirmations = confirmations,
-                    candidates = mergedSleep.candidates,
-                    zone = zone
-                )
-            }
-            val weeklySleepProfile = remember(confirmations, mergedSleep.candidates, zone) {
-                SleepSummaryPolicy.estimateWeeklySleepProfile(
-                    confirmations = confirmations,
-                    candidates = mergedSleep.candidates,
-                    zone = zone
-                )
-            }
-            val adaptiveTarget = remember(weeklySleepProfile, nowZdt) {
-                SleepSummaryPolicy.getAdaptiveBedtimeTarget(
-                    weeklyProfile = weeklySleepProfile,
-                    now = nowZdt
-                )
-            }
+@Composable
+private fun SleepWeeklyRhythmSection(
+    adaptiveTarget: SleepSummaryPolicy.AdaptiveBedtimeTarget,
+    weeklySleepProfile: SleepSummaryPolicy.WeeklySleepProfile?,
+    isDark: Boolean,
+    cardContentColor: Color
+) {
+    var showSleepRhythmHelp by remember { mutableStateOf(false) }
 
             // 1. 요일별 수면 리듬 & 내일 취침 예측 카드
             Surface(
@@ -603,42 +819,49 @@ internal fun NightSummary(
                 )
             }
 
+}
+
+@Composable
+private fun SleepAverageBedtimeSection(
+    bedtimeEstimate: SleepSummaryPolicy.EstimatedBedtimeWindow,
+    isDark: Boolean
+) {
+    var showBedtimeEstimateHelp by remember { mutableStateOf(false) }
+
             // 2. 평소 추정 취침 시각 (전체 평균)
-            if (bedtimeEstimate != null) {
-                Surface(
-                    shape = RoundedCornerShape(14.dp),
-                    color = ItvInsetSurface,
-                    border = BorderStroke(1.dp, ItvLine),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                "평소 추정 취침 시각 (전체 평균)",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = if (isDark) Color(0xFF85E3B3) else Color(0xFF1B4332)
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            HelpBadgeButton(isDark = isDark, compact = true) { showBedtimeEstimateHelp = true }
-                            Spacer(Modifier.weight(1f))
-                            Text(
-                                "${bedtimeEstimate.validCount}일 반영",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (isDark) Color(0xFFA5C4B5) else Color(0xFF52796F)
-                            )
-                        }
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = ItvInsetSurface,
+                border = BorderStroke(1.dp, ItvLine),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = "평균 취침 %02d:%02d ~ 기상 %02d:%02d (평균 %d시간 %d분)".format(
-                                bedtimeEstimate.avgStartHour, bedtimeEstimate.avgStartMinute,
-                                bedtimeEstimate.avgEndHour, bedtimeEstimate.avgEndMinute,
-                                bedtimeEstimate.avgDurationMinutes / 60L, bedtimeEstimate.avgDurationMinutes % 60L
-                            ),
-                            style = MaterialTheme.typography.bodyMedium,
+                            "평소 추정 취침 시각 (전체 평균)",
+                            style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
-                            color = if (isDark) Color(0xFF5ED38C) else Color(0xFF2D6A4F)
+                            color = if (isDark) Color(0xFF85E3B3) else Color(0xFF1B4332)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        HelpBadgeButton(isDark = isDark, compact = true) { showBedtimeEstimateHelp = true }
+                        Spacer(Modifier.weight(1f))
+                        Text(
+                            "${bedtimeEstimate.validCount}일 반영",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (isDark) Color(0xFFA5C4B5) else Color(0xFF52796F)
                         )
                     }
+                    Text(
+                        text = "평균 취침 %02d:%02d ~ 기상 %02d:%02d (평균 %d시간 %d분)".format(
+                            bedtimeEstimate.avgStartHour, bedtimeEstimate.avgStartMinute,
+                            bedtimeEstimate.avgEndHour, bedtimeEstimate.avgEndMinute,
+                            bedtimeEstimate.avgDurationMinutes / 60L, bedtimeEstimate.avgDurationMinutes % 60L
+                        ),
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = if (isDark) Color(0xFF5ED38C) else Color(0xFF2D6A4F)
+                    )
                 }
             }
 
@@ -671,6 +894,24 @@ internal fun NightSummary(
                     }
                 )
             }
+}
+
+@Composable
+private fun SleepRecordsAndClockSection(
+    report: NightReport?,
+    error: String?,
+    summaryError: String?,
+    days: Int,
+    selectedMonth: YearMonth?,
+    summaryToday: LocalDate,
+    zone: ZoneId,
+    mergedSleep: MergedSleepData,
+    confirmations: Map<String, SleepConfirmation>,
+    isDark: Boolean,
+    cardContentColor: Color,
+    onSaved: () -> Unit
+) {
+    var showSleepClockHelp by remember { mutableStateOf(false) }
 
             // 3. 수면 기록 & 비사용 시계 섹션 (사용자 확인 우선·평균 규칙 등은 ? 아이콘 안에 정리)
             Row(
@@ -971,10 +1212,7 @@ internal fun NightSummary(
                             row.wakeDate,
                             zone,
                             listOf(row) + otherCandidates,
-                            onSaved = {
-                                revision++
-                                onSleepDataChanged()
-                            }
+                            onSaved = onSaved
                         )
                     }
                 }
@@ -986,8 +1224,6 @@ internal fun NightSummary(
                     onDismiss = { showSleepClockHelp = false }
                 )
             }
-        }
-    }
 }
 
 @Composable

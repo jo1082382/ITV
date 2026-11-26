@@ -5,6 +5,7 @@ import android.graphics.Canvas
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -49,6 +50,10 @@ import com.example.itv.domain.records.DailyHealthTier
 import com.example.itv.domain.records.HealthAxisScore
 import com.example.itv.domain.records.NightReport
 import com.example.itv.domain.records.Report
+import com.example.itv.domain.reward.CalendarStreakPolicy
+import com.example.itv.domain.reward.ChestClaimStatus
+import com.example.itv.infrastructure.reward.CalendarRewardStore
+import com.example.itv.infrastructure.reward.UserRewardStore
 import com.example.itv.infrastructure.storage.AccountDataBoundaryStore
 import com.example.itv.infrastructure.storage.CalendarHealthLoader
 import com.example.itv.infrastructure.storage.CalendarMonthHealthBundle
@@ -109,17 +114,25 @@ internal fun TestCalendarRecordsScreen(
     calendarReloadVersion: Int = 0,
     daySyncTick: Int = 0,
     activeRitualDate: LocalDate? = null,
-    onDayCellPlaced: ((LocalDate, LayoutCoordinates) -> Unit)? = null,
-    onDayCellDisposed: ((LocalDate) -> Unit)? = null,
+    listState: androidx.compose.foundation.lazy.LazyListState = rememberLazyListState(),
+    onCalendarCellBoundsResolverChanged: (((LocalDate) -> Rect?) -> Unit)? = null,
     onLaunchStampRitual: ((StampRitualRequest) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val isDark = LocalDarkTheme.current
+    val density = androidx.compose.ui.platform.LocalDensity.current
     val scope = rememberCoroutineScope()
-    val listState = rememberLazyListState()
     val seasonalAnimController = LocalSeasonalAnimationController.current
-    LaunchedEffect(listState, seasonalAnimController) {
-        if (seasonalAnimController == null) return@LaunchedEffect
+    val seasonMode = com.example.itv.infrastructure.theme.UserThemeStore.rememberSeasonMode()
+    val hasActiveSeasonalMotion = remember(seasonMode) {
+        com.example.itv.infrastructure.theme.UserThemeStore.resolveActiveSeason(seasonMode) !=
+            com.example.itv.infrastructure.theme.SeasonThemeMode.OFF
+    }
+    LaunchedEffect(listState, seasonalAnimController, hasActiveSeasonalMotion) {
+        if (seasonalAnimController == null || !hasActiveSeasonalMotion) {
+            seasonalAnimController?.scrollPaused = false
+            return@LaunchedEffect
+        }
         snapshotFlow { listState.isScrollInProgress }
             .collect { scrolling -> seasonalAnimController.scrollPaused = scrolling }
     }
@@ -128,11 +141,35 @@ internal fun TestCalendarRecordsScreen(
     }
     val today = remember(daySyncTick) { LocalDate.now() }
 
-    // Non-snapshot LayoutCoordinates holder updated only on layout (onPlaced) -> ZERO scroll & recomposition overhead!
-    val localCellCoords = remember { mutableMapOf<LocalDate, LayoutCoordinates>() }
+    // Single grid-container LayoutCoordinates ref -> eliminates ALL 31 per-cell onPlaced callbacks during scroll!
+    val gridCoordsRef = remember { arrayOfNulls<LayoutCoordinates>(1) }
+    val gridMonthRef = remember { arrayOfNulls<YearMonth>(1) }
     val localRootCoordsRef = remember { arrayOfNulls<LayoutCoordinates>(1) }
+    val rowSpacingPx = remember(density) { with(density) { 4.dp.toPx() } }
     fun LayoutCoordinates?.liveBounds(): Rect? =
         this?.takeIf { it.isAttached }?.boundsInRoot()?.takeUnless { it.isEmpty }
+
+    fun resolveCellBounds(date: LocalDate): Rect? {
+        val month = gridMonthRef[0] ?: return null
+        if (YearMonth.from(date) != month) return null
+        val gridBounds = gridCoordsRef[0].liveBounds() ?: return null
+        val firstDow = month.atDay(1).dayOfWeek.value % 7
+        val totalSlots = firstDow + month.lengthOfMonth()
+        val rowsCount = ((totalSlots + 6) / 7).coerceAtLeast(1)
+        val slotIndex = firstDow + (date.dayOfMonth - 1)
+        val row = slotIndex / 7
+        val col = slotIndex % 7
+        val cellW = gridBounds.width / 7f
+        val cellH = ((gridBounds.height - rowSpacingPx * (rowsCount - 1)) / rowsCount).coerceAtLeast(1f)
+        val left = gridBounds.left + col * cellW
+        val top = gridBounds.top + row * (cellH + rowSpacingPx)
+        return Rect(left, top, left + cellW, top + cellH)
+    }
+
+    DisposableEffect(onCalendarCellBoundsResolverChanged) {
+        onCalendarCellBoundsResolverChanged?.invoke(::resolveCellBounds)
+        onDispose { }
+    }
 
     var currentMonthStr by rememberSaveable { mutableStateOf(YearMonth.from(initialSelectedDate ?: today).toString()) }
     val viewMonth = remember(currentMonthStr) {
@@ -196,7 +233,7 @@ internal fun TestCalendarRecordsScreen(
 
     fun launchRitual(request: StampRitualRequest) {
         val targetDate = request.date
-        val existingBounds = request.sourceCellBounds ?: localCellCoords[targetDate].liveBounds()
+        val existingBounds = request.sourceCellBounds ?: resolveCellBounds(targetDate)
         val root = localRootCoordsRef[0].liveBounds()
         val isOnScreen = existingBounds != null &&
             (root == null || (existingBounds.bottom > root.top + 8f && existingBounds.top < root.bottom - 8f))
@@ -213,7 +250,7 @@ internal fun TestCalendarRecordsScreen(
                 var resolved: Rect? = null
                 var waited = 0
                 while (waited < 450) {
-                    val candidate = localCellCoords[targetDate].liveBounds()
+                    val candidate = resolveCellBounds(targetDate)
                     if (candidate != null) {
                         resolved = candidate
                         break
@@ -232,6 +269,88 @@ internal fun TestCalendarRecordsScreen(
     }
     var monthBundle by remember { mutableStateOf(initialCachedBundle) }
     var loadingMonth by remember { mutableStateOf(initialCachedBundle == null) }
+
+    // Streak, Shield & Monthly Treasure Chest reward state
+    val calendarRewardFlow by CalendarRewardStore.state.collectAsState()
+    val rewardSnapshot = calendarRewardFlow ?: remember(context) { CalendarRewardStore.getSnapshot(context) }
+    val userRewardFlow by UserRewardStore.rewardState.collectAsState()
+    val userReward = userRewardFlow ?: remember(context) { UserRewardStore.getReward(context) }
+    var chestOpeningRequest by remember { mutableStateOf<ChestOpeningRequest?>(null) }
+
+    LaunchedEffect(monthBundle, today) {
+        val bundle = monthBundle ?: return@LaunchedEffect
+        withContext(Dispatchers.IO) {
+            CalendarRewardStore.syncWithAssessments(
+                context = context,
+                assessments = bundle.assessments,
+                today = today
+            )
+        }
+    }
+
+    val monthlyCounter = remember(viewMonth, monthBundle, rewardSnapshot) {
+        val tally = monthBundle?.tally
+        CalendarStreakPolicy.evaluateMonthlyCounter(
+            yearMonth = viewMonth,
+            goldCount = tally?.goldCount ?: 0,
+            silverCount = tally?.silverCount ?: 0,
+            claimedTiers = rewardSnapshot.claimedTiersFor(viewMonth)
+        )
+    }
+
+    val streakSummary = remember(rewardSnapshot, userReward.currentPoints, monthBundle, today) {
+        val mergedTiers = rewardSnapshot.recentDayTiers.toMutableMap()
+        monthBundle?.assessments?.forEach { (date, assessment) ->
+            if (assessment.tier != DailyHealthTier.NO_DATA) {
+                mergedTiers[date] = assessment.tier
+            }
+        }
+        CalendarStreakPolicy.evaluateStreak(
+            dayTiers = mergedTiers,
+            today = today,
+            protectedDates = rewardSnapshot.protectedDates,
+            availableShields = rewardSnapshot.streakShieldCount,
+            availablePoints = userReward.currentPoints,
+            persistedBestStreak = rewardSnapshot.bestStreak,
+            todayProjectedTier = monthBundle?.assessments?.get(today)?.projectedTier
+        )
+    }
+
+    val handleChestClick = remember(viewMonth, monthlyCounter) {
+        { item: com.example.itv.domain.reward.MonthlyChestItemState ->
+            when (item.status) {
+                ChestClaimStatus.UNLOCKED_CLAIMABLE -> {
+                    val claimResult = CalendarRewardStore.claimMonthlyChest(
+                        context = context,
+                        yearMonth = viewMonth,
+                        tier = item.tier,
+                        happyCount = monthlyCounter.happyCount
+                    )
+                    if (claimResult != null) {
+                        chestOpeningRequest = ChestOpeningRequest(
+                            tier = item.tier,
+                            isPreview = false,
+                            claimResult = claimResult
+                        )
+                    }
+                }
+                ChestClaimStatus.CLAIMED -> {
+                    chestOpeningRequest = ChestOpeningRequest(
+                        tier = item.tier,
+                        isPreview = true,
+                        claimResult = null
+                    )
+                }
+                ChestClaimStatus.LOCKED -> {
+                    android.widget.Toast.makeText(
+                        context,
+                        "${item.tier.shortTitle}는 해맑음·웃음 스탬프 ${item.remainingToUnlock}개 더 모으면 열 수 있어요!",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        }
+    }
 
     // Opened-dialog day hourly & app usage report (loaded lazily only when a date popup is opened)
     var dialogDayReport by remember { mutableStateOf<Report?>(null) }
@@ -263,7 +382,7 @@ internal fun TestCalendarRecordsScreen(
                 }
             }
             val nightRep: NightReport? = withContext(Dispatchers.IO) {
-                runCatching { queryNightReport(context, 45) }.getOrNull()
+                runCatching { queryNightReport(context, 45, finalizeActiveWake = true) }.getOrNull()
             }
             monthBundle = CalendarHealthLoader.loadMonth(
                 context = context,
@@ -297,7 +416,10 @@ internal fun TestCalendarRecordsScreen(
                     archived
                 } else {
                     val live = runCatching { context.queryUsageReport(1, target) }.getOrNull()
-                    if (live != null && (live.total > 0.0 || live.values.any { it > 0.0 })) {
+                    val archivedTotal = archived?.total ?: 0.0
+                    val liveTotal = live?.total ?: 0.0
+                    val hasLive = live != null && (liveTotal > 0.0 || live.values.any { it > 0.0 })
+                    if (hasLive && (target == today || archived == null || liveTotal + 1.0 >= archivedTotal)) {
                         runCatching { MonthlyUsageArchiveStore.upsertDayHourlyAndApps(context, target, live) }
                         live
                     } else {
@@ -342,7 +464,7 @@ internal fun TestCalendarRecordsScreen(
                         isMorningAuto = false,
                         isTestPreview = false,
                         character = DailyStampPrefs.getSelectedCharacter(context),
-                        sourceCellBounds = localCellCoords[assessment.date].liveBounds()
+                        sourceCellBounds = resolveCellBounds(assessment.date)
                     )
                 )
             },
@@ -401,9 +523,7 @@ internal fun TestCalendarRecordsScreen(
             Column(modifier = Modifier.fillMaxWidth()) {
                 ItvSeasonalRoofTopAccent(modifier = Modifier.padding(horizontal = 4.dp))
                 ItvTactileCard(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .graphicsLayer(),
+                    modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(24.dp),
                     containerColor = ItvCardSurface,
                     contentColor = CardInk,
@@ -491,28 +611,12 @@ internal fun TestCalendarRecordsScreen(
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
 
-                    // Compact 5-Puppy Ink Stamp Legend
-                    Surface(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp),
-                        color = ItvInsetSurface,
-                        border = BorderStroke(0.9.dp, ItvLine.copy(alpha = if (isDark) 0.55f else 0.75f))
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 8.dp, vertical = 7.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            LegendStampItem(DailyHealthTier.GOLD, "해맑", sharedOutlineBitmap)
-                            LegendStampItem(DailyHealthTier.SILVER, "웃음", sharedOutlineBitmap)
-                            LegendStampItem(DailyHealthTier.BRONZE, "슬픔", sharedOutlineBitmap)
-                            LegendStampItem(DailyHealthTier.WARNING, "화남", sharedOutlineBitmap)
-                            LegendStampItem(DailyHealthTier.CRITICAL, "아픔", sharedOutlineBitmap)
-                            LegendStampItem(DailyHealthTier.IN_PROGRESS, "진행", sharedOutlineBitmap)
-                        }
-                    }
+                    // Inline Monthly Treasure Chest Progress Bar (replaces 6-tier text legend)
+                    InlineMonthlyTreasureProgressBar(
+                        counter = monthlyCounter,
+                        preloadedOutlineBitmap = sharedOutlineBitmap,
+                        onChestClick = handleChestClick
+                    )
 
                     // Weekdays Row
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -553,17 +657,7 @@ internal fun TestCalendarRecordsScreen(
                     } else {
                         val totalSlots = firstDayOfWeek + daysInMonth
                         val rowsCount = (totalSlots + 6) / 7
-
-                        // Clean up stale day cell coords once per month switch instead of 31 per-cell DisposableEffects
-                        DisposableEffect(viewMonth) {
-                            onDispose {
-                                val staleDates = localCellCoords.keys.filter { YearMonth.from(it) == viewMonth }
-                                staleDates.forEach { d ->
-                                    localCellCoords.remove(d)
-                                    onDayCellDisposed?.invoke(d)
-                                }
-                            }
-                        }
+                        gridMonthRef[0] = viewMonth
 
                         // Single stable click handler shared by all 31 day cells so tapping only recomposes affected cells
                         val onCalendarDayClick = remember(viewMonth, monthBundle, stampedDates, today, selectedStampCharacter) {
@@ -586,7 +680,7 @@ internal fun TestCalendarRecordsScreen(
                                             isMorningAuto = false,
                                             isTestPreview = false,
                                             character = selectedStampCharacter,
-                                            sourceCellBounds = localCellCoords[date].liveBounds()
+                                            sourceCellBounds = resolveCellBounds(date)
                                         )
                                     )
                                 } else {
@@ -595,9 +689,11 @@ internal fun TestCalendarRecordsScreen(
                             }
                         }
 
-                        // Hardware-cached layer prevents re-recording 31 Canvas stamps on every scroll frame
+                        // ONE single onPlaced on the 7xN grid container (zero per-cell onPlaced callbacks during scroll!)
                         Column(
-                            modifier = Modifier.graphicsLayer(),
+                            modifier = Modifier.onPlaced { coords ->
+                                gridCoordsRef[0] = coords
+                            },
                             verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
                             for (rowIndex in 0 until rowsCount) {
@@ -626,17 +722,11 @@ internal fun TestCalendarRecordsScreen(
                                                 isToday = date == today,
                                                 isSelected = date == selectedDate,
                                                 isPendingStamp = isYesterdayPendingStamp,
+                                                isShieldProtected = date in rewardSnapshot.protectedDates,
                                                 isLiftedForRitual = activeRitualDate == date || localRitualRequest?.date == date,
                                                 preloadedOutlineBitmap = sharedOutlineBitmap,
                                                 onDayClick = onCalendarDayClick,
-                                                modifier = Modifier
-                                                    .weight(1f)
-                                                    .onPlaced { coords ->
-                                                        if (localCellCoords[date] !== coords) {
-                                                            localCellCoords[date] = coords
-                                                            onDayCellPlaced?.invoke(date, coords)
-                                                        }
-                                                    }
+                                                modifier = Modifier.weight(1f)
                                             )
                                         } else {
                                             Spacer(Modifier.weight(1f))
@@ -668,7 +758,7 @@ internal fun TestCalendarRecordsScreen(
                                         isMorningAuto = false,
                                         isTestPreview = false,
                                         character = DailyStampPrefs.getSelectedCharacter(context),
-                                        sourceCellBounds = localCellCoords[yesterday].liveBounds()
+                                        sourceCellBounds = resolveCellBounds(yesterday)
                                     )
                                 )
                             },
@@ -705,41 +795,30 @@ internal fun TestCalendarRecordsScreen(
                             preloadedOutlineBitmap = sharedOutlineBitmap
                         )
                     }
-
-                    // Stamp Motion Test Bar (5 expressions) so user can preview every tier's slam + reaction!
-                    StampMotionTestBar(
-                        preloadedOutlineBitmap = sharedOutlineBitmap,
-                        onTestTier = { testTier ->
-                            val previewDate = if (YearMonth.from(selectedDate) == viewMonth) {
-                                selectedDate
-                            } else {
-                                viewMonth.atDay(1)
-                            }
-                            val (sampleScore, sampleHeadline) = when (testTier) {
-                                DailyHealthTier.GOLD -> 90 to "취침 전 스마트폰 절제와 숏폼 탈출이 모두 완벽한 날이었어요!"
-                                DailyHealthTier.SILVER -> 78 to "전반적으로 건강한 디지털 리듬을 잘 유지했어요."
-                                DailyHealthTier.BRONZE -> 68 to "조금 아쉽지만 괜찮아요. 내일은 취침 전 조금만 일찍 내려놔요."
-                                DailyHealthTier.WARNING -> 56 to "숏폼 연속 시청과 늦은 사용이 겹쳤어요. 잠시 쉬어갈 타이밍이에요!"
-                                else -> 42 to "야간 과사용과 숏폼 몰입이 심했어요. 오늘 밤은 꼭 푹 쉬어주세요!"
-                            }
-                            launchRitual(
-                                StampRitualRequest(
-                                    date = previewDate,
-                                    tier = testTier,
-                                    score = sampleScore,
-                                    headline = sampleHeadline,
-                                    isMorningAuto = false,
-                                    isTestPreview = true,
-                                    character = selectedStampCharacter,
-                                    sourceCellBounds = localCellCoords[previewDate].liveBounds()
-                                )
-                            )
-                        }
-                    )
                     }
                 }
             }
         }
+
+        // 3. Health Stamp Streak + Automatic Shield/Point Protection Card
+        item(key = "health_stamp_streak_card", contentType = "health_stamp_streak_card") {
+            HealthStampStreakCard(
+                streakSummary = streakSummary,
+                shieldCount = rewardSnapshot.streakShieldCount,
+                currentPoints = userReward.currentPoints,
+                lastAutoProtectedDate = rewardSnapshot.lastAutoProtectedDate,
+                lastAutoProtectionSource = rewardSnapshot.lastAutoProtectionSource
+            )
+        }
+    }
+
+    // Monthly Treasure Chest Opening Overlay (Puppy brings unique Bronze/Silver/Gold key in mouth!)
+    chestOpeningRequest?.let { req ->
+        MonthlyChestOpeningOverlay(
+            request = req,
+            character = selectedStampCharacter,
+            onDismiss = { chestOpeningRequest = null }
+        )
     }
 
     // Fallback local ritual overlay if hosted outside ItvMainScreen
@@ -747,7 +826,7 @@ internal fun TestCalendarRecordsScreen(
         DailyStampRitualOverlay(
             request = req,
             overlayRootBounds = localRootCoordsRef[0].liveBounds(),
-            resolveCellBounds = { date -> localCellCoords[date].liveBounds() },
+            resolveCellBounds = ::resolveCellBounds,
             onStampCommitted = {
                 if (!req.isTestPreview) {
                     markDateStamped(req.date)
@@ -765,7 +844,7 @@ internal fun TestCalendarRecordsScreen(
 }
 
 @Composable
-private fun StampMotionTestBar(
+internal fun StampMotionTestBar(
     preloadedOutlineBitmap: ImageBitmap?,
     onTestTier: (DailyHealthTier) -> Unit
 ) {
@@ -844,24 +923,8 @@ private fun StampMotionTestBar(
     }
 }
 
-@Composable
-private fun LegendStampItem(
-    tier: DailyHealthTier,
-    label: String,
-    preloadedOutlineBitmap: ImageBitmap?
-) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(2.dp)
-    ) {
-        DailyHealthStampBadge(
-            tier = tier,
-            size = 19.dp,
-            preloadedOutlineBitmap = preloadedOutlineBitmap
-        )
-        Text(text = label, fontSize = 10.sp, color = CardSubInk, fontWeight = FontWeight.Medium)
-    }
-}
+
+private val CalendarCellShape = RoundedCornerShape(10.dp)
 
 @Composable
 private fun CalendarStampCell(
@@ -872,6 +935,7 @@ private fun CalendarStampCell(
     isToday: Boolean,
     isSelected: Boolean,
     isPendingStamp: Boolean,
+    isShieldProtected: Boolean = false,
     isLiftedForRitual: Boolean = false,
     preloadedOutlineBitmap: ImageBitmap? = null,
     onDayClick: (Int) -> Unit,
@@ -895,34 +959,37 @@ private fun CalendarStampCell(
         else -> CardSubInk.copy(alpha = 0.34f)
     }
 
-    val border = when {
-        isSelected -> BorderStroke(1.6.dp, ItvGreen)
-        isPendingStamp -> BorderStroke(1.6.dp, Color(0xFFF59E0B))
-        isToday -> BorderStroke(1.5.dp, ItvGreen)
-        hasData -> BorderStroke(0.9.dp, if (isDark) Color(0xFF40594A) else Color(0xFFD6CEC0))
-        else -> null
+    val borderWidth = when {
+        isSelected -> 1.6.dp
+        isPendingStamp -> 1.6.dp
+        isToday -> 1.5.dp
+        isShieldProtected -> 1.2.dp
+        hasData -> 0.9.dp
+        else -> 0.dp
+    }
+    val borderColor = when {
+        isSelected -> ItvGreen
+        isPendingStamp -> Color(0xFFF59E0B)
+        isToday -> ItvGreen
+        isShieldProtected -> Color(0xFF3DA9BF)
+        hasData -> if (isDark) Color(0xFF40594A) else Color(0xFFD6CEC0)
+        else -> Color.Transparent
     }
 
     // Subtle organic rubber-stamp tilt (-5° to +5°) deterministic per day
     val tilt = remember(day) { ((day * 7) % 11 - 5).toFloat() }
 
-    Surface(
+    Box(
         modifier = modifier
             .padding(1.dp)
             .height(68.dp)
-            .graphicsLayer { alpha = if (isLiftedForRitual) 0.16f else 1f }
-            .clip(RoundedCornerShape(10.dp))
-            .clickable { onDayClick(day) },
-        shape = RoundedCornerShape(10.dp),
-        color = cellBackground,
-        border = border,
-        shadowElevation = if (isSelected) 2.dp else 0.dp
+            .then(if (isLiftedForRitual) Modifier.graphicsLayer { alpha = 0.16f } else Modifier)
+            .clip(CalendarCellShape)
+            .then(if (cellBackground != Color.Transparent) Modifier.background(cellBackground) else Modifier)
+            .then(if (borderWidth > 0.dp) Modifier.border(borderWidth, borderColor, CalendarCellShape) else Modifier)
+            .clickable { onDayClick(day) }
+            .padding(horizontal = 1.dp)
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 1.dp)
-        ) {
             Text(
                 text = day.toString(),
                 fontSize = 10.sp,
@@ -935,6 +1002,16 @@ private fun CalendarStampCell(
                     .align(Alignment.TopCenter)
                     .padding(top = 2.dp)
             )
+            if (isShieldProtected) {
+                Text(
+                    text = "🛡️",
+                    fontSize = 8.5.sp,
+                    lineHeight = 9.sp,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(top = 1.dp, end = 1.dp)
+                )
+            }
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -965,7 +1042,6 @@ private fun CalendarStampCell(
             }
         }
     }
-}
 
 @Composable
 private fun MonthlyStampTallyStrip(

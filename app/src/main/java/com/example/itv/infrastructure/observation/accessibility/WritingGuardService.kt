@@ -4,37 +4,122 @@ import com.example.itv.infrastructure.observation.youtube.YoutubeProbe
 
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Intent
 import android.os.Build
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
+import android.os.Process
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** Reads UI structure only: never accesses node.text, hints, descriptions or event text. */
 @android.annotation.SuppressLint("AccessibilityPolicy")
 open class WritingGuardService : AccessibilityService() {
     private val observers = com.example.itv.infrastructure.observation.ObservationRegistry()
-    private val handler = Handler(Looper.getMainLooper())
+    private val mainHandler = Handler(Looper.getMainLooper())
+    @Volatile private var workerThread: HandlerThread? = null
+    @Volatile private var workerHandler: Handler? = null
+
     private val messengerPackages = setOf(
         "com.kakao.talk", "com.discord",
         "com.google.android.apps.messaging", "com.samsung.android.messaging",
         "com.android.mms", "org.telegram.messenger", "jp.naver.line.android"
     )
-    private val shortformPackages = setOf(
-        "com.google.android.youtube", "com.instagram.android"
-    )
-    private var ownScreen = false
-    private var lastOwnCheck = 0L
-    private var pendingScan = false
+    @Volatile private var ownScreen = false
+    @Volatile private var dormantInfoApplied = false
+    @Volatile private var lastOwnCheck = 0L
+    @Volatile private var lastFullScanAt = 0L
+    private val pendingScan = AtomicBoolean(false)
+
     private val eventScan = Runnable {
-        pendingScan = false
+        pendingScan.set(false)
         scan()
     }
+
+    private fun ensureWorkerHandler(): Handler {
+        workerHandler?.let { existing ->
+            if (workerThread?.isAlive == true) return existing
+        }
+        synchronized(this) {
+            workerHandler?.let { existing ->
+                if (workerThread?.isAlive == true) return existing
+            }
+            val thread = HandlerThread("ItvA11yWorker", Process.THREAD_PRIORITY_BACKGROUND).apply {
+                start()
+            }
+            val handler = Handler(thread.looper)
+            workerThread = thread
+            workerHandler = handler
+            return handler
+        }
+    }
+
+    /**
+     * Dynamically tightens or restores AccessibilityServiceInfo in system_server:
+     * - While ITV itself is in the foreground: only listen for TYPE_WINDOW_STATE_CHANGED
+     *   and clear view-id/window-retrieval flags so Jetpack Compose inside ITV does NOT run
+     *   heavy scroll/content accessibility traversals or IPC.
+     * - While external apps are in the foreground: keep ONLY the 5 minimal event types needed
+     *   for writing protection, Reels/Shorts/Longform detection, and foreground app/category tracking.
+     */
+    private fun applyServiceInfo(inOwnApp: Boolean) {
+        if (dormantInfoApplied == inOwnApp && serviceInfo != null) return
+        try {
+            val info = serviceInfo ?: return
+            if (inOwnApp) {
+                info.eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                info.flags = 0
+                info.notificationTimeout = OWN_APP_NOTIFICATION_TIMEOUT_MS
+            } else {
+                info.eventTypes = EXTERNAL_EVENT_TYPES
+                info.flags = EXTERNAL_FLAGS
+                info.notificationTimeout = EXTERNAL_NOTIFICATION_TIMEOUT_MS
+            }
+            serviceInfo = info
+            dormantInfoApplied = inOwnApp
+        } catch (_: Exception) {
+            // Ignore transient binder errors while service is connecting/unbinding
+        }
+    }
+
+    private fun enterDormantOwnAppMode() {
+        com.example.itv.infrastructure.jev.JevObservationHub.foreground(packageName)
+        workerHandler?.removeCallbacks(poll)
+        workerHandler?.removeCallbacks(eventScan)
+        pendingScan.set(false)
+        if (!ownScreen) {
+            // Pause once on entry; do not repeatedly write stores on scroll events.
+            com.example.itv.infrastructure.storage.shortform.ShortformStores.pause()
+            observers.onOwnApp()
+            com.example.itv.infrastructure.observation.GeneralAppTracker.onObserve(this, packageName)
+        }
+        ownScreen = true
+        result(true, "ITV 내부 화면 · 접근성 휴면 / 개입 보류")
+        mainHandler.post { applyServiceInfo(inOwnApp = true) }
+    }
+
+    private fun wakeForExternalApp() {
+        ownScreen = false
+        mainHandler.post { applyServiceInfo(inOwnApp = false) }
+        val worker = ensureWorkerHandler()
+        worker.removeCallbacks(poll)
+        worker.post(poll)
+    }
+
     private fun scan() {
+        // Fast-path: while any ITV Activity is in foreground, NEVER query `windows` or `root`
+        // and stay completely dormant (no polling, no Binder IPC).
+        if (WritingGuard.inAppForeground) {
+            enterDormantOwnAppMode()
+            return
+        }
         // Determine only the foreground package. Never traverse ITV's Compose tree.
+        var fromApplicationWindow = false
         val pkg = try {
             val target = findActiveApplicationWindow(windows)
             val r = target?.root
@@ -43,6 +128,7 @@ open class WritingGuardService : AccessibilityService() {
                 @Suppress("DEPRECATION") r.recycle()
             }
             if (appPkg != null && !com.example.itv.infrastructure.jev.JevObservationHub.isTransientSystemPackage(appPkg)) {
+                fromApplicationWindow = true
                 appPkg
             } else {
                 val root = rootInActiveWindow
@@ -51,73 +137,110 @@ open class WritingGuardService : AccessibilityService() {
                 rawPkg
             }
         } catch (_: Exception) { null }
-        com.example.itv.infrastructure.jev.JevObservationHub.foreground(pkg)
         if (pkg == packageName) {
-            if (!ownScreen) {
-                // Pause once on entry; do not repeatedly write stores on scroll events.
-                com.example.itv.infrastructure.storage.shortform.ShortformStores.pause()
-                observers.onOwnApp()
+            if (fromApplicationWindow || WritingGuard.inAppForeground) {
+                enterDormantOwnAppMode()
             }
-            ownScreen = true
-            result(true, "ITV 내부 화면 · 구조 탐색 생략 / 개입 보류")
-            com.example.itv.infrastructure.observation.GeneralAppTracker.onObserve(this, pkg)
+            // Otherwise rawPkg came from an ITV overlay (e.g., HUD/coaching bubble) on top of an external app:
+            // do NOT overwrite JevObservationHub.foregroundPackage or enter dormant mode.
             return
         }
+        com.example.itv.infrastructure.jev.JevObservationHub.foreground(pkg)
         ownScreen = false
+        if (dormantInfoApplied) {
+            mainHandler.post { applyServiceInfo(inOwnApp = false) }
+        }
         lastFullScanAt = SystemClock.elapsedRealtime()
         observers.beforeWritingCheck(this)
         inspect()
         observers.afterWritingCheck(this)
         com.example.itv.infrastructure.observation.GeneralAppTracker.onObserve(this, pkg)
     }
-    private var lastFullScanAt = 0L
+
     private fun isPowerSaveEligible(now: Long = SystemClock.elapsedRealtime()): Boolean =
         com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.isStableLongformPlayback(now) ||
             com.example.itv.infrastructure.observation.instagram.InstagramTracker.isPowerSaveScanEligible(now) ||
             com.example.itv.infrastructure.observation.GeneralAppTracker.isPowerSaveScanEligible(now)
 
-    private val poll = object : Runnable {
+    private val poll: Runnable = object : Runnable {
         override fun run() {
-            scan()
-            val delayMs = when {
-                ownScreen -> 1000L
-                isPowerSaveEligible() -> 1500L
-                else -> 500L
+            if (WritingGuard.inAppForeground) {
+                enterDormantOwnAppMode()
+                return
             }
-            handler.postDelayed(this, delayMs)
+            scan()
+            if (ownScreen || WritingGuard.inAppForeground) {
+                // Dormant while inside ITV: TYPE_WINDOW_STATE_CHANGED or Activity lifecycle will wake us.
+                return
+            }
+            val delayMs = if (isPowerSaveEligible()) 1500L else 600L
+            workerHandler?.postDelayed(this, delayMs)
         }
     }
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         activeInstance = this
         WritingGuard.connected = true
-        handler.removeCallbacks(poll)
-        handler.post(poll)
+        dormantInfoApplied = false
+        val worker = ensureWorkerHandler()
+        if (WritingGuard.inAppForeground) {
+            applyServiceInfo(inOwnApp = true)
+            worker.post { enterDormantOwnAppMode() }
+        } else {
+            applyServiceInfo(inOwnApp = false)
+            worker.removeCallbacks(poll)
+            worker.post(poll)
+        }
     }
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Reels event counters/callbacks are kept synchronous; payload text is not read.
-        observers.onEvent(event)
+        val e = event ?: return
+        val pkg = e.packageName?.toString()
+        val eventType = e.eventType
+
+        // Zero-overhead fast-path while user is inside ITV: ignore all self-generated events.
+        if (WritingGuard.inAppForeground) {
+            if (pkg == null || pkg == packageName) {
+                if (!ownScreen) {
+                    ensureWorkerHandler().post { enterDormantOwnAppMode() }
+                }
+                return
+            }
+            // Fallback: if a real external app window appeared while inAppForeground was stale, wake up.
+            if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+                !com.example.itv.infrastructure.jev.JevObservationHub.isTransientSystemPackage(pkg)
+            ) {
+                WritingGuard.inAppForeground = false
+                wakeForExternalApp()
+            } else {
+                return
+            }
+        }
+
+        if (pkg == packageName) {
+            // WritingGuard.inAppForeground is false here, so this accessibility event came from an
+            // ITV overlay window (LongformDiagnosticHud or coaching overlay) over an external app.
+            // Ignore it without entering dormant mode or overwriting JevObservationHub.foregroundPackage.
+            return
+        }
+
+        // Only Instagram Reels swipe detection inspects event.source synchronously.
+        if (eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED && pkg == "com.instagram.android") {
+            observers.onEvent(e)
+        }
+
         val now = SystemClock.elapsedRealtime()
-        val eventType = event?.eventType
-        val pkg = event?.packageName?.toString()
         val isActiveInteraction = eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED ||
             eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
             eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED ||
             eventType == AccessibilityEvent.TYPE_VIEW_CLICKED ||
-            eventType == AccessibilityEvent.TYPE_VIEW_LONG_CLICKED ||
-            eventType == AccessibilityEvent.TYPE_TOUCH_INTERACTION_START ||
-            eventType == AccessibilityEvent.TYPE_TOUCH_INTERACTION_END ||
-            eventType == AccessibilityEvent.TYPE_GESTURE_DETECTION_START ||
-            eventType == AccessibilityEvent.TYPE_GESTURE_DETECTION_END ||
             eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED
 
         if (isActiveInteraction) {
             com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.onUserInteraction(now)
             com.example.itv.infrastructure.observation.instagram.InstagramTracker.onUserInteraction(now)
-            // 플로팅 HUD(우리 앱 패키지)를 터치/확장할 때는 외부 앱(게임 등)의 조작 타이머를 리셋하지 않음
-            if (pkg != packageName) {
-                com.example.itv.infrastructure.observation.GeneralAppTracker.onUserInteraction(now)
-            }
+            com.example.itv.infrastructure.observation.GeneralAppTracker.onUserInteraction(now)
             if (eventType != AccessibilityEvent.TYPE_VIEW_FOCUSED) {
                 com.example.itv.presentation.coaching.CoachingMonitorService.notifyUserActivity("accessibility_$eventType")
             }
@@ -126,33 +249,36 @@ open class WritingGuardService : AccessibilityService() {
         if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             com.example.itv.infrastructure.observation.GeneralAppTracker.onWindowStateChanged(
                 pkg = pkg,
-                className = event.className?.toString()
+                className = e.className?.toString()
             )
+            // If we were dormant on ownScreen and just switched to an external app, wake polling cleanly.
+            if (ownScreen || dormantInfoApplied) {
+                wakeForExternalApp()
+                return
+            }
         }
-        if (ownScreen && pkg == packageName &&
-            event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
-            event.eventType != AccessibilityEvent.TYPE_WINDOWS_CHANGED &&
-            now - lastOwnCheck < 1000L) return
 
-        // 유튜브/인스타그램/일반앱 절전 스캔 대상 상태일 때는 단순 TYPE_WINDOW_CONTENT_CHANGED 버스트를 1.4초간 무시하여 배터리 절약
-        if (!isActiveInteraction &&
-            isPowerSaveEligible(now) &&
-            now - lastFullScanAt < 1400L) {
+        // Throttle redundant burst scans on background worker thread.
+        if (isPowerSaveEligible(now) &&
+            eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            eventType != AccessibilityEvent.TYPE_WINDOWS_CHANGED &&
+            now - lastFullScanAt < 1400L
+        ) {
             return
         }
 
         lastOwnCheck = now
-        // Coalesce bursts without postponing an already scheduled scan (no starvation).
-        if (!pendingScan) {
-            pendingScan = true
-            handler.postDelayed(eventScan, 100L)
+        if (pendingScan.compareAndSet(false, true)) {
+            ensureWorkerHandler().postDelayed(eventScan, 120L)
         }
     }
+
     private fun result(block: Boolean, reason: String) {
         WritingGuard.reason = reason
         WritingGuard.blocked = block
         WritingGuard.checkedAt = SystemClock.elapsedRealtime()
     }
+
     private fun inspect() {
         if (!com.example.itv.infrastructure.coaching.CoachingConsentStore.granted(this)) {
             result(true, "수집 동의 없음 · 개입 보류"); return
@@ -235,30 +361,63 @@ open class WritingGuardService : AccessibilityService() {
             result(true, "작성 상태 확인 오류 · 개입 보류")
         }
     }
+
     override fun onInterrupt() {
         com.example.itv.infrastructure.storage.shortform.ShortformStores.pause()
         WritingGuard.blocked = true
         WritingGuard.checkedAt = 0L
     }
+
     override fun onUnbind(intent: Intent?): Boolean {
         disconnect(); return super.onUnbind(intent)
     }
+
     private fun disconnect() {
         if (activeInstance === this) activeInstance = null
         YoutubeProbe.enabled = false
         YoutubeProbe.clearBaseline()
         com.example.itv.infrastructure.storage.shortform.ShortformStores.pause()
-        pendingScan = false
-        handler.removeCallbacksAndMessages(null)
+        pendingScan.set(false)
+        dormantInfoApplied = false
+        mainHandler.removeCallbacksAndMessages(null)
+        workerHandler?.removeCallbacksAndMessages(null)
+        workerThread?.quitSafely()
+        workerThread = null
+        workerHandler = null
         WritingGuard.connected = false
         WritingGuard.blocked = true
         WritingGuard.checkedAt = 0L
     }
+
     override fun onDestroy() { disconnect(); super.onDestroy() }
 
     companion object {
+        private const val EXTERNAL_EVENT_TYPES =
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
+                AccessibilityEvent.TYPE_WINDOWS_CHANGED or
+                AccessibilityEvent.TYPE_VIEW_SCROLLED or
+                AccessibilityEvent.TYPE_VIEW_CLICKED or
+                AccessibilityEvent.TYPE_VIEW_FOCUSED
+
+        private const val EXTERNAL_FLAGS =
+            AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
+                AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
+
+        private const val EXTERNAL_NOTIFICATION_TIMEOUT_MS = 250L
+        private const val OWN_APP_NOTIFICATION_TIMEOUT_MS = 500L
+
         @Volatile
         var activeInstance: AccessibilityService? = null
+
+        fun onAppForegroundChanged(inForeground: Boolean) {
+            val service = activeInstance as? WritingGuardService ?: return
+            if (inForeground) {
+                service.mainHandler.post { service.applyServiceInfo(inOwnApp = true) }
+                service.ensureWorkerHandler().post { service.enterDormantOwnAppMode() }
+            } else {
+                service.wakeForExternalApp()
+            }
+        }
 
         fun lockScreen(): Boolean {
             val service = activeInstance ?: return false

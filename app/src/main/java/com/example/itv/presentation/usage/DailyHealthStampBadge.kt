@@ -15,27 +15,36 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import android.util.LruCache
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Canvas as ComposeCanvas
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.ImageBitmapConfig
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.CanvasDrawScope
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import com.example.itv.domain.records.DailyHealthTier
 import com.example.itv.presentation.components.ItvGreen
@@ -108,6 +117,42 @@ internal fun DailyHealthStampBadge(
         loaded
     }
     val ink = stampInkColor(tier, onSelectedSurface)
+    val p = reactionPhase.coerceIn(0f, 1f)
+
+    // Fast static bitmap cache path: all 37+ resting stamps on the calendar share ~10 tiny cached bitmaps
+    // -> 1 GPU drawImage call per stamp, ZERO Path/Stroke/ColorFilter allocations during scroll!
+    if (p <= 0.001f && tier != DailyHealthTier.NO_DATA && tier != DailyHealthTier.IN_PROGRESS) {
+        Box(
+            modifier = modifier
+                .size(size)
+                .drawWithCache {
+                    val wPx = this.size.width.roundToInt().coerceAtLeast(1)
+                    val hPx = this.size.height.roundToInt().coerceAtLeast(1)
+                    val baked = StaticStampBitmapCache.getOrCreate(
+                        character = character,
+                        tier = tier,
+                        ink = ink,
+                        outlineBitmap = outlineBitmap,
+                        widthPx = wPx,
+                        heightPx = hPx,
+                        density = this,
+                        layoutDirection = layoutDirection
+                    )
+                    val dstSize = IntSize(wPx, hPx)
+                    onDrawBehind {
+                        if (tiltDegrees != 0f) {
+                            rotate(degrees = tiltDegrees, pivot = center) {
+                                drawImage(image = baked, dstSize = dstSize)
+                            }
+                        } else {
+                            drawImage(image = baked, dstSize = dstSize)
+                        }
+                    }
+                }
+        )
+        return
+    }
+
     val tintFilter = remember(ink) { ColorFilter.tint(ink) }
 
     Canvas(modifier = modifier.size(size)) {
@@ -117,7 +162,6 @@ internal fun DailyHealthStampBadge(
             return@Canvas
         }
 
-        val p = reactionPhase.coerceIn(0f, 1f)
         val isAnimating = p > 0.001f
 
         // Compute whole-face motion offsets for the post-stamp reaction phase
@@ -175,6 +219,50 @@ internal fun DailyHealthStampBadge(
                 reactionPhase = p
             )
         }
+    }
+}
+
+/**
+ * In-memory LRU cache of pre-rasterized static rubber-stamp badges (typically ~10 entries, <500 KB total).
+ * Shared across all calendar day cells, tally badges, and test bar items so scrolling requires zero vector path work.
+ */
+private object StaticStampBitmapCache {
+    private val cache = LruCache<String, ImageBitmap>(40)
+    private val drawScope = CanvasDrawScope()
+
+    fun getOrCreate(
+        character: StampCharacterSpec,
+        tier: DailyHealthTier,
+        ink: Color,
+        outlineBitmap: ImageBitmap?,
+        widthPx: Int,
+        heightPx: Int,
+        density: Density,
+        layoutDirection: LayoutDirection
+    ): ImageBitmap {
+        val key = "${character.id}|${tier.name}|${ink.toArgb()}|${widthPx}x${heightPx}|${outlineBitmap != null}"
+        cache.get(key)?.let { return it }
+
+        val bitmap = ImageBitmap(widthPx, heightPx, ImageBitmapConfig.Argb8888)
+        val canvas = ComposeCanvas(bitmap)
+        val tintFilter = ColorFilter.tint(ink)
+        drawScope.draw(
+            density = density,
+            layoutDirection = layoutDirection,
+            canvas = canvas,
+            size = Size(widthPx.toFloat(), heightPx.toFloat())
+        ) {
+            drawRealCharacterStamp(
+                tier = tier,
+                ink = ink,
+                tintFilter = tintFilter,
+                outlineBitmap = outlineBitmap,
+                character = character,
+                reactionPhase = 0f
+            )
+        }
+        cache.put(key, bitmap)
+        return bitmap
     }
 }
 

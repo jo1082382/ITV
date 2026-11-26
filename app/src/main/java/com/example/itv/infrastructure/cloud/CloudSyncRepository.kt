@@ -20,6 +20,7 @@ import com.example.itv.infrastructure.auth.SocialCustomTokenClient
 import com.example.itv.infrastructure.coaching.UserCoachingSettingsStore
 import com.example.itv.infrastructure.equip.UserEquipStore
 import com.example.itv.infrastructure.goals.RoomGoalStore
+import com.example.itv.infrastructure.reward.CalendarRewardStore
 import com.example.itv.infrastructure.reward.UserRewardStore
 import com.example.itv.composition.queryNightReport
 import com.example.itv.composition.queryUsageReport
@@ -637,7 +638,7 @@ object CloudSyncRepository {
         val bedtimeMemo = BedtimeMemoStore.getInstance(appCtx).getPendingMemo()
 
         val roomDb = ItvDatabase.get(appCtx)
-        val goalsJson = serializeGoalsAndSettings(roomDb).take(MAX_JSON_GOALS_BYTES)
+        val goalsJson = serializeGoalsAndSettings(roomDb, appCtx, cutoffDateStr)
         val sleepConfs = runCatching { roomDb.sleepConfirmationDao().all("demo-guest") }
             .getOrDefault(emptyList())
             .filter { it.recordDate >= cutoffDateStr }
@@ -753,10 +754,10 @@ object CloudSyncRepository {
             memoStore.restoreMemo(memoContent, memoSavedAt, memoPending)
         }
 
-        // 7. Room goals & settings
+        // 7. Room goals, settings & embedded calendarReward (streak shields, best streak, claimed chests)
         val goalsJson = data["goalsJson"] as? String
         if (!goalsJson.isNullOrBlank()) {
-            restoreGoalsAndSettings(ItvDatabase.get(appCtx), goalsJson, mergeWithLocal)
+            restoreGoalsAndSettings(ItvDatabase.get(appCtx), appCtx, goalsJson, mergeWithLocal, cutoffDateStr)
         }
 
         // 8. Room sleep confirmations
@@ -778,7 +779,11 @@ object CloudSyncRepository {
         return sleepConfs.size
     }
 
-    private suspend fun serializeGoalsAndSettings(roomDb: ItvDatabase): String {
+    private suspend fun serializeGoalsAndSettings(
+        roomDb: ItvDatabase,
+        appCtx: Context,
+        cutoffDateStr: String
+    ): String {
         val dao = roomDb.dao()
         val obj = JSONObject()
         val settings = runCatching { dao.settings("demo-guest") }.getOrNull()
@@ -814,13 +819,44 @@ object CloudSyncRepository {
                 )
             }
         }
-        return obj.toString()
+
+        // Embed streak shields, best streak, protected dates & monthly claimed chests inside goalsJson
+        // (stays cleanly inside the existing 16KB goalsJson budget validated by firestore.rules).
+        val cutoffMonthStr = cutoffDateStr.take(7)
+        val calendarRewardSnap = runCatching { CalendarRewardStore.getSnapshot(appCtx) }.getOrNull()
+        if (calendarRewardSnap != null) {
+            obj.put(
+                "calendarReward",
+                CalendarRewardStore.serializeToJsonObject(
+                    snapshot = calendarRewardSnap,
+                    cutoffDateStr = cutoffDateStr,
+                    cutoffMonthStr = cutoffMonthStr,
+                    includeRecentTiers = true
+                )
+            )
+            val full = obj.toString()
+            if (full.length <= MAX_JSON_GOALS_BYTES) return full
+            // Size fallback: drop recentDayTiers first while keeping valid JSON & core reward state
+            obj.put(
+                "calendarReward",
+                CalendarRewardStore.serializeToJsonObject(
+                    snapshot = calendarRewardSnap,
+                    cutoffDateStr = cutoffDateStr,
+                    cutoffMonthStr = cutoffMonthStr,
+                    includeRecentTiers = false
+                )
+            )
+        }
+        val serialized = obj.toString()
+        return if (serialized.length <= MAX_JSON_GOALS_BYTES) serialized else "{}"
     }
 
     private suspend fun restoreGoalsAndSettings(
         roomDb: ItvDatabase,
+        appCtx: Context,
         goalsJson: String,
-        mergeWithLocal: Boolean
+        mergeWithLocal: Boolean,
+        cutoffDateStr: String
     ) {
         runCatching {
             val obj = JSONObject(goalsJson)
@@ -883,6 +919,19 @@ object CloudSyncRepository {
                         )
                     }
                 }
+            }
+            obj.optJSONObject("calendarReward")?.let { crObj ->
+                val cutoffMonthStr = cutoffDateStr.take(7)
+                val parsed = CalendarRewardStore.parseFromJsonObject(
+                    obj = crObj,
+                    cutoffDateStr = cutoffDateStr,
+                    cutoffMonthStr = cutoffMonthStr
+                )
+                CalendarRewardStore.restoreFromCloud(
+                    context = appCtx,
+                    remote = parsed,
+                    mergeWithLocal = mergeWithLocal
+                )
             }
         }
     }
