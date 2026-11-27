@@ -47,10 +47,29 @@ class CoachingMonitorService : Service() {
             }
         }
 
+        @Volatile
+        private var diagnosticsUiActive: Boolean = false
+
+        fun setDiagnosticsUiActive(active: Boolean) {
+            diagnosticsUiActive = active
+            if (active) {
+                instanceRef?.get()?.let { service ->
+                    service.handler.post {
+                        if (service.running) {
+                            service.ownAppIdleSettled = false
+                            service.handler.removeCallbacks(service.tick)
+                            service.handler.post(service.tick)
+                        }
+                    }
+                }
+            }
+        }
+
         /** Immediately resumes normal 1-second tick cadence when the user leaves ITV for an external app. */
         fun notifyOwnAppExited() {
             instanceRef?.get()?.let { service ->
                 service.handler.post {
+                    service.ownAppIdleSettled = false
                     if (service.running) {
                         service.handler.removeCallbacks(service.tick)
                         service.handler.post(service.tick)
@@ -143,6 +162,7 @@ class CoachingMonitorService : Service() {
     private var preInterventionTriggeredInSession = false
     private var preInterventionShownAtElapsed = 0L
     private var darkUsageAccumulatedMs = 0L
+    private var brightAmbientHoldMs = 0L
     private var lastDarkTickElapsed: Long? = null
     private var offerIsPreIntervention = false
     private var screenOffSinceWallMs: Long? = null
@@ -152,6 +172,7 @@ class CoachingMonitorService : Service() {
         preInterventionTriggeredInSession = false
         preInterventionShownAtElapsed = 0L
         darkUsageAccumulatedMs = 0L
+        brightAmbientHoldMs = 0L
         lastDarkTickElapsed = null
         offerIsPreIntervention = false
     }
@@ -908,6 +929,9 @@ class CoachingMonitorService : Service() {
         }
     }
 
+    @Volatile private var ownAppIdleSettled: Boolean = false
+    @Volatile private var lastOwnAppIdleJevCheckElapsed: Long = 0L
+
     private val tick = object : Runnable {
         override fun run() {
             if (!running) return
@@ -915,6 +939,34 @@ class CoachingMonitorService : Service() {
                 com.example.itv.composition.CoachingAccess.state(this@CoachingMonitorService, "동의 또는 권한이 해제되어 중지됨")
                 running = false; stopSelf(); return
             }
+            val nowElapsed = SystemClock.elapsedRealtime()
+            val ownAppIdleNow = WritingGuard.inAppForeground &&
+                overlay == null &&
+                feedbackView == null &&
+                completionView == null &&
+                missionController.state.id == null &&
+                !reactionInProgress &&
+                !retryPending &&
+                !retryVisible &&
+                !bedtimeCareController.isDialogShowing()
+            // Fast-path while user is browsing normal ITV tabs (Home/Sleep/Character/Settings):
+            // Once the initial entry tick has paused usageClock/Jev and updated diagnostics, stay
+            // completely quiet on the main thread (no Binder IPCs, no JevState allocations, no
+            // WeeklyMailbox checks) and wake immediately via notifyOwnAppExited() or screen events.
+            if (ownAppIdleNow && ownAppIdleSettled && !diagnosticsUiActive && !LongformDiagnosticHud.isExpanded) {
+                val isUnlockedNow = unlocked()
+                if (!isUnlockedNow) {
+                    ownAppIdleSettled = false
+                } else {
+                    if (jevMode() && nowElapsed - lastOwnAppIdleJevCheckElapsed >= 30_000L) {
+                        lastOwnAppIdleJevCheckElapsed = nowElapsed
+                        jev.tick(unlocked = true, missionActive = false, offerVisible = false)
+                    }
+                    if (running) handler.postDelayed(this, 10_000L)
+                    return
+                }
+            }
+
             val currentJevMode = jevMode()
             if (lastJevMode != null && lastJevMode != currentJevMode) {
                 if (overlay == null && missionController.state.id == null) {
@@ -923,7 +975,6 @@ class CoachingMonitorService : Service() {
                 }
             }
             lastJevMode = currentJevMode
-            val nowElapsed = SystemClock.elapsedRealtime()
             val nowLandscape = isLandscapeNow()
             if (wasLandscape && !nowLandscape) {
                 handler.removeCallbacks(portraitReturnRunnable)
@@ -1002,23 +1053,45 @@ class CoachingMonitorService : Service() {
                 !retryVisible &&
                 !bedtimeCareController.isDialogShowing()
             if (!ownAppIdle) {
+                ownAppIdleSettled = false
                 updateDarkUsageAccumulation(nowElapsed, using, fgPkg)
                 maybeShowContextualPreIntervention(nowElapsed, transition = false)
                 checkNightContinuousBudget(nowElapsed)
                 checkRetry()
                 if (feedbackView != null && (!using || !canShowJevFeedback())) dismissJevFeedback()
                 maybeShowJevFeedback()
+                WeeklyMailboxNotificationCoordinator.onMonitorTick(
+                    context = this@CoachingMonitorService,
+                    scope = jevUiScope,
+                    isCoachingOverlayOrMissionActive = overlay != null ||
+                        feedbackView != null ||
+                        completionView != null ||
+                        missionController.state.id != null ||
+                        reactionInProgress ||
+                        retryPending ||
+                        retryVisible ||
+                        bedtimeCareController.isDialogShowing(),
+                    isWritingActive = isWriting,
+                    currentForegroundPkg = fgPkg,
+                )
             } else {
                 lastDarkTickElapsed = null
+                brightAmbientHoldMs = 0L
+                ownAppIdleSettled = true
+                lastOwnAppIdleJevCheckElapsed = nowElapsed
             }
             publishDiagnostics()
-            val nextTickDelayMs = if (ownAppIdle) 2500L else 1000L
+            val nextTickDelayMs = when {
+                ownAppIdle && !diagnosticsUiActive && !LongformDiagnosticHud.isExpanded -> 10_000L
+                ownAppIdle -> 2500L
+                else -> 1000L
+            }
             if (running) handler.postDelayed(this, nextTickDelayMs)
         }
     }
 
     /**
-     * 어두운 환경(lux <= 15, 센서 가림 제외) 체류 시간을 누적하고,
+     * 그림자 가드와 시간대·자세 기반 실질 암실 체류 시간을 누적·감쇠하고,
      * 자발적 휴식이 확인되면 세션 사전 개입 상태를 초기화합니다.
      */
     private fun updateDarkUsageAccumulation(now: Long, using: Boolean, fgPkg: String?) {
@@ -1038,22 +1111,24 @@ class CoachingMonitorService : Service() {
             fgPkg.startsWith("com.example.itv") ||
             JevSettings.isLauncherPackage(fgPkg) ||
             JevSettings.isExcludedSystemPackage(fgPkg)
-        val ambient = com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this).snapshot.value
-        val isOccluded = ambient.isOccluded || (ambient.isNear && (ambient.proximityDistanceCm ?: 5f) <= 1.0f)
-        val isDark = com.example.itv.domain.coaching.ContextualPreInterventionPolicy.isDarkRoom(ambient.lux, isOccluded)
+        val darkStatus = com.example.itv.infrastructure.observation.LightAndBrightnessTracker
+            .getInstance(this)
+            .evaluateEffectiveDarkRoom(nowElapsedMs = now, isTestMode = testMode())
+        val prev = lastDarkTickElapsed
+        lastDarkTickElapsed = now
+        if (prev == null) return
 
-        if (using && !isOwnOrSystem && isDark) {
-            val prev = lastDarkTickElapsed
-            if (prev != null) {
-                val delta = now - prev
-                if (delta in 1..5000L) {
-                    darkUsageAccumulatedMs += delta
-                }
-            }
-            lastDarkTickElapsed = now
-        } else {
-            lastDarkTickElapsed = null
-        }
+        val step = com.example.itv.domain.coaching.ContextualPreInterventionPolicy.stepDarkAccumulation(
+            currentDarkMs = darkUsageAccumulatedMs,
+            currentBrightHoldMs = brightAmbientHoldMs,
+            deltaMs = now - prev,
+            isActivelyUsingTargetApp = using && !isOwnOrSystem,
+            isEffectiveDark = darkStatus.isDark,
+            ambientLux = darkStatus.lux,
+            isOccluded = darkStatus.isOccluded
+        )
+        darkUsageAccumulatedMs = step.darkAccumulatedMs
+        brightAmbientHoldMs = step.brightHoldMs
     }
 
     /**
@@ -1069,8 +1144,9 @@ class CoachingMonitorService : Service() {
         if (responseController.offered || responseController.suppressed) return false
         if (responseController.retryAt != null && now < (responseController.retryAt ?: 0L)) return false
 
-        val ambient = com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this).snapshot.value
-        val isOccluded = ambient.isOccluded || (ambient.isNear && (ambient.proximityDistanceCm ?: 5f) <= 1.0f)
+        val tracker = com.example.itv.infrastructure.observation.LightAndBrightnessTracker.getInstance(this)
+        val ambient = tracker.snapshot.value
+        val darkStatus = tracker.evaluateEffectiveDarkRoom(nowElapsedMs = now, isTestMode = testMode())
         val currentContinuousMs = if (jevMode()) {
             jev.sessionState("ALL")?.continuousMs ?: jev.state.value.context?.continuousMs ?: 0L
         } else {
@@ -1082,8 +1158,8 @@ class CoachingMonitorService : Service() {
             ambient.bedtimeDistanceMinutes ?: jev.state.value.context?.bedtimePassedMinutes
         }
         val decision = com.example.itv.domain.coaching.ContextualPreInterventionPolicy.evaluate(
-            ambientLux = ambient.lux,
-            isOccluded = isOccluded,
+            ambientLux = darkStatus.lux,
+            isOccluded = darkStatus.isOccluded,
             bedtimeDistanceMinutes = resolvedBedtimeDistance,
             isPastBedtime = !ambient.hasWokenUpFromSleep &&
                 ambient.bedtimePhase == com.example.itv.infrastructure.observation.BedtimePhase.PAST_BEDTIME,
@@ -1093,7 +1169,9 @@ class CoachingMonitorService : Service() {
             darkAccumulatedMs = darkUsageAccumulatedMs,
             alreadyTriggeredInSession = preInterventionTriggeredInSession,
             isTestMode = testMode(),
-            screenBrightness = ambient.screenBrightness
+            screenBrightness = ambient.screenBrightness,
+            isLikelyShadow = darkStatus.isLikelyShadow,
+            isLyingDown = darkStatus.isLyingDown
         ) ?: return false
 
         if (isLandscapeNow()) {
@@ -1819,23 +1897,24 @@ class CoachingMonitorService : Service() {
         }
 
         if (shouldTriggerBedtimeCare) {
-            val isOccluded = ambient.isOccluded || (ambient.isNear && (ambient.proximityDistanceCm ?: 5f) <= 1.0f)
+            val darkStatus = com.example.itv.infrastructure.observation.LightAndBrightnessTracker
+                .getInstance(this)
+                .evaluateEffectiveDarkRoom(nowElapsedMs = now, isTestMode = isTest)
             val isPastBedtime = !isPreBedtime || ambient.bedtimePhase == com.example.itv.infrastructure.observation.BedtimePhase.PAST_BEDTIME
             if (com.example.itv.domain.coaching.ContextualPreInterventionPolicy.shouldPrecedeBedtimeCare(
                     isPastBedtime = isPastBedtime,
-                    ambientLux = ambient.lux,
-                    isOccluded = isOccluded,
+                    ambientLux = darkStatus.lux,
+                    isOccluded = darkStatus.isOccluded,
                     alreadyTriggeredInSession = preInterventionTriggeredInSession
                 )
             ) {
                 // 취침 시간 경과 시 전면 취침 케어 전에 약한 개입(GENTLE)을 사전 개입으로 먼저 보여줍니다.
                 val passedMin = ambient.bedtimeDistanceMinutes?.takeIf { it > 0 }
                     ?: jev.state.value.context?.bedtimePassedMinutes?.takeIf { it > 0 }
-                val isDark = com.example.itv.domain.coaching.ContextualPreInterventionPolicy.isDarkRoom(ambient.lux, isOccluded)
                 showGentlePreIntervention(
                     decision = com.example.itv.domain.coaching.ContextualPreInterventionPolicy.bedtimeCarePrecedingDecision(
                         bedtimePassedMinutes = passedMin,
-                        isDarkRoom = isDark
+                        isDarkRoom = darkStatus.isDark
                     ),
                     transition = transition
                 )

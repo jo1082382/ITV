@@ -274,9 +274,8 @@ class JevRuntime private constructor(context: Context) {
         )
         val isAll = base.packageName == "ALL"
         val includeLongform = base.packageName == JevSettings.YOUTUBE || isAll
-        val lfMetrics = if (includeLongform) {
-            com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.getJevLongformMetrics(base.observedAt)
-        } else null
+        val lfMetricsAll = com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.getJevLongformMetrics(base.observedAt)
+        val lfMetrics = if (includeLongform) lfMetricsAll else null
 
         val genSnap = com.example.itv.infrastructure.observation.GeneralAppTracker.snapshot.value
         val igMode = com.example.itv.infrastructure.observation.instagram.InstagramTracker.snapshot.value.mode
@@ -305,18 +304,17 @@ class JevRuntime private constructor(context: Context) {
 
         val ytSwipes = maxOf(
             SwipeDynamicsTracker.snapshot(ShortformApp.YOUTUBE, nowElapsed, base.observedAt).totalSwipesInRun,
-            YoutubeProbe.candidates
+            YoutubeProbe.candidates,
+            YoutubeProbe.lastRunCandidates
         )
         val igSwipes = maxOf(
             SwipeDynamicsTracker.snapshot(ShortformApp.INSTAGRAM, nowElapsed, base.observedAt).totalSwipesInRun,
-            ReelsProbe.candidates
+            ReelsProbe.candidates,
+            ReelsProbe.lastRunCandidates
         )
-        val shortformSwipeCount = when (base.packageName) {
-            JevSettings.YOUTUBE -> ytSwipes
-            JevSettings.INSTAGRAM -> igSwipes
-            "ALL" -> ytSwipes + igSwipes
-            else -> 0
-        }
+        // 숏폼 누적 스와이프 수와 롱폼 연속 전환 수는 3분 자연 휴식까지 유지되는 세션 통합 지표이므로
+        // 앱 전환이나 HUD/테스트 창 간 조회 시 동일한 값을 사용합니다.
+        val shortformSwipeCount = ytSwipes + igSwipes
 
         val resolvedAppCategory = when {
             base.packageName == JevSettings.INSTAGRAM && isReelsNow -> "SHORTFORM"
@@ -374,9 +372,110 @@ class JevRuntime private constructor(context: Context) {
             activityPhase = resolvedActivityPhase,
             audioPipelineKind = resolvedAudioPipeline,
             generalAppIdleSeconds = idleSec,
-            consecutiveLongformChainCount = lfMetrics?.consecutiveChainCount ?: 0,
+            consecutiveLongformChainCount = lfMetricsAll.consecutiveChainCount,
             shortformSwipeCount = shortformSwipeCount
         )
+    }
+
+    /**
+     * HUD와 앱 내 Jev 테스트 창이 완전히 동일한 기준 확률·보정 내역을 계산할 수 있도록
+     * 현재 평가용 [JevContext]의 단일 기준(Single Source of Truth)을 반환합니다.
+     */
+    fun currentEvaluationContext(
+        nowElapsed: Long = SystemClock.elapsedRealtime(),
+        nowWall: Long = System.currentTimeMillis()
+    ): JevContext {
+        state.value.context?.let { live ->
+            return live
+        }
+        val settings = store.settings.value
+        val allSession = tracker.states["ALL"]
+        val ytSession = tracker.states[JevSettings.YOUTUBE]
+        val igSession = tracker.states[JevSettings.INSTAGRAM]
+        val devStatus = com.example.itv.domain.coaching.DeveloperStatus.value
+        val lastCtx = lastObservedContext
+
+        val allC = allSession?.continuousMs ?: 0L
+        val sumC = (ytSession?.continuousMs ?: 0L) + (igSession?.continuousMs ?: 0L)
+        val continuousNow = maxOf(allC, maxOf(devStatus.usedMs, sumC))
+        val allLast = allSession?.lastRunContinuousMs ?: 0L
+        val sumLast = (ytSession?.lastRunContinuousMs ?: 0L) + (igSession?.lastRunContinuousMs ?: 0L)
+        val continuousLast = maxOf(allLast, maxOf(devStatus.usedMs, sumLast))
+        val continuousMs = if (continuousNow > 0L) continuousNow else maxOf(continuousLast, lastCtx?.continuousMs ?: 0L)
+
+        val allTotal = allSession?.totalMs ?: 0L
+        val sumTotal = (ytSession?.totalMs ?: 0L) + (igSession?.totalMs ?: 0L)
+        val totalMs = maxOf(allTotal, maxOf(devStatus.usedMs, maxOf(sumTotal, lastCtx?.sessionMs ?: 0L)))
+
+        val rawShortformMs = maxOf(
+            allSession?.rawShortformMs ?: 0L,
+            maxOf((ytSession?.rawShortformMs ?: 0L) + (igSession?.rawShortformMs ?: 0L), lastCtx?.rawShortformMs ?: 0L)
+        )
+        val rawMidWeightMs = maxOf(
+            allSession?.rawMidMs ?: 0L,
+            maxOf((ytSession?.rawMidMs ?: 0L) + (igSession?.rawMidMs ?: 0L), lastCtx?.rawMidWeightMs ?: 0L)
+        )
+        val rawGeneralMs = maxOf(
+            allSession?.rawGeneralMs ?: 0L,
+            maxOf((ytSession?.rawGeneralMs ?: 0L) + (igSession?.rawGeneralMs ?: 0L), lastCtx?.rawGeneralMs ?: 0L)
+        )
+        val returns = maxOf(
+            allSession?.returns?.size ?: ((ytSession?.returns?.size ?: 0) + (igSession?.returns?.size ?: 0)),
+            lastCtx?.returns10m ?: 0
+        )
+        val sessionId = lastCtx?.sessionId ?: allSession?.id ?: ytSession?.id ?: igSession?.id ?: java.util.UUID.randomUUID().toString()
+        val liveBedtime = bedtime(settings) ?: lastCtx?.bedtimePassedMinutes
+
+        val base = JevContext(
+            sessionId = sessionId,
+            packageName = lastCtx?.packageName ?: "ALL",
+            sessionMs = totalMs,
+            continuousMs = continuousMs,
+            returns10m = returns,
+            returnsObservedSeconds = lastCtx?.returnsObservedSeconds ?: 600,
+            bedtimePassedMinutes = liveBedtime,
+            observedAt = nowWall,
+            rawShortformMs = rawShortformMs,
+            rawGeneralMs = rawGeneralMs,
+            rawMidWeightMs = rawMidWeightMs
+        )
+        val enriched = enrichContext(base, nowElapsed)
+
+        // 직전 관측 화면이 숏폼(쇼츠/릴스)이었던 경우, ITV 앱(테스트 창)으로 전환한 동안에도
+        // HUD와 테스트 창이 동일한 스와이프 과열 보정(swipeDelta)을 표시하도록 직전 숏폼 동역학을 유지합니다.
+        val lastWasShortform = lastCtx != null && JevCandidatePolicy.isShortformContext(lastCtx)
+        return if (lastWasShortform && !JevCandidatePolicy.isShortformContext(enriched)) {
+            val shortApp = if (lastCtx.packageName == JevSettings.INSTAGRAM) ShortformApp.INSTAGRAM else ShortformApp.YOUTUBE
+            val swipeSnap = SwipeDynamicsTracker.snapshot(shortApp, nowElapsed, nowWall)
+            val hasSwipes = swipeSnap.totalSwipesInRun > 0 || (lastCtx.effectiveSpm1m ?: 0.0) > 0.0
+            if (hasSwipes) {
+                val effSpm1m = swipeSnap.effectiveSpm1m.takeIf { swipeSnap.totalSwipesInRun > 0 || it > 0.0 } ?: lastCtx.effectiveSpm1m
+                val effSessionSpm = swipeSnap.effectiveSessionSpm.takeIf { swipeSnap.totalSwipesInRun > 0 || it > 0.0 } ?: lastCtx.effectiveSessionSpm
+                val accel1m = swipeSnap.effectiveAccel1m.takeIf { swipeSnap.totalSwipesInRun > 0 || it != 0.0 } ?: lastCtx.swipeAccel1m
+                val streak = if (swipeSnap.totalSwipesInRun > 0) swipeSnap.currentFastStreak else lastCtx.fastSwipeStreak
+                val personalSpm = enriched.personalAvgSpm ?: lastCtx.personalAvgSpm
+                val spmRatio = if (effSpm1m != null && personalSpm != null && personalSpm >= 1.0) {
+                    kotlin.math.round((effSpm1m / personalSpm) * 100.0) / 100.0
+                } else lastCtx.currentVsPersonalSpmRatio
+                val overheated = (streak >= 3 && (effSpm1m ?: 0.0) >= 10.0) || ((effSpm1m ?: 0.0) >= 12.0 && (accel1m ?: 0.0) >= 3.0)
+                enriched.copy(
+                    appCategory = "SHORTFORM",
+                    youtubeWatchMode = lastCtx.youtubeWatchMode ?: enriched.youtubeWatchMode,
+                    effectiveSpm1m = effSpm1m,
+                    effectiveSessionSpm = effSessionSpm,
+                    personalAvgSpm = personalSpm,
+                    currentVsPersonalSpmRatio = spmRatio,
+                    swipeAccel1m = accel1m,
+                    fastSwipeStreak = streak,
+                    swipeOverheated = overheated,
+                    activityPhase = if (overheated) "FAST_SWIPING" else "BROWSING"
+                )
+            } else {
+                enriched
+            }
+        } else {
+            enriched
+        }
     }
     fun tick(unlocked: Boolean, missionActive: Boolean, offerVisible: Boolean) {
         missionActiveState.value=missionActive
@@ -1235,7 +1334,7 @@ class JevRuntime private constructor(context: Context) {
     /** Explicit operator action for a test run, never automatic on restart or settings edits. */
     fun resetTestObservation() {
         approval?.let { suppress(it.trial,"OPERATOR_RESET") };approval=null
-        com.example.itv.infrastructure.observation.youtube.YoutubeLongformTracker.resetSessionChain()
+        resetContentSwitchCounters()
         tracker.states.clear();controls.clear();lastActiveWallMs.clear();lastActiveDate.clear();safeSince=null;lastObservedContext=null;persist()
         mutableState.value=JevLiveState("테스트 관측 상태 초기화 · 재관측 필요")
     }

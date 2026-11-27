@@ -272,4 +272,187 @@ class ContextualPreInterventionPolicyTest {
             }
         }
     }
+
+    @Test
+    fun effectiveDarkRoomBlocksDaytimeHeadShadowAndAllowsBedtimeOrTestMode() {
+        // 일상 시간대·비누움 자세: 12 lx(머리/책상 그림자 구간)는 암실로 판정하지 않음 (8 lx 이하만)
+        assertFalse(
+            ContextualPreInterventionPolicy.isEffectiveDarkRoom(
+                ambientLux = 12f,
+                isOccluded = false,
+                isLikelyShadow = false,
+                isBedtimeWindow = false,
+                isLyingDown = false,
+                isTestMode = false
+            )
+        )
+        assertTrue(
+            ContextualPreInterventionPolicy.isEffectiveDarkRoom(
+                ambientLux = 8f,
+                isOccluded = false,
+                isLikelyShadow = false,
+                isBedtimeWindow = false,
+                isLyingDown = false,
+                isTestMode = false
+            )
+        )
+
+        // 취침 시간대 또는 누운 자세: 12 lx까지 암실 허용
+        assertTrue(
+            ContextualPreInterventionPolicy.isEffectiveDarkRoom(
+                ambientLux = 12f,
+                isOccluded = false,
+                isLikelyShadow = false,
+                isBedtimeWindow = true,
+                isLyingDown = false,
+                isTestMode = false
+            )
+        )
+        assertTrue(
+            ContextualPreInterventionPolicy.isEffectiveDarkRoom(
+                ambientLux = 10f,
+                isOccluded = false,
+                isLikelyShadow = false,
+                isBedtimeWindow = false,
+                isLyingDown = true,
+                isTestMode = false
+            )
+        )
+        assertFalse(
+            ContextualPreInterventionPolicy.isEffectiveDarkRoom(
+                ambientLux = 15f,
+                isOccluded = false,
+                isLikelyShadow = false,
+                isBedtimeWindow = true,
+                isLyingDown = true,
+                isTestMode = false
+            )
+        )
+
+        // 그림자 가드 발동 시 5 lx라도 암실 차단
+        assertFalse(
+            ContextualPreInterventionPolicy.isEffectiveDarkRoom(
+                ambientLux = 5f,
+                isOccluded = false,
+                isLikelyShadow = true,
+                isBedtimeWindow = true,
+                isLyingDown = true,
+                isTestMode = false
+            )
+        )
+
+        // 테스트 모드: 20 lx까지 허용하되 그림자 가드 발동 시 차단
+        assertTrue(
+            ContextualPreInterventionPolicy.isEffectiveDarkRoom(
+                ambientLux = 18f,
+                isOccluded = false,
+                isLikelyShadow = false,
+                isBedtimeWindow = false,
+                isLyingDown = false,
+                isTestMode = true
+            )
+        )
+    }
+
+    @Test
+    fun likelyShadowBlocksDarkPreInterventionButPreservesLitBedtimeWarning() {
+        // 밝은 방에서 머리 그림자로 5 lx가 찍혀도 isLikelyShadow=true면 암실 사전 개입 차단
+        val blockedDaytime = ContextualPreInterventionPolicy.evaluate(
+            ambientLux = 5f,
+            isOccluded = false,
+            bedtimeDistanceMinutes = -300,
+            isPastBedtime = false,
+            isApproachingBedtime = false,
+            continuousUsedMs = 10 * 60_000L,
+            darkAccumulatedMs = 5 * 60_000L,
+            alreadyTriggeredInSession = false,
+            screenBrightness = 180,
+            isLikelyShadow = true
+        )
+        assertNull(blockedDaytime)
+
+        // 취침 초과 + 3분 이상 사용 + isLikelyShadow=true -> 취침 경과는 울리되 '암실' 배지는 붙지 않음
+        val litPostBedtime = ContextualPreInterventionPolicy.evaluate(
+            ambientLux = 5f,
+            isOccluded = false,
+            bedtimeDistanceMinutes = 25,
+            isPastBedtime = true,
+            isApproachingBedtime = false,
+            continuousUsedMs = 3 * 60_000L,
+            darkAccumulatedMs = 2 * 60_000L,
+            alreadyTriggeredInSession = false,
+            screenBrightness = 150,
+            isLikelyShadow = true
+        )
+        assertNotNull(litPostBedtime)
+        assertEquals(PreInterventionKind.POST_BEDTIME, litPostBedtime!!.kind)
+        assertFalse(litPostBedtime.bubbleContent.badges.any { it.text.contains("암실") })
+    }
+
+    @Test
+    fun stepDarkAccumulationDecaysInShadowAndResetsQuicklyInBrightLight() {
+        // 1. 실질 암실 사용 중 누적
+        val s1 = ContextualPreInterventionPolicy.stepDarkAccumulation(
+            currentDarkMs = 20_000L,
+            currentBrightHoldMs = 0L,
+            deltaMs = 1_000L,
+            isActivelyUsingTargetApp = true,
+            isEffectiveDark = true,
+            ambientLux = 4f,
+            isOccluded = false
+        )
+        assertEquals(21_000L, s1.darkAccumulatedMs)
+        assertEquals(0L, s1.brightHoldMs)
+
+        // 2. 그림자/중간 조도(15 lx)에서는 1배속 완만 감쇠 (누적 방지)
+        val s2 = ContextualPreInterventionPolicy.stepDarkAccumulation(
+            currentDarkMs = s1.darkAccumulatedMs,
+            currentBrightHoldMs = s1.brightHoldMs,
+            deltaMs = 1_000L,
+            isActivelyUsingTargetApp = true,
+            isEffectiveDark = false,
+            ambientLux = 15f,
+            isOccluded = false
+        )
+        assertEquals(20_000L, s2.darkAccumulatedMs)
+        assertEquals(0L, s2.brightHoldMs)
+
+        // 3. 밝은 환경(>= 35 lx) 1초: 4배속 감쇠 (20s -> 16s)
+        val s3 = ContextualPreInterventionPolicy.stepDarkAccumulation(
+            currentDarkMs = s2.darkAccumulatedMs,
+            currentBrightHoldMs = s2.brightHoldMs,
+            deltaMs = 1_000L,
+            isActivelyUsingTargetApp = true,
+            isEffectiveDark = false,
+            ambientLux = 60f,
+            isOccluded = false
+        )
+        assertEquals(16_000L, s3.darkAccumulatedMs)
+        assertEquals(1_000L, s3.brightHoldMs)
+
+        // 4. 밝은 환경 누적 4초 도달 시 즉시 0으로 리셋
+        val s4 = ContextualPreInterventionPolicy.stepDarkAccumulation(
+            currentDarkMs = 50_000L,
+            currentBrightHoldMs = 3_000L,
+            deltaMs = 1_000L,
+            isActivelyUsingTargetApp = true,
+            isEffectiveDark = false,
+            ambientLux = 80f,
+            isOccluded = false
+        )
+        assertEquals(0L, s4.darkAccumulatedMs)
+        assertEquals(4_000L, s4.brightHoldMs)
+
+        // 5. deltaMs가 비정상적으로 큰 경우(예: 절전 복귀 60초) 5초로 상한 제한
+        val s5 = ContextualPreInterventionPolicy.stepDarkAccumulation(
+            currentDarkMs = 0L,
+            currentBrightHoldMs = 0L,
+            deltaMs = 60_000L,
+            isActivelyUsingTargetApp = true,
+            isEffectiveDark = true,
+            ambientLux = 2f,
+            isOccluded = false
+        )
+        assertEquals(5_000L, s5.darkAccumulatedMs)
+    }
 }

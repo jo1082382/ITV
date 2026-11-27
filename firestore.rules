@@ -1,5 +1,32 @@
 rules_version = '2';
 
+// =============================================================================
+// Assumed Data Model (Cloud Firestore Standard Edition - `(default)` database)
+// =============================================================================
+// 1. `users/{userId}` & subcollections (`profile/state`, `monthly_archives/{ym}`,
+//    `shortform_sessions/{ym}`, `shortform_daily/{ym}`):
+//    Strict per-user cloud backup for social-authenticated accounts.
+// 2. `support_admins/{adminUid}`:
+//    Server/Console-managed admin ACL. Each social user may only `get` their own
+//    document to verify admin UI visibility. All client writes are denied.
+// 3. `support_inquiries/{inquiryId}`:
+//    Customer Center 1:1 inquiries.
+//    - uid: string (1..128, immutable, == request.auth.uid)
+//    - authorProvider: 'GOOGLE'|'KAKAO'|'NAVER'|'GUEST' (immutable)
+//    - authorLabel: string (1..60, non-PII display label, immutable)
+//    - category: 'BUG'|'SUGGESTION'|'USAGE_PERMISSION'|'ACCOUNT_DATA'|'OTHER' (immutable)
+//    - title: string (2..80, immutable)
+//    - content: string (5..1000, immutable)
+//    - diagnostics: map|null (strictly typed 7 fields, immutable)
+//    - status: 'RECEIVED'|'ANSWERED' ('RECEIVED' on create; admin transitions to 'ANSWERED')
+//    - adminReply: string(1..2000)|null (null on create; admin sets on answer)
+//    - adminUid: string(1..128)|null (null on create; == admin request.auth.uid on answer)
+//    - createdAt: int epoch ms (immutable)
+//    - repliedAt: int epoch ms|null (null on create; admin sets on answer)
+//    - updatedAt: int epoch ms (>= createdAt, monotonic on update)
+//    - isReplyRead: bool (true on create; false when admin answers; owner may set true)
+// =============================================================================
+
 service cloud.firestore {
   match /databases/{database}/documents {
 
@@ -26,6 +53,19 @@ service cloud.firestore {
 
     function isOwner(userId) {
       return isSocialUser() && request.auth.uid == userId;
+    }
+
+    // Verified support admin: Firebase Auth custom claim (`admin == true`) OR
+    // server/console-managed `support_admins/{uid}` document (never client-writable).
+    function isSupportAdmin() {
+      return isSocialUser() && (
+        request.auth.token.admin == true ||
+        exists(/databases/$(database)/documents/support_admins/$(request.auth.uid))
+      );
+    }
+
+    function isValidInquiryId(inquiryId) {
+      return inquiryId is string && inquiryId.matches('^[a-zA-Z0-9_-]{8,64}$');
     }
 
     function isValidEpochMs(val) {
@@ -283,6 +323,173 @@ service cloud.firestore {
           && request.resource.data.yearMonth == resource.data.yearMonth;
         allow delete: if isOwner(userId);
       }
+    }
+
+    // -------------------------------------------------------------------------
+    // Customer Center Validators
+    // -------------------------------------------------------------------------
+    function isValidSupportDiagnostics(diag) {
+      return diag == null || (
+        diag is map
+        && diag.keys().hasOnly([
+          'appVersion',
+          'androidVersion',
+          'deviceModel',
+          'usageGranted',
+          'overlayGranted',
+          'accessibilityConnected',
+          'notificationsEnabled'
+        ])
+        && diag.keys().hasAll([
+          'appVersion',
+          'androidVersion',
+          'deviceModel',
+          'usageGranted',
+          'overlayGranted',
+          'accessibilityConnected',
+          'notificationsEnabled'
+        ])
+        && diag.appVersion is string && diag.appVersion.size() >= 1 && diag.appVersion.size() <= 32
+        && diag.androidVersion is string && diag.androidVersion.size() >= 1 && diag.androidVersion.size() <= 64
+        && diag.deviceModel is string && diag.deviceModel.size() >= 1 && diag.deviceModel.size() <= 80
+        && diag.usageGranted is bool
+        && diag.overlayGranted is bool
+        && diag.accessibilityConnected is bool
+        && diag.notificationsEnabled is bool
+      );
+    }
+
+    function isValidSupportInquiry(data) {
+      return data.keys().hasOnly([
+          'uid',
+          'authorProvider',
+          'authorLabel',
+          'category',
+          'title',
+          'content',
+          'diagnostics',
+          'status',
+          'adminReply',
+          'adminUid',
+          'createdAt',
+          'repliedAt',
+          'updatedAt',
+          'isReplyRead'
+        ])
+        && data.keys().hasAll([
+          'uid',
+          'authorProvider',
+          'authorLabel',
+          'category',
+          'title',
+          'content',
+          'diagnostics',
+          'status',
+          'adminReply',
+          'adminUid',
+          'createdAt',
+          'repliedAt',
+          'updatedAt',
+          'isReplyRead'
+        ])
+        && data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128
+        && data.authorProvider is string && data.authorProvider in ['GOOGLE', 'KAKAO', 'NAVER', 'GUEST']
+        && data.authorLabel is string && data.authorLabel.size() >= 1 && data.authorLabel.size() <= 60
+        && data.category is string && data.category in ['BUG', 'SUGGESTION', 'USAGE_PERMISSION', 'ACCOUNT_DATA', 'OTHER']
+        && data.title is string && data.title.size() >= 2 && data.title.size() <= 80
+        && data.content is string && data.content.size() >= 5 && data.content.size() <= 1000
+        && isValidSupportDiagnostics(data.diagnostics)
+        && data.status is string && data.status in ['RECEIVED', 'ANSWERED']
+        && (
+          (data.status == 'RECEIVED'
+            && data.adminReply == null
+            && data.adminUid == null
+            && data.repliedAt == null)
+          ||
+          (data.status == 'ANSWERED'
+            && data.adminReply is string && data.adminReply.size() >= 1 && data.adminReply.size() <= 2000
+            && data.adminUid is string && data.adminUid.size() >= 1 && data.adminUid.size() <= 128
+            && isValidEpochMs(data.repliedAt))
+        )
+        && isValidEpochMs(data.createdAt)
+        && isValidEpochMs(data.updatedAt)
+        && data.updatedAt >= data.createdAt
+        && data.isReplyRead is bool;
+    }
+
+    function supportInquiryUserFieldsUnchanged() {
+      return request.resource.data.uid == resource.data.uid
+        && request.resource.data.authorProvider == resource.data.authorProvider
+        && request.resource.data.authorLabel == resource.data.authorLabel
+        && request.resource.data.category == resource.data.category
+        && request.resource.data.title == resource.data.title
+        && request.resource.data.content == resource.data.content
+        && request.resource.data.diagnostics == resource.data.diagnostics
+        && request.resource.data.createdAt == resource.data.createdAt;
+    }
+
+    // -------------------------------------------------------------------------
+    // Customer Center Admin Allowlist (Firebase Console / Admin SDK only)
+    // -------------------------------------------------------------------------
+    match /support_admins/{adminUid} {
+      allow get: if isOwner(adminUid);
+      allow list: if false;
+      allow create, update, delete: if false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Customer Center 1:1 Inquiries
+    // -------------------------------------------------------------------------
+    match /support_inquiries/{inquiryId} {
+      allow read: if isSupportAdmin()
+        || (isAuthenticated() && resource.data.uid == request.auth.uid);
+
+      allow create: if isAuthenticated()
+        && isValidInquiryId(inquiryId)
+        && request.resource.data.uid == request.auth.uid
+        && (
+          (request.auth.token.firebase.sign_in_provider == 'anonymous' && request.resource.data.authorProvider == 'GUEST')
+          ||
+          (request.auth.token.firebase.sign_in_provider != 'anonymous' && request.resource.data.authorProvider in ['GOOGLE', 'KAKAO', 'NAVER', 'GUEST'])
+        )
+        && request.resource.data.status == 'RECEIVED'
+        && request.resource.data.adminReply == null
+        && request.resource.data.adminUid == null
+        && request.resource.data.repliedAt == null
+        && request.resource.data.isReplyRead == true
+        && isValidSupportInquiry(request.resource.data);
+
+      allow update: if isValidSupportInquiry(request.resource.data)
+        && supportInquiryUserFieldsUnchanged()
+        && (
+          (
+            isAuthenticated()
+            && resource.data.uid == request.auth.uid
+            && resource.data.status == 'ANSWERED'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isReplyRead', 'updatedAt'])
+            && request.resource.data.isReplyRead == true
+            && request.resource.data.updatedAt >= resource.data.updatedAt
+          )
+          ||
+          (
+            isSupportAdmin()
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'status',
+              'adminReply',
+              'adminUid',
+              'repliedAt',
+              'updatedAt',
+              'isReplyRead'
+            ])
+            && request.resource.data.status == 'ANSWERED'
+            && request.resource.data.adminUid == request.auth.uid
+            && request.resource.data.isReplyRead == false
+            && request.resource.data.updatedAt >= resource.data.updatedAt
+          )
+        );
+
+      allow delete: if isSupportAdmin()
+        || (isAuthenticated() && resource.data.uid == request.auth.uid);
     }
   }
 }

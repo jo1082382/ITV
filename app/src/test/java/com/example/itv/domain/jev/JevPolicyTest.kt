@@ -793,4 +793,41 @@ class JevPolicyTest {
         assertEquals(190_000L, afterMore.totalMs) // 60 + 60 + 70
         assertEquals(390_000L, afterMore.totalRawMs) // 60 + 120 + 210
     }
+
+    @Test fun jevPercentFormatMatchesHudAndTestWindowWithoutHalfPercentDrift() {
+        val s = JevSettings(probabilityThreshold = 0.70, personalizedEnabled = true)
+        // 12회 숏폼 스와이프: -0.5%p -> 적용 기준 69.5% (기존 정수 반올림에서는 70%와 -1%p가 충돌하던 케이스)
+        val ctx12 = JevContext(
+            sessionId = "s-fmt",
+            packageName = JevSettings.YOUTUBE,
+            sessionMs = 120_000L,
+            continuousMs = 120_000L,
+            returns10m = 0,
+            returnsObservedSeconds = 120,
+            bedtimePassedMinutes = null,
+            observedAt = 1000L,
+            quality = "VALID",
+            shortformSwipeCount = 12
+        )
+        val adj12 = JevCandidatePolicy.computeThresholdAdjustment(s, ctx12)
+        assertEquals(-0.005, adj12.shortformSwipeCountDelta, 0.0001)
+        assertEquals(0.695, adj12.effectiveThreshold, 0.0001)
+
+        val baseTenths = JevPercentFormat.toTenthsPct(s.probabilityThreshold)
+        val effTenths = JevPercentFormat.toTenthsPct(adj12.effectiveThreshold)
+        val totalDeltaTenths = effTenths - baseTenths
+        assertEquals("70", JevPercentFormat.formatTenths(baseTenths))
+        assertEquals("69.5", JevPercentFormat.formatTenths(effTenths))
+        assertEquals("-0.5%p", JevPercentFormat.formatSignedDeltaTenths(totalDeltaTenths))
+
+        // HUD 여유 격차와 테스트 창 부족 격차가 항상 정확히 부호 반대로 일치해야 함
+        val prob = 0.5434
+        val probTenths = JevPercentFormat.toTenthsPct(prob)
+        val hudGapTenths = effTenths - probTenths
+        val testDiffTenths = probTenths - effTenths
+        assertEquals("54.3", JevPercentFormat.formatTenths(probTenths))
+        assertEquals("15.2", JevPercentFormat.formatTenths(hudGapTenths))
+        assertEquals("-15.2%p", JevPercentFormat.formatSignedDeltaTenths(testDiffTenths))
+        assertEquals(effTenths, probTenths + hudGapTenths)
+    }
 }

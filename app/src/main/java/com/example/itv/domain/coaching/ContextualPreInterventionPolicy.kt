@@ -29,10 +29,21 @@ data class PreInterventionDecision(
 )
 
 object ContextualPreInterventionPolicy {
-    /** 전 모듈(조도 트래커·사전 개입·Jev 임계값·말풍선 사유) 공통 암실 조도 기준 (20 lx 이하) */
+    /** 전 모듈(Jev 연속 암실 강도·호환 기준) 공통 암실 조도 상한 (20 lx 이하) */
     const val DARK_LUX_THRESHOLD = 20f
     /** 완전 암실 기준 (5 lx 이하 → 암실 강도 100%) */
     const val FULL_DARK_LUX_THRESHOLD = 5f
+    /** 그림자 오판정 방지: 일상 시간대·비누움 자세의 실질 암실 기준 (8 lx 이하 — 10~20 lx 머리/책상 그림자 차단) */
+    const val SHADOW_SAFE_DARK_LUX_DAYTIME = 8f
+    /** 그림자 오판정 방지: 취침 전후(±1시간/경과) 또는 누운 자세의 실질 암실 기준 (12 lx 이하) */
+    const val SHADOW_SAFE_DARK_LUX_BEDTIME = 12f
+    /** 밝은 환경 복귀(히스테리시스 이탈) 기준 (35 lx 이상 감지 시 암실 누적 빠른 감쇠·초기화) */
+    const val BRIGHT_EXIT_LUX_THRESHOLD = 35f
+    /** 밝은 환경이 이 시간 이상 지속되면 누적 암실 시간을 즉시 0으로 초기화 (4초) */
+    const val BRIGHT_RESET_HOLD_MS = 4_000L
+    /** 밝은 환경에서 누적 암실 시간을 차감하는 배속 (1초당 4초 차감) */
+    const val BRIGHT_DECAY_MULTIPLIER = 4L
+
     /** 어두운 화면 / 밝은 화면 경계 기준 (0..255 중 75 이하 = 어두운 화면, 76 이상 = 밝은 화면) */
     const val DARK_SCREEN_BRIGHTNESS_THRESHOLD = 75
     /** 취침 준비 시간 범위 (추정/추천/목표 취침 시각 전 60분 이내) */
@@ -74,8 +85,83 @@ object ContextualPreInterventionPolicy {
     const val BEDTIME_CARE_GRACE_MS = 2 * 60_000L
     const val TEST_BEDTIME_CARE_GRACE_MS = 15_000L
 
+    /** 단일 조도 기준 호환 헬퍼 (Jev 연속 감점 모델 등과 기준 동기화) */
     fun isDarkRoom(ambientLux: Float?, isOccluded: Boolean): Boolean {
         return !isOccluded && ambientLux != null && ambientLux <= DARK_LUX_THRESHOLD
+    }
+
+    /**
+     * 그림자 가드(최근 밝은 환경 이력) + 시간대 + 자세를 종합한 실질 암실 판정.
+     * - 밝은 실내에서 머리/책상 그림자로 조도가 10~20 lx로 떨어져도 암실로 오판정하지 않습니다.
+     * - 테스트 모드에서는 빠른 검증을 위해 기존 20 lx 기준을 유지하되, 그림자 가드가 명확한 경우만 제외합니다.
+     */
+    fun isEffectiveDarkRoom(
+        ambientLux: Float?,
+        isOccluded: Boolean,
+        isLikelyShadow: Boolean = false,
+        isBedtimeWindow: Boolean = false,
+        isLyingDown: Boolean = false,
+        isTestMode: Boolean = false
+    ): Boolean {
+        if (isOccluded || ambientLux == null || !ambientLux.isFinite()) return false
+        if (isLikelyShadow) return false
+        val threshold = when {
+            isTestMode -> DARK_LUX_THRESHOLD
+            isBedtimeWindow || isLyingDown -> SHADOW_SAFE_DARK_LUX_BEDTIME
+            else -> SHADOW_SAFE_DARK_LUX_DAYTIME
+        }
+        return ambientLux <= threshold
+    }
+
+    data class DarkAccumulationStep(
+        val darkAccumulatedMs: Long,
+        val brightHoldMs: Long
+    )
+
+    /**
+     * 암실 체류 시간 누적·감쇠·밝기 리셋을 한 번에 계산하는 순수 상태 전이 함수.
+     * - 실질 암실 사용 중: `deltaMs` 누적, 밝은 유지 타이머 0 초기화
+     * - 밝은 환경(>= 35 lx): 4초 이상 지속 시 즉시 0 리셋, 그 전에는 4배속 감쇠
+     * - 그늘/중간 조도/센서 가림 등 비암실: 1배속 완만 감쇠 (간헐적 그림자 누적 방지)
+     */
+    fun stepDarkAccumulation(
+        currentDarkMs: Long,
+        currentBrightHoldMs: Long,
+        deltaMs: Long,
+        isActivelyUsingTargetApp: Boolean,
+        isEffectiveDark: Boolean,
+        ambientLux: Float?,
+        isOccluded: Boolean
+    ): DarkAccumulationStep {
+        val dt = deltaMs.coerceIn(0L, 5_000L)
+        if (dt == 0L) return DarkAccumulationStep(currentDarkMs, currentBrightHoldMs)
+
+        if (isActivelyUsingTargetApp && isEffectiveDark) {
+            return DarkAccumulationStep(
+                darkAccumulatedMs = currentDarkMs + dt,
+                brightHoldMs = 0L
+            )
+        }
+
+        val isBrightAmbient = !isOccluded && ambientLux != null && ambientLux >= BRIGHT_EXIT_LUX_THRESHOLD
+        if (isBrightAmbient) {
+            val nextBright = currentBrightHoldMs + dt
+            val nextDark = if (nextBright >= BRIGHT_RESET_HOLD_MS) {
+                0L
+            } else {
+                (currentDarkMs - dt * BRIGHT_DECAY_MULTIPLIER).coerceAtLeast(0L)
+            }
+            return DarkAccumulationStep(
+                darkAccumulatedMs = nextDark,
+                brightHoldMs = nextBright
+            )
+        }
+
+        // 그림자 가드 차단 / 중간 조도(9~34 lx) / 비대상 앱: 누적되지 않고 완만히 감쇠
+        return DarkAccumulationStep(
+            darkAccumulatedMs = (currentDarkMs - dt).coerceAtLeast(0L),
+            brightHoldMs = 0L
+        )
     }
 
     fun isBrightScreenInDark(screenBrightness: Int?): Boolean {
@@ -87,7 +173,7 @@ object ContextualPreInterventionPolicy {
     }
 
     /**
-     * 현재 환경·화면 밝기·취침 시간대·누적 사용량을 평가해
+     * 현재 환경·화면 밝기·취침 시간대·자세·그림자 여부·누적 사용량을 평가해
      * 주 개입 전 사전 개입(약하게)을 띄울지 결정합니다.
      * 한 세션(휴식 전)에서는 최대 1회만 발동합니다.
      */
@@ -101,13 +187,13 @@ object ContextualPreInterventionPolicy {
         darkAccumulatedMs: Long,
         alreadyTriggeredInSession: Boolean,
         isTestMode: Boolean = false,
-        screenBrightness: Int? = null
+        screenBrightness: Int? = null,
+        isLikelyShadow: Boolean = false,
+        isLyingDown: Boolean = false
     ): PreInterventionDecision? {
         if (alreadyTriggeredInSession) return null
         if (isOccluded) return null
 
-        val isDark = isDarkRoom(ambientLux, isOccluded)
-        val isBrightScreen = isBrightScreenInDark(screenBrightness)
         val maxPostMin = com.example.itv.domain.sleep.SleepWakeCyclePolicy.MAX_POST_BEDTIME_MINUTES
         val postBedtime = isPastBedtime ||
             (bedtimeDistanceMinutes != null && bedtimeDistanceMinutes in 0..maxPostMin)
@@ -115,6 +201,15 @@ object ContextualPreInterventionPolicy {
             isApproachingBedtime ||
                 (bedtimeDistanceMinutes != null && bedtimeDistanceMinutes in -PRE_BEDTIME_PREP_WINDOW_MINUTES..-1)
             )
+        val isDark = isEffectiveDarkRoom(
+            ambientLux = ambientLux,
+            isOccluded = false,
+            isLikelyShadow = isLikelyShadow,
+            isBedtimeWindow = postBedtime || preBedtimePrep,
+            isLyingDown = isLyingDown,
+            isTestMode = isTestMode
+        )
+        val isBrightScreen = isBrightScreenInDark(screenBrightness)
         val passedMin = if (postBedtime) bedtimeDistanceMinutes?.takeIf { it > 0 } else null
         val remainMin = bedtimeDistanceMinutes?.takeIf { it in -PRE_BEDTIME_PREP_WINDOW_MINUTES..-1 }?.let { -it }
 

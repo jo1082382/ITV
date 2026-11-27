@@ -13,10 +13,21 @@ import com.example.itv.MainActivity
 import com.example.itv.presentation.auth.AccountSettingsScreen
 import com.example.itv.presentation.coaching.CoachingSettingsScreen
 import com.example.itv.composition.AuthComposition
+import com.example.itv.domain.support.FaqCategory
+import com.example.itv.domain.support.SupportTab
 import com.example.itv.presentation.permissions.PermissionSettingsActivity
+import com.example.itv.infrastructure.coaching.MailboxNavigationBus
+import com.example.itv.infrastructure.coaching.WeeklyMailboxStore
+import com.example.itv.infrastructure.support.SupportFirestoreRepository
+import com.example.itv.infrastructure.support.SupportInquiryStore
 import com.example.itv.infrastructure.theme.UserThemeStore
+import com.example.itv.presentation.mailbox.MailboxHeaderIcon
+import com.example.itv.presentation.mailbox.WeeklyMailboxDialog
+import com.example.itv.presentation.support.AdminSupportCenterScreen
+import com.example.itv.presentation.support.SupportCenterScreen
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -78,8 +89,9 @@ import com.example.itv.presentation.usage.StampRitualRequest
 import com.example.itv.presentation.usage.stampInkColor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.LocalDate
 import java.time.YearMonth
@@ -103,14 +115,41 @@ fun ItvMainScreen(
     val rootContext = LocalContext.current
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
     BackHandler(enabled = settingsOpen) { settingsOpen = false }
+    var mailboxOpen by rememberSaveable { mutableStateOf(false) }
+    BackHandler(enabled = mailboxOpen) { mailboxOpen = false }
     var showAccountSettings by rememberSaveable { mutableStateOf(false) }
     BackHandler(enabled = showAccountSettings) { showAccountSettings = false }
     var showCoachingSettings by rememberSaveable { mutableStateOf(false) }
     BackHandler(enabled = showCoachingSettings) { showCoachingSettings = false }
+    var showSupportCenter by rememberSaveable { mutableStateOf(false) }
+    var supportInitialTab by rememberSaveable { mutableStateOf(SupportTab.FAQ) }
+    var supportInitialFaqCategory by rememberSaveable { mutableStateOf(FaqCategory.ALL) }
+    BackHandler(enabled = showSupportCenter) { showSupportCenter = false }
+    var showAdminSupportCenter by rememberSaveable { mutableStateOf(false) }
+    BackHandler(enabled = showAdminSupportCenter) { showAdminSupportCenter = false }
     var showCoaching by rememberSaveable { mutableStateOf(false) }
-    BackHandler(enabled = !settingsOpen && !showAccountSettings && !showCoachingSettings && (activeTab != "home" || showCoaching)) {
+    BackHandler(enabled = !settingsOpen && !mailboxOpen && !showAccountSettings && !showCoachingSettings && !showSupportCenter && !showAdminSupportCenter && (activeTab != "home" || showCoaching)) {
         if (showCoaching) showCoaching = false else onSelectTab("home")
     }
+    // Deferred lightweight sync for Customer Center replies & admin flag (keeps cold start at 0 extra work)
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay(2_000L)
+        SupportInquiryStore.refreshFromCloud(rootContext)
+    }
+    // Isolate notification-tap navigation bus into a leaf composable so ItvMainScreen itself
+    // does not recompose when MailboxNavigationBus or WeeklyMailboxStore.letters emits.
+    MailboxNavigationEffect(
+        onOpenMailbox = {
+            settingsOpen = false
+            showAccountSettings = false
+            showCoachingSettings = false
+            showSupportCenter = false
+            showAdminSupportCenter = false
+            showCoaching = false
+            onSelectTab("home")
+            mailboxOpen = true
+        }
+    )
 
     // Full-screen "도장 쾅!" stamp ritual state & once-per-day morning auto-launch for yesterday
     var activeStampRitual by remember { mutableStateOf<StampRitualRequest?>(null) }
@@ -131,13 +170,20 @@ fun ItvMainScreen(
         this?.takeIf { it.isAttached }?.boundsInRoot()?.takeUnless { it.isEmpty }
     fun resolveCalendarCellBounds(date: LocalDate): Rect? = calendarCellBoundsResolverRef[0]?.invoke(date)
 
-    // Trigger morning stamp check on BOTH cold start and returning from background on a new day
+    // Trigger morning stamp check & day sync only when needed (avoid full-tree recomposition on every resume)
     val rootLifecycleOwner = LocalLifecycleOwner.current
+    val lastResumedDateRef = remember { arrayOfNulls<LocalDate>(1) }
     DisposableEffect(rootLifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                resumeTick++
-                morningCheckTick++
+                val today = LocalDate.now()
+                if (lastResumedDateRef[0] != today) {
+                    lastResumedDateRef[0] = today
+                    resumeTick++
+                }
+                if (!DailyStampPrefs.hasAutoRitualShownForToday(rootContext, today)) {
+                    morningCheckTick++
+                }
             }
         }
         rootLifecycleOwner.lifecycle.addObserver(observer)
@@ -153,12 +199,20 @@ fun ItvMainScreen(
         }
     }
 
-    // Delayed low-priority background backfill of recent 24-hour usage distributions (throttled to 30m, 0 UI impact)
+    // Load mailbox letters off the main thread on first start
+    LaunchedEffect(Unit) {
+        runCatching { WeeklyMailboxStore.loadIfNeeded(rootContext) }
+    }
+
+    // Delayed low-priority background backfill of recent 24-hour usage distributions + Monday weekly letter check (0 UI impact)
     LaunchedEffect(resumeTick) {
         if (resumeTick == 0) return@LaunchedEffect
         delay(1800L)
         runCatching {
             MonthlyUsageArchiveStore.backfillRecentHourlyIfNeeded(rootContext)
+        }
+        runCatching {
+            WeeklyMailboxStore.ensureMondayLettersDelivered(rootContext)
         }
     }
 
@@ -271,17 +325,37 @@ fun ItvMainScreen(
 
     // 스크롤 중이거나 드로어·설정·도장 의식 오버레이 표시 중에는 계절 파티클을 0fps로 정지해 CPU/GPU 부하 차단
     val seasonalAnimController = remember { SeasonalAnimationController() }
-    val shouldPauseSeasonal = settingsOpen || showAccountSettings || showCoachingSettings || activeStampRitual != null
+    val seasonMode = UserThemeStore.rememberSeasonMode()
+    val hasActiveSeasonalMotion = remember(seasonMode) {
+        UserThemeStore.resolveActiveSeason(seasonMode) != com.example.itv.infrastructure.theme.SeasonThemeMode.OFF
+    }
+    val shouldPauseSeasonal = settingsOpen || mailboxOpen || showAccountSettings || showCoachingSettings || showSupportCenter || showAdminSupportCenter || activeStampRitual != null
     LaunchedEffect(shouldPauseSeasonal) {
         seasonalAnimController.overlayPaused = shouldPauseSeasonal
     }
+    // 홈/취침 탭 스크롤 시 단일 공유 시계를 즉시 일시정지 (Compose 재구성 0회)
+    LaunchedEffect(homeListState, sleepListState, seasonalAnimController, hasActiveSeasonalMotion) {
+        if (!hasActiveSeasonalMotion) {
+            seasonalAnimController.scrollPaused = false
+            return@LaunchedEffect
+        }
+        snapshotFlow { homeListState.isScrollInProgress || sleepListState.isScrollInProgress }
+            .distinctUntilChanged()
+            .collect { scrolling -> seasonalAnimController.scrollPaused = scrolling }
+    }
+    SeasonalClockDriver(
+        controller = seasonalAnimController,
+        active = hasActiveSeasonalMotion,
+        frameIntervalMs = 66L
+    )
 
     // Outer MainActivity Scaffold already handles system bar insets.
     CompositionLocalProvider(LocalSeasonalAnimationController provides seasonalAnimController) {
     ItvSeasonalBackground(
-        modifier
+        modifier = modifier
             .fillMaxSize()
-            .onPlaced { overlayRootCoordsRef[0] = it }
+            .onPlaced { overlayRootCoordsRef[0] = it },
+        seasonMode = seasonMode
     ) {
     Scaffold(
         modifier = Modifier.fillMaxSize(),
@@ -298,35 +372,9 @@ fun ItvMainScreen(
                 ) {
                     val isDark = LocalDarkTheme.current
                     val context = LocalContext.current
-                    ItvTactileButton(
-                        onClick = { UserThemeStore.toggleDarkMode(context) },
-                        modifier = Modifier.size(68.dp),
-                        shape = RoundedCornerShape(18.dp),
-                        containerColor = ItvCardSurface,
-                        contentColor = if (isDark) Color(0xFFFFD54F) else ItvGreen,
-                        borderColor = ItvInkBorder,
-                        shadowColor = ItvInkShadow,
-                        borderWidth = 1.8.dp,
-                        shadowOffsetX = 1.5.dp,
-                        shadowOffsetY = 3.5.dp
-                    ) {
-                        Column(
-                            Modifier.fillMaxSize(),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center
-                        ) {
-                            Text(
-                                if (isDark) "☀️" else "🌙",
-                                style = MaterialTheme.typography.headlineSmall
-                            )
-                            Text(
-                                if (isDark) "라이트" else "다크",
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = if (isDark) Color(0xFFFFD54F) else ItvGreen
-                            )
-                        }
-                    }
+                    HomeMailboxTopBarButton(
+                        onClick = { mailboxOpen = true }
+                    )
 
                     // 홈 화면 중앙: 실시간 플로팅 HUD 버튼 (접근성 + 다른 앱 위에 표시 둘 다 켜져야 활성화)
                     var hasHudPermissions by remember {
@@ -565,18 +613,53 @@ fun ItvMainScreen(
         }
     }
     // Piece 3: Subtle touch-passthrough foreground snow / petals / autumn leaves / summer sun glints
-    ItvSeasonalForegroundOverlay(modifier = Modifier.fillMaxSize())
+    ItvSeasonalForegroundOverlay(
+        modifier = Modifier.fillMaxSize(),
+        seasonMode = seasonMode
+    )
     HomeSettingsDrawer(
         open = settingsOpen,
         onClose = { settingsOpen = false },
         onOpenGoals = onOpenGoals,
         onOpenAccountSettings = { showAccountSettings = true },
-        onOpenCoachingSettings = { showCoachingSettings = true }
+        onOpenCoachingSettings = { showCoachingSettings = true },
+        onOpenSupportCenter = {
+            supportInitialTab = SupportTab.FAQ
+            supportInitialFaqCategory = FaqCategory.ALL
+            showSupportCenter = true
+        },
+        onOpenAdminSupportCenter = { showAdminSupportCenter = true }
     )
+
+    if (mailboxOpen) {
+        WeeklyMailboxDialogHost(
+            onOpenSupportCenter = { tab ->
+                mailboxOpen = false
+                supportInitialTab = tab
+                supportInitialFaqCategory = FaqCategory.ALL
+                showSupportCenter = true
+            },
+            onDismiss = { mailboxOpen = false }
+        )
+    }
 
     if (showCoachingSettings) {
         CoachingSettingsScreen(
             onNavigateBack = { showCoachingSettings = false }
+        )
+    }
+
+    if (showSupportCenter) {
+        SupportCenterScreen(
+            onNavigateBack = { showSupportCenter = false },
+            initialTab = supportInitialTab,
+            initialFaqCategory = supportInitialFaqCategory
+        )
+    }
+
+    if (showAdminSupportCenter) {
+        AdminSupportCenterScreen(
+            onNavigateBack = { showAdminSupportCenter = false }
         )
     }
 
@@ -1382,7 +1465,9 @@ private fun HomeSettingsDrawer(
     onClose: () -> Unit,
     onOpenGoals: () -> Unit,
     onOpenAccountSettings: () -> Unit,
-    onOpenCoachingSettings: () -> Unit
+    onOpenCoachingSettings: () -> Unit,
+    onOpenSupportCenter: () -> Unit,
+    onOpenAdminSupportCenter: () -> Unit
 ) {
     // Unmount the drawer & BoxWithConstraints completely once closed (zero idle subcomposition cost)
     val visibleState = remember { MutableTransitionState(open) }
@@ -1391,6 +1476,17 @@ private fun HomeSettingsDrawer(
 
     val context = LocalContext.current
     val development = (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+    val appVersion = remember(context) { SupportInquiryStore.resolveAppVersionName(context) }
+    val supportInquiries by SupportInquiryStore.inquiries.collectAsState()
+    val unreadReplyCount = remember(supportInquiries) { supportInquiries.count { it.hasUnreadReply } }
+    val isSupportAdmin by SupportInquiryStore.isAdmin.collectAsState()
+
+    LaunchedEffect(open) {
+        if (open) {
+            SupportInquiryStore.refreshAdminFlag()
+        }
+    }
+
     AnimatedVisibility(visibleState = visibleState, enter = fadeIn(tween(240)), exit = fadeOut(tween(240))) {
         Surface(Modifier.fillMaxSize().clickable(
             interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClose
@@ -1456,6 +1552,65 @@ private fun HomeSettingsDrawer(
                         onClose()
                         context.startActivity(Intent(context, PermissionSettingsActivity::class.java).putExtra("initial_page", 1).putExtra("permissions_only", true))
                     }
+
+                    HorizontalDivider(
+                        modifier = Modifier.padding(top = 4.dp),
+                        thickness = 1.2.dp,
+                        color = ItvInkBorder.copy(alpha = 0.28f)
+                    )
+                    Text(
+                        text = "지원 및 안내",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 4.dp)
+                    )
+                    DrawerSettingItem(
+                        title = "고객센터",
+                        detail = "자주 묻는 질문(FAQ) · 1:1 문의 · 내 문의 내역",
+                        badgeText = if (unreadReplyCount > 0) "답변 $unreadReplyCount" else null
+                    ) {
+                        onClose()
+                        onOpenSupportCenter()
+                    }
+                    if (isSupportAdmin) {
+                        DrawerSettingItem(
+                            title = "관리자 고객센터",
+                            detail = "접수된 1:1 문의 조회 및 답변 관리",
+                            badgeText = "ADMIN"
+                        ) {
+                            onClose()
+                            onOpenAdminSupportCenter()
+                        }
+                    }
+                    if (development && !isSupportAdmin) {
+                        val currentUid = SupportFirestoreRepository.currentFirebaseUid()
+                        if (!currentUid.isNullOrBlank()) {
+                            TextButton(
+                                onClick = {
+                                    val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                                    cm?.setPrimaryClip(android.content.ClipData.newPlainText("Firebase UID", currentUid))
+                                    Toast.makeText(context, "관리자 등록용 UID 복사됨: ${currentUid.take(12)}…", Toast.LENGTH_SHORT).show()
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = "DEV · 관리자 등록용 UID 복사 (${currentUid.take(8)}…)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                    Text(
+                        text = "ITV v$appVersion",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 4.dp, bottom = 6.dp),
+                        textAlign = TextAlign.Center
+                    )
                 }
             }
         }
@@ -1463,7 +1618,12 @@ private fun HomeSettingsDrawer(
 }
 
 @Composable
-private fun DrawerSettingItem(title: String, detail: String, onClick: () -> Unit) {
+private fun DrawerSettingItem(
+    title: String,
+    detail: String,
+    badgeText: String? = null,
+    onClick: () -> Unit
+) {
     ItvTactileButton(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth(),
@@ -1477,10 +1637,129 @@ private fun DrawerSettingItem(title: String, detail: String, onClick: () -> Unit
     ) {
         Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = ItvGreen)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = ItvGreen)
+                    if (badgeText != null) {
+                        Surface(
+                            shape = RoundedCornerShape(999.dp),
+                            color = if (badgeText == "ADMIN") ItvGreen else Color(0xFFC8433A)
+                        ) {
+                            Text(
+                                text = badgeText,
+                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color.White
+                            )
+                        }
+                    }
+                }
                 Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Text("›", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = ItvGreen)
         }
     }
 }
+
+@Composable
+private fun MailboxNavigationEffect(
+    onOpenMailbox: () -> Unit,
+) {
+    val latestOnOpen by rememberUpdatedState(onOpenMailbox)
+    val openMailboxNonce by MailboxNavigationBus.openMailboxNonce.collectAsState()
+    var lastConsumedMailboxNonce by rememberSaveable { mutableIntStateOf(0) }
+    LaunchedEffect(openMailboxNonce) {
+        if (openMailboxNonce > lastConsumedMailboxNonce) {
+            lastConsumedMailboxNonce = openMailboxNonce
+            latestOnOpen()
+        }
+    }
+}
+
+@Composable
+private fun HomeMailboxTopBarButton(
+    onClick: () -> Unit,
+) {
+    val isDark = LocalDarkTheme.current
+    val letters by WeeklyMailboxStore.letters.collectAsState()
+    val unreadCount = remember(letters) { letters.count { !it.isRead } }
+
+    Box(modifier = Modifier.size(68.dp)) {
+        ItvTactileButton(
+            onClick = onClick,
+            modifier = Modifier.fillMaxSize(),
+            shape = RoundedCornerShape(18.dp),
+            containerColor = ItvCardSurface,
+            contentColor = ItvGreen,
+            borderColor = if (unreadCount > 0) Color(0xFFC8433A) else ItvInkBorder,
+            shadowColor = ItvInkShadow,
+            borderWidth = 1.8.dp,
+            shadowOffsetX = 1.5.dp,
+            shadowOffsetY = 3.5.dp,
+        ) {
+            Column(
+                Modifier.fillMaxSize(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                MailboxHeaderIcon(
+                    hasUnread = unreadCount > 0,
+                    modifier = Modifier.size(35.dp),
+                )
+                Text(
+                    "우편함",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = if (unreadCount > 0) {
+                        if (isDark) Color(0xFFFF8A80) else Color(0xFFB7362D)
+                    } else {
+                        ItvGreen
+                    },
+                )
+            }
+        }
+        if (unreadCount > 0) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .offset(x = 4.dp, y = (-4).dp)
+                    .size(20.dp)
+                    .background(Color(0xFFC8433A), CircleShape)
+                    .border(1.5.dp, ItvInkBorder, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = if (unreadCount > 9) "9+" else unreadCount.toString(),
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = Color.White,
+                    maxLines = 1,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun WeeklyMailboxDialogHost(
+    onOpenSupportCenter: (SupportTab) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val letters by WeeklyMailboxStore.letters.collectAsState()
+    WeeklyMailboxDialog(
+        letters = letters,
+        onMarkAsRead = { letterId ->
+            scope.launch {
+                WeeklyMailboxStore.markAsRead(context, letterId)
+            }
+        },
+        onOpenSupportCenter = onOpenSupportCenter,
+        onDismiss = onDismiss,
+    )
+}
+

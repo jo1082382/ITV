@@ -18,6 +18,7 @@ import com.example.itv.infrastructure.auth.LocalSessionStore
 import com.example.itv.infrastructure.auth.NaverAuthClient
 import com.example.itv.infrastructure.auth.SocialCustomTokenClient
 import com.example.itv.infrastructure.coaching.UserCoachingSettingsStore
+import com.example.itv.infrastructure.coaching.WeeklyMailboxStore
 import com.example.itv.infrastructure.equip.UserEquipStore
 import com.example.itv.infrastructure.goals.RoomGoalStore
 import com.example.itv.infrastructure.reward.CalendarRewardStore
@@ -449,6 +450,24 @@ object CloudSyncRepository {
                     )
                 }
 
+                // 2.5 Rebuild weekly coach mailbox letters from restored 6-month archive + cloud read states
+                val restoredGoalsJson = profileSnap.getString("goalsJson")
+                if (!restoredGoalsJson.isNullOrBlank()) {
+                    val mailboxMeta = runCatching {
+                        JSONObject(restoredGoalsJson).optJSONObject("weeklyMailbox")
+                    }.getOrNull()
+                    if (mailboxMeta != null) {
+                        runCatching {
+                            WeeklyMailboxStore.restoreFromCloudMetadata(
+                                context = appCtx,
+                                metadata = mailboxMeta,
+                                mergeWithLocal = mergeWithLocal,
+                                today = today
+                            )
+                        }
+                    }
+                }
+
                 // 3. Restore 6-month shortform personal sessions
                 val cloudSessions = mutableListOf<ShortformPersonalStatsStore.SessionRecord>()
                 for (doc in sessionsSnap.documents) {
@@ -604,6 +623,8 @@ object CloudSyncRepository {
                     chunk.forEach { ref -> batch.delete(ref) }
                     batch.commit().awaitTask()
                 }
+                // Also delete any Customer Center inquiries owned by this user while Auth token is valid
+                com.example.itv.infrastructure.support.SupportFirestoreRepository.deleteAllUserInquiries(uid)
                 Log.i(TAG, "Deleted ${refsToDelete.size} Firestore documents for uid=$uid")
             }
         }
@@ -818,6 +839,12 @@ object CloudSyncRepository {
                         .put("packageName", v.scopePackageName ?: JSONObject.NULL)
                 )
             }
+        }
+
+        // Embed compact weekly coach mailbox metadata (delivered & read week keys)
+        val mailboxMeta = runCatching { WeeklyMailboxStore.exportCloudMetadata(appCtx) }.getOrNull()
+        if (mailboxMeta != null) {
+            obj.put("weeklyMailbox", mailboxMeta)
         }
 
         // Embed streak shields, best streak, protected dates & monthly claimed chests inside goalsJson

@@ -50,7 +50,6 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.abs
-import kotlin.math.roundToInt
 
 /**
  * YouTube, Instagram 및 휴대폰의 모든 앱 화면 위에서 실시간 감지 상태
@@ -88,8 +87,21 @@ object LongformDiagnosticHud {
     private var lastAppliedStatusColor: Int? = null
     private var lastOutsideObserveElapsed: Long = 0L
     private var outsideTouchWatchEnabled: Boolean = true
+    @Volatile private var dormantOwnAppRendered: Boolean = false
+    private var lastAppContext: Context? = null
     private var cachedPowerManager: PowerManager? = null
     private var cachedKeyguardManager: KeyguardManager? = null
+
+    fun notifyOwnAppExited() {
+        dormantOwnAppRendered = false
+        val appCtx = lastAppContext ?: return
+        if (!isShowing) return
+        scope?.launch {
+            if (isShowing) {
+                renderHud(appCtx)
+            }
+        }
+    }
 
     private fun TextView?.setTextIfChanged(newText: CharSequence) {
         if (this != null && this.text?.toString() != newText.toString()) {
@@ -614,6 +626,8 @@ object LongformDiagnosticHud {
 
         // 가벼운 UI 갱신 루프 (dirty-check로 실제 변경이 없으면 오버레이 리드로우 0회)
         outsideTouchWatchEnabled = true
+        dormantOwnAppRendered = false
+        lastAppContext = appCtx
         scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
         scope?.launch {
             while (isActive) {
@@ -621,7 +635,8 @@ object LongformDiagnosticHud {
                     hide()
                     break
                 }
-                val inOwnApp = JevObservationHub.foregroundPackage == appCtx.packageName
+                val inOwnApp = WritingGuard.inAppForeground ||
+                    JevObservationHub.foregroundPackage == appCtx.packageName
                 // ITV 내부 화면(홈/캘린더 스크롤 등)에서는 FLAG_WATCH_OUTSIDE_TOUCH 자체를 꺼서
                 // 모든 터치마다 InputDispatcher -> HUD 오버레이 IPC(ACTION_OUTSIDE)가 발생하지 않도록 차단
                 val shouldWatchOutside = !inOwnApp
@@ -639,9 +654,19 @@ object LongformDiagnosticHud {
                         try { curWm.updateViewLayout(curRoot, curParams) } catch (_: Exception) {}
                     }
                 }
-                renderHud(appCtx)
+                if (inOwnApp && !isExpanded) {
+                    // ITV 내부에서 접힌 작은 아이콘 상태일 때는 최초 1회만 그린 뒤
+                    // 메인 스레드 currentEvaluationContext() / Binder IPC / 재드로우를 완전히 생략
+                    if (!dormantOwnAppRendered) {
+                        renderHud(appCtx)
+                        dormantOwnAppRendered = true
+                    }
+                } else {
+                    dormantOwnAppRendered = false
+                    renderHud(appCtx)
+                }
                 val intervalMs = when {
-                    inOwnApp && !isExpanded -> 2000L
+                    inOwnApp && !isExpanded -> 3000L
                     inOwnApp && isExpanded -> 1000L
                     isExpanded -> 500L
                     else -> 1000L
@@ -658,6 +683,7 @@ object LongformDiagnosticHud {
                     .distinctUntilChanged()
                     .collect {
                         if (isShowing) {
+                            dormantOwnAppRendered = false
                             renderHud(appCtx)
                         }
                     }
@@ -697,6 +723,7 @@ object LongformDiagnosticHud {
         }
 
         if (expand) {
+            dormantOwnAppRendered = false
             renderHud(appCtx)
         }
     }
@@ -747,14 +774,15 @@ object LongformDiagnosticHud {
             lastAppliedStatusColor = statusColor
         }
 
-        // Jev 확률 vs 우리 앱 보정 기준 확률 차이에 따른 5단계 표정 계산 (순수 인메모리 StateFlow 조회)
+        // Jev 확률 vs 우리 앱 보정 기준 확률 차이에 따른 5단계 표정 계산 (앱 내 테스트 창과 동일한 단일 기준 컨텍스트 사용)
         val jevRuntime = if (JevFeature.available()) runCatching { JevRuntime.get(appCtx) }.getOrNull() else null
         val jevEnabled = jevRuntime?.enabled == true
         val jevState = jevRuntime?.state?.value
         val jevSettings = jevRuntime?.store?.settings?.value
         val jevProb = jevState?.probability
+        val evalCtx = if (jevEnabled) jevRuntime.currentEvaluationContext() else null
         val effThreshold = jevSettings?.let {
-            JevCandidatePolicy.effectiveThreshold(it, jevState?.context ?: jevRuntime.lastObservedContext)
+            JevCandidatePolicy.effectiveThreshold(it, evalCtx)
         }
         val liveProbabilityMood = if (jevEnabled && jevProb != null && effThreshold != null) {
             resolveHudMoodForProbabilityGap(jevProb, effThreshold)
@@ -812,20 +840,22 @@ object LongformDiagnosticHud {
                 jevProbText.setTextColorIfChanged(HudPuppyFaceRenderer.accentColorInt(m))
             }
             jevEnabled && jevProb != null && effThreshold != null && liveProbabilityMood != null -> {
-                val jevPct = (jevProb * 100.0).roundToInt()
-                val thrPct = (effThreshold * 100.0).roundToInt()
-                val gapPct = ((effThreshold - jevProb) * 100.0).roundToInt()
+                val jevTenths = com.example.itv.domain.jev.JevPercentFormat.toTenthsPct(jevProb)
+                val thrTenths = com.example.itv.domain.jev.JevPercentFormat.toTenthsPct(effThreshold)
+                val gapTenths = thrTenths - jevTenths
+                val jevStr = com.example.itv.domain.jev.JevPercentFormat.formatTenths(jevTenths)
+                val thrStr = com.example.itv.domain.jev.JevPercentFormat.formatTenths(thrTenths)
                 val gapDesc = when {
-                    gapPct > 0 -> "여유 $gapPct%p"
-                    gapPct == 0 -> "기준 도달 0%p"
-                    else -> "초과 +${-gapPct}%p"
+                    gapTenths > 0 -> "여유 ${com.example.itv.domain.jev.JevPercentFormat.formatTenths(gapTenths)}%p"
+                    gapTenths == 0 -> "기준 도달 0%p"
+                    else -> "초과 +${com.example.itv.domain.jev.JevPercentFormat.formatTenths(-gapTenths)}%p"
                 }
                 jevProbText.setVisibilityIfChanged(View.VISIBLE)
-                jevProbText.setTextIfChanged("🐾 ${HudPuppyFaceRenderer.stageLabel(liveProbabilityMood)} · Jev $jevPct% vs 기준 $thrPct% ($gapDesc)")
+                jevProbText.setTextIfChanged("🐾 ${HudPuppyFaceRenderer.stageLabel(liveProbabilityMood)} · Jev $jevStr% vs 기준 $thrStr% ($gapDesc)")
                 jevProbText.setTextColorIfChanged(HudPuppyFaceRenderer.accentColorInt(liveProbabilityMood))
             }
             jevEnabled && effThreshold != null -> {
-                val thrPct = (effThreshold * 100.0).roundToInt()
+                val thrStr = com.example.itv.domain.jev.JevPercentFormat.formatRatioPct(effThreshold)
                 val tokenConfigured = jevRuntime.store.tokenConfigured.value
                 val consentGranted = jevSettings.collectionConsent
                 val liveStatus = jevState?.status.orEmpty()
@@ -839,7 +869,7 @@ object LongformDiagnosticHud {
                 val isBlockedHint = !tokenConfigured || !consentGranted || CoachingAutoStart.testModeEnabled(appCtx) ||
                     liveStatus.contains("보류")
                 jevProbText.setVisibilityIfChanged(View.VISIBLE)
-                jevProbText.setTextIfChanged("🐾 기준 $thrPct% · $statusHint")
+                jevProbText.setTextIfChanged("🐾 기준 $thrStr% · $statusHint")
                 jevProbText.setTextColorIfChanged(Color.parseColor(if (isBlockedHint) "#FFD166" else "#B0BEC5"))
             }
             else -> {

@@ -6,12 +6,14 @@ import com.example.itv.data.local.ItvDatabase
 import com.example.itv.infrastructure.cloud.CloudSyncRepository
 import com.example.itv.infrastructure.cloud.DailyCloudBackupWorker
 import com.example.itv.infrastructure.coaching.UserCoachingSettingsStore
+import com.example.itv.infrastructure.coaching.WeeklyMailboxStore
 import com.example.itv.infrastructure.equip.UserEquipStore
 import com.example.itv.infrastructure.reward.CalendarRewardStore
 import com.example.itv.infrastructure.reward.UserRewardStore
 import com.example.itv.infrastructure.sleep.BedtimeMemoStore
 import com.example.itv.infrastructure.storage.shortform.ReelsUsageStore
 import com.example.itv.infrastructure.storage.shortform.ShortformDailyStore
+import com.example.itv.infrastructure.support.SupportInquiryStore
 import com.example.itv.infrastructure.theme.UserThemeStore
 import com.example.itv.presentation.coaching.CoachingAutoStart
 import com.example.itv.presentation.usage.DailyStampPrefs
@@ -32,6 +34,7 @@ internal object LocalDataWiper {
 
     internal val SIGN_OUT_FILES_TO_DELETE = listOf(
         MonthlyUsageArchiveStore.FILE_NAME,
+        WeeklyMailboxStore.FILE_NAME,
         "shortform_personal_stats_v1.json",
         "reels_usage_v1.json",
         "shortform_daily_v1.json",
@@ -55,7 +58,8 @@ internal object LocalDataWiper {
         "itv_intervention_journal_v1",
         "itv_mission_counts_v1",
         "itv_theme_prefs_v1",
-        CloudSyncRepository.PREF_NAME
+        CloudSyncRepository.PREF_NAME,
+        SupportInquiryStore.PREF_NAME
     )
 
     internal val SHARED_PREF_NAMES_TO_CLEAR = SIGN_OUT_PREF_NAMES_TO_CLEAR + listOf(
@@ -121,11 +125,15 @@ internal object LocalDataWiper {
         runCatching { com.example.itv.infrastructure.sleep.SleepWakeCycleStore.clear(appCtx) }
         runCatching { UserRewardStore.reset(appCtx) }
         runCatching { CalendarRewardStore.reset(appCtx) }
+        withTimeoutOrNull(1_500L) {
+            runCatching { WeeklyMailboxStore.reset(appCtx) }
+        }
         runCatching { UserEquipStore.reset(appCtx) }
         runCatching { UserCoachingSettingsStore.getInstance(appCtx).reset() }
         runCatching { BedtimeMemoStore.getInstance(appCtx).clear() }
         runCatching { UserThemeStore.reset(appCtx) }
         runCatching { CloudSyncRepository.clearLocalStatus(appCtx) }
+        runCatching { SupportInquiryStore.reset(appCtx) }
         runCatching { DailyCloudBackupWorker.cancel(appCtx) }
 
         // 5. Synchronously clear target SharedPreferences files

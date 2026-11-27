@@ -19,11 +19,46 @@ class ItvApplication : Application() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var startedActivities = 0
     private var resumedActivities = 0
+    private var activeDiagnosticsActivities = 0
+
+    private fun isDiagnosticsActivity(activity: Activity): Boolean {
+        val simpleName = activity.javaClass.simpleName
+        return simpleName == "JevTestActivity" ||
+            simpleName == "CoachingTestActivity" ||
+            simpleName == "ReelsProbeActivity" ||
+            simpleName == "YoutubeProbeActivity" ||
+            simpleName == "PermissionSettingsActivity"
+    }
+
+    private fun enterOwnAppForegroundIfFullScreen(activity: Activity) {
+        if (activity.isInMultiWindowMode) {
+            // In split-screen/multi-window mode another app is visible alongside ITV;
+            // keep external observation active so the paired app stays protected.
+            if (WritingGuard.inAppForeground) {
+                exitOwnAppForeground()
+            }
+            return
+        }
+        mainHandler.removeCallbacks(backgroundExitCheck)
+        val wasForeground = WritingGuard.inAppForeground
+        WritingGuard.inAppForeground = true
+        JevObservationHub.foreground(packageName)
+        if (!wasForeground) {
+            WritingGuardService.onAppForegroundChanged(true)
+        }
+    }
+
+    private fun exitOwnAppForeground() {
+        if (!WritingGuard.inAppForeground) return
+        WritingGuard.inAppForeground = false
+        WritingGuardService.onAppForegroundChanged(false)
+        com.example.itv.presentation.coaching.CoachingMonitorService.notifyOwnAppExited()
+        com.example.itv.presentation.coaching.LongformDiagnosticHud.notifyOwnAppExited()
+    }
+
     private val backgroundExitCheck = Runnable {
         if (resumedActivities <= 0 && WritingGuard.inAppForeground) {
-            WritingGuard.inAppForeground = false
-            WritingGuardService.onAppForegroundChanged(false)
-            com.example.itv.presentation.coaching.CoachingMonitorService.notifyOwnAppExited()
+            exitOwnAppForeground()
         }
     }
 
@@ -51,23 +86,27 @@ class ItvApplication : Application() {
     /**
      * Tracks foreground state across ALL ITV activities (MainActivity, JevTestActivity,
      * PermissionSettingsActivity, etc.) so WritingGuardService enters zero-cost dormant mode
-     * whenever the user is inside ITV and resumes external-app observation the instant they leave.
+     * BEFORE the first Compose frame renders and resumes external-app observation the instant
+     * the user leaves ITV.
      */
     private fun registerOwnAppForegroundTracker() {
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
-            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+                // Enter dormant accessibility mode before setContent / first Compose attach.
+                enterOwnAppForegroundIfFullScreen(activity)
+            }
             override fun onActivityStarted(activity: Activity) {
                 startedActivities++
+                if (isDiagnosticsActivity(activity)) {
+                    activeDiagnosticsActivities++
+                    com.example.itv.presentation.coaching.CoachingMonitorService.setDiagnosticsUiActive(true)
+                }
+                // Enter dormant accessibility mode BEFORE onResume / ViewRootImpl first traversal.
+                enterOwnAppForegroundIfFullScreen(activity)
             }
             override fun onActivityResumed(activity: Activity) {
                 resumedActivities++
-                mainHandler.removeCallbacks(backgroundExitCheck)
-                val wasForeground = WritingGuard.inAppForeground
-                WritingGuard.inAppForeground = true
-                JevObservationHub.foreground(packageName)
-                if (!wasForeground) {
-                    WritingGuardService.onAppForegroundChanged(true)
-                }
+                enterOwnAppForegroundIfFullScreen(activity)
             }
             override fun onActivityPaused(activity: Activity) {
                 resumedActivities = (resumedActivities - 1).coerceAtLeast(0)
@@ -81,6 +120,12 @@ class ItvApplication : Application() {
             }
             override fun onActivityStopped(activity: Activity) {
                 startedActivities = (startedActivities - 1).coerceAtLeast(0)
+                if (isDiagnosticsActivity(activity)) {
+                    activeDiagnosticsActivities = (activeDiagnosticsActivities - 1).coerceAtLeast(0)
+                    com.example.itv.presentation.coaching.CoachingMonitorService.setDiagnosticsUiActive(
+                        activeDiagnosticsActivities > 0
+                    )
+                }
                 if (startedActivities == 0 && resumedActivities == 0) {
                     if (activity.isChangingConfigurations) {
                         // Activity is being recreated for a configuration change (e.g. rotation):
@@ -90,11 +135,7 @@ class ItvApplication : Application() {
                         return
                     }
                     mainHandler.removeCallbacks(backgroundExitCheck)
-                    if (WritingGuard.inAppForeground) {
-                        WritingGuard.inAppForeground = false
-                        WritingGuardService.onAppForegroundChanged(false)
-                        com.example.itv.presentation.coaching.CoachingMonitorService.notifyOwnAppExited()
-                    }
+                    exitOwnAppForeground()
                 }
             }
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}

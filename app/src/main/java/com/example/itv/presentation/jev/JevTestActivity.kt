@@ -7,6 +7,9 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.itv.MainActivity
 import androidx.lifecycle.ViewModelProvider
 import androidx.compose.foundation.BorderStroke
@@ -43,10 +46,16 @@ import com.example.itv.infrastructure.storage.shortform.ShortformDailyStore
 import com.example.itv.infrastructure.storage.shortform.ReelsUsageStore
 import com.example.itv.infrastructure.coaching.InterventionJournal
 import com.example.itv.infrastructure.coaching.MissionStats
+import com.example.itv.domain.coaching.MailboxNotice
+import com.example.itv.domain.coaching.WeeklyCoachLetter
 import com.example.itv.domain.records.DailyHealthTier
+import com.example.itv.infrastructure.coaching.WeeklyMailboxNotificationCoordinator
+import com.example.itv.infrastructure.coaching.WeeklyMailboxStore
 import com.example.itv.presentation.character.CompanionPreviewActivity
 import com.example.itv.presentation.coaching.CoachingMonitorService
 import com.example.itv.presentation.components.*
+import com.example.itv.presentation.mailbox.WeeklyMailboxDialog
+import com.example.itv.presentation.mailbox.WoodenMailboxArt
 import com.example.itv.presentation.usage.ChestOpeningPreviewStrip
 import com.example.itv.presentation.usage.ChestOpeningRequest
 import com.example.itv.presentation.usage.DailyStampPrefs
@@ -57,6 +66,7 @@ import com.example.itv.presentation.usage.StampMotionTestBar
 import com.example.itv.presentation.usage.StampRitualRequest
 import com.example.itv.ui.theme.ITVTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.time.Instant
@@ -92,10 +102,13 @@ private fun JevTestScreen(vm: JevTestViewModel,onBack: ()->Unit,modifier: Modifi
     val holder=rememberSaveableStateHolder()
     var previewStampRitual by remember { mutableStateOf<StampRitualRequest?>(null) }
     var previewChestRequest by remember { mutableStateOf<ChestOpeningRequest?>(null) }
+    var previewMailboxLetters by remember { mutableStateOf<List<WeeklyCoachLetter>?>(null) }
+    var previewMailboxNotices by remember { mutableStateOf<List<MailboxNotice>>(emptyList()) }
     val selectedStampCharacter = remember { DailyStampPrefs.getSelectedCharacter(context) }
 
-    BackHandler(enabled = previewStampRitual != null || previewChestRequest != null) {
+    BackHandler(enabled = previewStampRitual != null || previewChestRequest != null || previewMailboxLetters != null) {
         when {
+            previewMailboxLetters != null -> previewMailboxLetters = null
             previewStampRitual != null -> previewStampRitual = null
             previewChestRequest != null -> previewChestRequest = null
         }
@@ -107,7 +120,7 @@ private fun JevTestScreen(vm: JevTestViewModel,onBack: ()->Unit,modifier: Modifi
             Text("Jev 공동 테스트",Modifier.padding(horizontal=20.dp),style=MaterialTheme.typography.headlineSmall,
                 fontWeight=FontWeight.Bold,color=ItvGreen)
             PrimaryScrollableTabRow(selectedTabIndex=page,edgePadding=12.dp) {
-                listOf("연결","판단 설정","개입 기록","실시간 측정 테스트","카테고리 확률 테스트","개입 맥락·말풍선 테스트","도장·상자 미리보기").forEachIndexed { i,title ->
+                listOf("연결","판단 설정","개입 기록","실시간 측정 테스트","카테고리 확률 테스트","개입 맥락·말풍선 테스트","도장·상자·편지 미리보기").forEachIndexed { i,title ->
                     Tab(selected=page==i,onClick={page=i},text={Text(title)})
                 }
             }
@@ -127,7 +140,11 @@ private fun JevTestScreen(vm: JevTestViewModel,onBack: ()->Unit,modifier: Modifi
                         5 -> InterventionContextBubbleTestPage(vm,s,busy)
                         else -> CalendarRewardPreviewTestPage(
                             onLaunchStampPreview = { previewStampRitual = it },
-                            onLaunchChestPreview = { previewChestRequest = it }
+                            onLaunchChestPreview = { previewChestRequest = it },
+                            onLaunchWeeklyMailboxPreview = { letters, notices ->
+                                previewMailboxNotices = notices
+                                previewMailboxLetters = letters
+                            }
                         )
                     }
                 }
@@ -146,6 +163,24 @@ private fun JevTestScreen(vm: JevTestViewModel,onBack: ()->Unit,modifier: Modifi
             DailyStampRitualOverlay(
                 request = req,
                 onFinished = { previewStampRitual = null }
+            )
+        }
+
+        previewMailboxLetters?.let { letters ->
+            WeeklyMailboxDialog(
+                letters = letters,
+                notices = previewMailboxNotices,
+                onMarkAsRead = { letterId ->
+                    previewMailboxLetters = previewMailboxLetters?.map { item ->
+                        if (item.id == letterId) item.copy(isRead = true) else item
+                    }
+                },
+                onMarkNoticeAsRead = { noticeId ->
+                    previewMailboxNotices = previewMailboxNotices.map { item ->
+                        if (item.id == noticeId) item.copy(isRead = true) else item
+                    }
+                },
+                onDismiss = { previewMailboxLetters = null }
             )
         }
     }
@@ -392,75 +427,36 @@ private fun takeProbabilitySnapshot(
     val igSession = vm.runtime.sessionState(JevSettings.INSTAGRAM)
     val devStatus = com.example.itv.domain.coaching.DeveloperStatus.value
 
-    val swipesNow = YoutubeProbe.candidates + ReelsProbe.candidates
-    val swipesLast = YoutubeProbe.lastRunCandidates + ReelsProbe.lastRunCandidates
-
     val allC = allSession?.continuousMs ?: 0L
     val sumC = (ytSession?.continuousMs ?: 0L) + (igSession?.continuousMs ?: 0L)
     val continuousNow = maxOf(allC, maxOf(devStatus.usedMs, sumC))
 
-    val allLast = allSession?.lastRunContinuousMs ?: 0L
-    val sumLast = (ytSession?.lastRunContinuousMs ?: 0L) + (igSession?.lastRunContinuousMs ?: 0L)
-    val continuousLast = maxOf(allLast, maxOf(devStatus.usedMs, sumLast))
-
     val latestTrial = trials.firstOrNull { it.probability != null }
     val latestLiveTrial = trials.firstOrNull { it.source == "LIVE" && it.probability != null }
-    val sessionId = allSession?.id ?: ytSession?.id ?: igSession?.id ?: UUID.randomUUID().toString()
 
-    val allTotal = allSession?.totalMs ?: 0L
-    val sumTotal = (ytSession?.totalMs ?: 0L) + (igSession?.totalMs ?: 0L)
-    val totalMs = maxOf(allTotal, maxOf(devStatus.usedMs, sumTotal))
-    val continuousMs = if (continuousNow > 0L) continuousNow else continuousLast
-    val returns = allSession?.returns?.size ?: ((ytSession?.returns?.size ?: 0) + (igSession?.returns?.size ?: 0))
-
-    val rawShortformMs = maxOf(
-        allSession?.rawShortformMs ?: 0L,
-        (ytSession?.rawShortformMs ?: 0L) + (igSession?.rawShortformMs ?: 0L)
-    )
-    val rawGeneralMs = maxOf(
-        allSession?.rawGeneralMs ?: 0L,
-        (ytSession?.rawGeneralMs ?: 0L) + (igSession?.rawGeneralMs ?: 0L)
-    )
-
-    val bedtime = vm.runtime.lastObservedContext?.bedtimePassedMinutes
     val takenAt = System.currentTimeMillis()
-    val baseContext = JevContext(
-        sessionId = sessionId,
-        packageName = "ALL",
-        sessionMs = totalMs,
-        continuousMs = continuousMs,
-        returns10m = returns,
-        returnsObservedSeconds = 600,
-        bedtimePassedMinutes = bedtime,
-        observedAt = takenAt,
-        rawShortformMs = rawShortformMs,
-        rawGeneralMs = rawGeneralMs
-    )
-    val enrichedRaw = vm.runtime.enrichContext(baseContext)
-    val snapshotSwipes = if (swipesNow > 0) swipesNow else swipesLast
-    val enriched = enrichedRaw.copy(
-        shortformSwipeCount = maxOf(enrichedRaw.shortformSwipeCount, snapshotSwipes)
-    )
+    // HUD와 100% 동일한 단일 기준 평가 컨텍스트 사용 (세션·스와이프 과열·누적 스와이프·롱폼 전환·실시간 조도/취침 모두 일치)
+    val enriched = vm.runtime.currentEvaluationContext(nowWall = takenAt)
     val runtimeState = vm.runtime.state.value
     val suppression = vm.runtime.latestSuppressionInfo()
     val ambient = LightAndBrightnessTracker.getInstance(context).snapshot.value
     val bedtimeCare = com.example.itv.infrastructure.coaching.UserCoachingSettingsStore.getInstance(context).loadSettings().bedtimeCareEnabled
     return ProbabilitySnapshot(
-        sessionId = sessionId,
-        totalMs = totalMs,
-        continuousMs = continuousMs,
+        sessionId = enriched.sessionId,
+        totalMs = enriched.sessionMs,
+        continuousMs = enriched.continuousMs,
         continuousLive = continuousNow > 0L,
-        swipes = if (swipesNow > 0) swipesNow else swipesLast,
-        returns = returns,
-        bedtime = bedtime,
+        swipes = enriched.shortformSwipeCount,
+        returns = enriched.returns10m,
+        bedtime = enriched.bedtimePassedMinutes,
         takenAt = takenAt,
         enrichedContext = enriched,
         liveProbability = runtimeState.probability,
         latestTrialProbability = latestTrial?.probability,
         latestTrialSource = latestTrial?.source,
-        latestLiveProbability = runtimeState.probability ?: latestLiveTrial?.probability,
-        latestLiveCreatedAt = latestLiveTrial?.createdAt,
-        latestLiveTrial = latestLiveTrial,
+        latestLiveProbability = runtimeState.probability,
+        latestLiveCreatedAt = if (runtimeState.probability != null) latestLiveTrial?.createdAt else null,
+        latestLiveTrial = if (runtimeState.probability != null) latestLiveTrial else null,
         displayBlockingReason = vm.runtime.displayBlockingReason(),
         ambientSnapshot = ambient,
         bedtimeCareEnabled = bedtimeCare,
@@ -654,10 +650,12 @@ internal fun ProbabilityGaugeBar(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text("0%", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            val baseLabel = if (kotlin.math.abs(baseThresholdPct - effectiveThresholdPct) >= 0.5) {
-                "기본 ${"%.0f".format(baseThresholdPct)}% → 적용 기준 ${"%.0f".format(effectiveThresholdPct)}%"
+            val baseTenths = JevPercentFormat.pctToTenths(baseThresholdPct)
+            val effTenths = JevPercentFormat.pctToTenths(effectiveThresholdPct)
+            val baseLabel = if (baseTenths != effTenths) {
+                "기본 ${JevPercentFormat.formatTenths(baseTenths)}% → 적용 기준 ${JevPercentFormat.formatTenths(effTenths)}%"
             } else {
-                "적용 기준 ${"%.0f".format(effectiveThresholdPct)}%"
+                "적용 기준 ${JevPercentFormat.formatTenths(effTenths)}%"
             }
             Text(baseLabel, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
             Text("100%", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -673,8 +671,9 @@ private fun DeltaFactorRow(
     deltaPct: Double,
     excluded: Boolean = false
 ) {
-    val isNeg = deltaPct <= -0.5
-    val isPos = deltaPct >= 0.5
+    val deltaTenths = JevPercentFormat.pctToTenths(deltaPct)
+    val isNeg = deltaTenths < 0
+    val isPos = deltaTenths > 0
     val chipBg = when {
         excluded -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
         isNeg -> Color(0xFFFEE2E2)
@@ -687,12 +686,7 @@ private fun DeltaFactorRow(
         isPos -> Color(0xFF1D4ED8)
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
-    val deltaText = when {
-        excluded -> "제외"
-        isPos -> "+${"%.0f".format(deltaPct)}%p"
-        isNeg -> "${"%.0f".format(deltaPct)}%p"
-        else -> "0%p"
-    }
+    val deltaText = if (excluded) "제외" else JevPercentFormat.formatSignedDeltaTenths(deltaTenths)
 
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -778,17 +772,28 @@ private fun DynamicTierRow(
 @Composable
 private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
     val s by vm.store.settings.collectAsState()
+    val liveState by vm.runtime.state.collectAsState()
     val answer by vm.manualAnswer.collectAsState()
     val trials by vm.store.dao.trials().collectAsState(initial = emptyList())
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     var snapshot by remember { mutableStateOf<ProbabilitySnapshot?>(null) }
     var showDetails by rememberSaveable { mutableStateOf(false) }
 
-    // Initial load takes one snapshot; subsequent updates happen only when pressing the refresh button.
-    LaunchedEffect(trials.size) {
-        if (snapshot == null || (snapshot?.latestLiveProbability == null && trials.isNotEmpty())) {
-            snapshot = takeProbabilitySnapshot(context, vm, trials)
+    // 최초 진입·실시간 확률 변동·설정 변경 시 HUD와 동일한 최신 스냅샷으로 동기화
+    LaunchedEffect(s.revision, liveState.probability, trials.size) {
+        snapshot = takeProbabilitySnapshot(context, vm, trials)
+    }
+
+    // 다른 앱(유튜브·인스타 등)에서 돌아왔을 때도 HUD와 즉시 일치하도록 ON_RESUME마다 스냅샷 갱신
+    DisposableEffect(lifecycleOwner, trials) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                snapshot = takeProbabilitySnapshot(context, vm, trials)
+            }
         }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     TestSection("실시간 측정 테스트 (전체 통합)") {
@@ -832,7 +837,6 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
             val adj = JevCandidatePolicy.computeThresholdAdjustment(s, ctx)
             val baseThresholdPct = s.probabilityThreshold * 100.0
             val effThresholdPct = adj.effectiveThreshold * 100.0
-            val totalDeltaPct = effThresholdPct - baseThresholdPct
             val matchedReasons = JevCandidatePolicy.reasons(ctx, s)
             val reasonKor = matchedReasons.map { r ->
                 when (r) {
@@ -885,23 +889,30 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
                 rawGeneralMs = ctx.rawGeneralMs
             )
 
-            // 1. 개입 판단 확률 (한눈에 보는 판정 카드)
-            val evalProb = answer?.probability ?: snap.latestLiveProbability ?: snap.latestTrialProbability
+            // 1. 개입 판단 확률 (한눈에 보는 판정 카드 - HUD와 동일한 0.1% 단위 기준)
+            val activeManualAnswer = answer?.takeIf { it.trial.createdAt >= snap.takenAt }
+            val evalProb = activeManualAnswer?.probability ?: snap.liveProbability
             val evalProbPct = evalProb?.times(100.0)
+            val evalProbTenths = evalProb?.let { JevPercentFormat.toTenthsPct(it) }
+            val baseThrTenths = JevPercentFormat.toTenthsPct(s.probabilityThreshold)
+            val effThrTenths = JevPercentFormat.toTenthsPct(adj.effectiveThreshold)
+            val totalDeltaTenths = effThrTenths - baseThrTenths
+            val diffTenths = evalProbTenths?.minus(effThrTenths)
+
             val probSourceLabel = when {
-                answer != null -> "방금 수동 요청 (${answer!!.trial.latencyMs}ms)"
-                snap.latestLiveProbability != null -> {
+                activeManualAnswer != null -> "방금 수동 요청 (${activeManualAnswer.trial.latencyMs}ms)"
+                snap.liveProbability != null -> {
                     val t = snap.latestLiveCreatedAt?.let {
                         Instant.ofEpochMilli(it).atZone(ZoneId.systemDefault())
                             .format(DateTimeFormatter.ofPattern("HH:mm:ss"))
                     }
                     if (t != null) "LIVE · $t" else "LIVE 최신"
                 }
-                snap.latestTrialProbability != null -> "최근 요청 (${snap.latestTrialSource ?: "기록"})"
-                else -> "아직 기록 없음"
+                snap.latestTrialProbability != null ->
+                    "현재 세션 측정 전 (이전 ${JevPercentFormat.formatRatioPct(snap.latestTrialProbability)}%)"
+                else -> "첫 Jev 확률 측정 전"
             }
             val passed = evalProb != null && JevCandidatePolicy.passes(evalProb, s, ctx)
-            val diffPct = evalProbPct?.minus(effThresholdPct)
 
             CompactCheckGroup("1. 개입 판단 확률") {
                 Row(
@@ -920,11 +931,11 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
                         ) {
                             Text("Jev 판단 확률", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             Text(
-                                text = evalProbPct?.let { "${"%.1f".format(it)}%" } ?: "--%",
+                                text = evalProbTenths?.let { "${JevPercentFormat.formatTenths(it)}%" } ?: "--%",
                                 style = MaterialTheme.typography.headlineSmall,
                                 fontWeight = FontWeight.ExtraBold,
                                 color = when {
-                                    evalProbPct == null -> MaterialTheme.colorScheme.onSurfaceVariant
+                                    evalProbTenths == null -> MaterialTheme.colorScheme.onSurfaceVariant
                                     passed -> ItvGreen
                                     else -> Color(0xFFD97706)
                                 }
@@ -949,17 +960,17 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
                         ) {
                             Text("적용 개입 기준", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             Text(
-                                text = "${"%.0f".format(effThresholdPct)}%",
+                                text = "${JevPercentFormat.formatTenths(effThrTenths)}%",
                                 style = MaterialTheme.typography.headlineSmall,
                                 fontWeight = FontWeight.ExtraBold,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                             val deltaCaption = if (!s.personalizedEnabled) {
                                 "보정 꺼짐"
-                            } else if (kotlin.math.abs(totalDeltaPct) >= 0.5) {
-                                "기본 ${"%.0f".format(baseThresholdPct)}% (${if (totalDeltaPct > 0) "+" else ""}${"%.0f".format(totalDeltaPct)}%p)"
+                            } else if (totalDeltaTenths != 0) {
+                                "기본 ${JevPercentFormat.formatTenths(baseThrTenths)}% (${JevPercentFormat.formatSignedDeltaTenths(totalDeltaTenths)})"
                             } else {
-                                "기본 ${"%.0f".format(baseThresholdPct)}% (변동 없음)"
+                                "기본 ${JevPercentFormat.formatTenths(baseThrTenths)}% (변동 없음)"
                             }
                             Text(
                                 text = deltaCaption,
@@ -973,19 +984,19 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
 
                 // 판정 요약 배너
                 val verdictBg = when {
-                    diffPct == null -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+                    diffTenths == null -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
                     passed -> ItvGreen.copy(alpha = 0.16f)
                     else -> Color(0xFFFEF3C7)
                 }
                 val verdictFg = when {
-                    diffPct == null -> MaterialTheme.colorScheme.onSurfaceVariant
+                    diffTenths == null -> MaterialTheme.colorScheme.onSurfaceVariant
                     passed -> ItvGreen
                     else -> Color(0xFFB45309)
                 }
                 val verdictText = when {
-                    diffPct == null -> "확률 산출 대기 · 호출 조건 ${if (reasonKor.isNotEmpty()) "충족 (${reasonKor.joinToString(", ")})" else "미충족"}"
-                    passed -> "개입 기준 통과 (+${"%.1f".format(diffPct)}%p 초과) · 개입 대상"
-                    else -> "개입 기준 미달 (${"%.1f".format(diffPct)}%p 부족) · 미개입"
+                    diffTenths == null -> "확률 산출 대기 · 호출 조건 ${if (reasonKor.isNotEmpty()) "충족 (${reasonKor.joinToString(", ")})" else "미충족"}"
+                    passed -> "개입 기준 통과 (${JevPercentFormat.formatSignedDeltaTenths(diffTenths)} 초과) · 개입 대상"
+                    else -> "개입 기준 미달 (${JevPercentFormat.formatSignedDeltaTenths(diffTenths)} 부족) · 미개입"
                 }
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
@@ -1015,7 +1026,7 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
                     highlight = reasonKor.isNotEmpty()
                 )
 
-                val displayTrial = answer?.trial ?: snap.latestLiveTrial
+                val displayTrial = activeManualAnswer?.trial ?: snap.latestLiveTrial
                 if (passed && displayTrial != null) {
                     val displayedAt = displayTrial.displayedAt
                     val isDisplayed = displayedAt != null
@@ -1044,7 +1055,6 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
 
             // 2. 개입 기준 확률 변동 (보정 내역 한눈에 보기)
             CompactCheckGroup("2. 개입 기준 확률 변동") {
-                val totalSign = if (totalDeltaPct > 0) "+" else ""
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(10.dp),
@@ -1056,13 +1066,13 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
                     ) {
                         Text(
                             text = if (s.personalizedEnabled) {
-                                "기본 ${"%.0f".format(baseThresholdPct)}%  ${totalSign}${"%.0f".format(totalDeltaPct)}%p  →  적용 ${"%.0f".format(effThresholdPct)}%"
+                                "기본 ${JevPercentFormat.formatTenths(baseThrTenths)}%  ${JevPercentFormat.formatSignedDeltaTenths(totalDeltaTenths)}  →  적용 ${JevPercentFormat.formatTenths(effThrTenths)}%"
                             } else {
-                                "기본 ${"%.0f".format(baseThresholdPct)}% 고정 (개인화 동적 보정 꺼짐)"
+                                "기본 ${JevPercentFormat.formatTenths(baseThrTenths)}% 고정 (개인화 동적 보정 꺼짐)"
                             },
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold,
-                            color = if (totalDeltaPct <= -0.5) Color(0xFFB91C1C) else if (totalDeltaPct >= 0.5) Color(0xFF1D4ED8) else MaterialTheme.colorScheme.onSurface
+                            color = if (totalDeltaTenths < 0) Color(0xFFB91C1C) else if (totalDeltaTenths > 0) Color(0xFF1D4ED8) else MaterialTheme.colorScheme.onSurface
                         )
                         Text(
                             text = "마이너스(-%p)일수록 개입이 더 빨라지고, 플러스(+%p)일수록 기준이 완화됩니다. (총 보정 -40~+25%p)",
@@ -1084,6 +1094,25 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
                     rangeHint = "±10%p",
                     detail = "$sessionRatioStr ($avgSessionStr)",
                     deltaPct = adj.sessionDelta * 100.0
+                )
+
+                HorizontalDivider(color = ItvLine.copy(alpha = 0.6f))
+                val swipeHeatDetail = if (JevCandidatePolicy.isShortformContext(ctx)) {
+                    val spmVal = ctx.effectiveSpm1m ?: 0.0
+                    val streakVal = ctx.fastSwipeStreak
+                    if (spmVal > 0.0 || streakVal > 0) {
+                        "${"%.1f".format(spmVal)} SPM · 연속고속 ${streakVal}회 (5 SPM 초과 시 적용)"
+                    } else {
+                        "숏폼 탐색 안정 (5 SPM 초과 시 적용)"
+                    }
+                } else {
+                    "비숏폼 화면 (0%p)"
+                }
+                DeltaFactorRow(
+                    title = "스와이프 과열",
+                    rangeHint = "0~-10%p",
+                    detail = swipeHeatDetail,
+                    deltaPct = adj.swipeDelta * 100.0
                 )
 
                 HorizontalDivider(color = ItvLine.copy(alpha = 0.6f))
@@ -1128,12 +1157,12 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
 
                 HorizontalDivider(color = ItvLine.copy(alpha = 0.6f))
                 val lfSwitchStr = if (adj.longformSwitchDelta < 0.0) {
-                    "전환 ${ctx.consecutiveLongformChainCount}회 (${"%.1f".format(adj.longformSwitchDelta * 100)}%p)"
+                    "전환 ${ctx.consecutiveLongformChainCount}회 (${JevPercentFormat.formatSignedDeltaTenths(JevPercentFormat.toTenthsPct(adj.longformSwitchDelta))})"
                 } else {
                     "전환 ${ctx.consecutiveLongformChainCount}회 (2회+ 적용)"
                 }
                 val sfSwipeStr = if (adj.shortformSwipeCountDelta < 0.0) {
-                    "스와이프 ${ctx.shortformSwipeCount}회 (${"%.1f".format(adj.shortformSwipeCountDelta * 100)}%p)"
+                    "스와이프 ${ctx.shortformSwipeCount}회 (${JevPercentFormat.formatSignedDeltaTenths(JevPercentFormat.toTenthsPct(adj.shortformSwipeCountDelta))})"
                 } else {
                     "스와이프 ${ctx.shortformSwipeCount}회 (11회+ 적용)"
                 }
@@ -1154,7 +1183,7 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
                 else -> null
             }
             val effectiveIntervalSec = when {
-                answer != null -> JevCandidatePolicy.calculateDynamicInterval(effThresholdPct / 100.0, answer!!.probability, isLongformOrAll)
+                activeManualAnswer != null -> JevCandidatePolicy.calculateDynamicInterval(effThresholdPct / 100.0, activeManualAnswer.probability, isLongformOrAll)
                 appSuppression.isAsked -> appSuppression.dynamicIntervalSeconds
                 evalProb != null -> JevCandidatePolicy.calculateDynamicInterval(effThresholdPct / 100.0, evalProb, isLongformOrAll)
                 else -> appSuppression.dynamicIntervalSeconds
@@ -1191,10 +1220,16 @@ private fun ObservationTestPage(vm: JevTestViewModel, busy: Boolean) {
                             )
                         }
                         val gapSummary = when {
-                            activeGap != null && evalProb != null && evalProb * 100.0 >= effThresholdPct ->
-                                "기준 통과 상태 (격차 0.0%p) → 최소 간격 ${effectiveIntervalSec}초 적용"
-                            activeGap != null ->
-                                "기준과 격차 -${"%.1f".format(activeGap * 100.0)}%p → 선형 보간 ${effectiveIntervalSec}초 적용"
+                            activeGap != null && evalProb != null && evalProb >= adj.effectiveThreshold ->
+                                "기준 통과 상태 (격차 0%p) → 최소 간격 ${effectiveIntervalSec}초 적용"
+                            activeGap != null -> {
+                                val gapTenths = if (evalProbTenths != null) {
+                                    (effThrTenths - evalProbTenths).coerceAtLeast(0)
+                                } else {
+                                    JevPercentFormat.toTenthsPct(activeGap)
+                                }
+                                "기준과 격차 -${JevPercentFormat.formatTenths(gapTenths)}%p → 선형 보간 ${effectiveIntervalSec}초 적용"
+                            }
                             else ->
                                 "첫 실시간 평가 전 기본값 ${effectiveIntervalSec}초 (평가 후 격차에 따라 자동 변동)"
                         }
@@ -2156,9 +2191,11 @@ private fun LongformObservationPage() {
 @Composable
 private fun CalendarRewardPreviewTestPage(
     onLaunchStampPreview: (StampRitualRequest) -> Unit,
-    onLaunchChestPreview: (ChestOpeningRequest) -> Unit
+    onLaunchChestPreview: (ChestOpeningRequest) -> Unit,
+    onLaunchWeeklyMailboxPreview: (List<WeeklyCoachLetter>, List<MailboxNotice>) -> Unit
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val selectedStampCharacter = remember { DailyStampPrefs.getSelectedCharacter(context) }
     val sharedOutlineBitmap by produceState(
         initialValue = StampCharacterBitmapCache.getCachedMonochromeOutline(selectedStampCharacter.id),
@@ -2170,6 +2207,108 @@ private fun CalendarRewardPreviewTestPage(
                 StampCharacterBitmapCache.preload(context, selectedStampCharacter)
                 StampCharacterBitmapCache.getMonochromeOutline(context, selectedStampCharacter)
             }
+        }
+    }
+
+    TestSection("주간 코치 편지(우편함) 미리보기") {
+        Text(
+            text = "실제 홈 우편함과 완전히 동일한 화면(WeeklyMailboxDialog)을 열어 개인·공지 탭, 새 우편·읽은 우편 목록, 실링 개봉·펼치기 연출, ? 도움말까지 그대로 확인할 수 있습니다. (실제 저장 데이터는 바뀌지 않아요)",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(14.dp))
+                    .clickable { onLaunchWeeklyMailboxPreview(emptyList(), emptyList()) }
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+            ) {
+                WoodenMailboxArt(hasUnread = false, modifier = Modifier.size(76.dp))
+                Text("기본 (빈 우편함)", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(14.dp))
+                    .clickable {
+                        scope.launch {
+                            val letters = WeeklyMailboxStore.buildPreviewMailboxForTestTab(
+                                context = context,
+                                preferRealData = false
+                            )
+                            val notices = WeeklyMailboxStore.buildSampleNoticesForTestTab()
+                            onLaunchWeeklyMailboxPreview(letters, notices)
+                        }
+                    }
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+            ) {
+                WoodenMailboxArt(hasUnread = true, modifier = Modifier.size(76.dp))
+                Text("새 우편 도착 (열기)", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color(0xFFC8433A))
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Button(
+                onClick = {
+                    scope.launch {
+                        val letters = WeeklyMailboxStore.buildPreviewMailboxForTestTab(
+                            context = context,
+                            preferRealData = false
+                        )
+                        val notices = WeeklyMailboxStore.buildSampleNoticesForTestTab()
+                        onLaunchWeeklyMailboxPreview(letters, notices)
+                    }
+                },
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.buttonColors(containerColor = ItvGreen)
+            ) {
+                Text("우편함 미리보기", maxLines = 1)
+            }
+            OutlinedButton(
+                onClick = {
+                    scope.launch {
+                        val letters = WeeklyMailboxStore.buildPreviewMailboxForTestTab(
+                            context = context,
+                            preferRealData = true
+                        )
+                        val notices = WeeklyMailboxStore.buildSampleNoticesForTestTab()
+                        onLaunchWeeklyMailboxPreview(letters, notices)
+                    }
+                },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("내 기록 우편함", maxLines = 1)
+            }
+        }
+        OutlinedButton(
+            onClick = {
+                scope.launch {
+                    val sample = WeeklyMailboxStore.buildPreviewLetterForTestTab(
+                        context = context,
+                        preferRealData = false
+                    )
+                    val posted = WeeklyMailboxNotificationCoordinator.sendTestNotification(context, sample)
+                    android.widget.Toast.makeText(
+                        context,
+                        if (posted) {
+                            "주간 편지 테스트 알림을 보냈어요. 알림을 눌러 우편함 이동을 확인해 보세요."
+                        } else {
+                            "알림 권한 또는 '주간 코치 편지' 채널이 꺼져 있어 발송하지 못했어요."
+                        },
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("📬 주간 편지 알림 테스트 (탭하면 홈 우편함으로 이동)", maxLines = 1)
         }
     }
 

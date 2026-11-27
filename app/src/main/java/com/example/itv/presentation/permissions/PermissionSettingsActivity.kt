@@ -26,6 +26,7 @@ import androidx.core.net.toUri
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -34,6 +35,10 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.example.itv.domain.support.FaqCategory
+import com.example.itv.domain.support.SupportTab
+import com.example.itv.presentation.support.SupportCenterQuickLinkCard
+import com.example.itv.presentation.support.SupportCenterScreen
 import com.example.itv.ui.theme.ITVTheme
 
 // Consent is intentionally NOT backed up or restored. OS grants are always read live.
@@ -43,6 +48,7 @@ class PermissionSettingsActivity : ComponentActivity() {
     private var showJournalDelete by mutableStateOf(false)
     private var selectedPage by mutableIntStateOf(0)
     private var showAccessibilityDisclosure by mutableStateOf(false)
+    private var showSupportCenter by mutableStateOf(false)
     private val guardConnected get() = settingsService.state.value.data.guardConnected
     private val notifications get() = settingsService.state.value.data.notifications
     private val consent get() = settingsService.state.value.data.consent
@@ -55,6 +61,15 @@ class PermissionSettingsActivity : ComponentActivity() {
 
     @Composable
     private fun StandalonePermissions() {
+        BackHandler(enabled = showSupportCenter) { showSupportCenter = false }
+        if (showSupportCenter) {
+            SupportCenterScreen(
+                onNavigateBack = { showSupportCenter = false },
+                initialTab = SupportTab.FAQ,
+                initialFaqCategory = FaqCategory.PERMISSIONS,
+            )
+            return
+        }
         val screenState by settingsService.state.collectAsState()
         val notice = screenState.error
         val guardConnected = screenState.data.guardConnected
@@ -119,6 +134,15 @@ class PermissionSettingsActivity : ComponentActivity() {
                         catch (_: Exception) { settingsService.showMessage("기기 설정에서 ITV의 알림 채널을 확인하세요.") }
                     } }
                     item { notice?.let { Text(it) } }
+                    item(key = "permissions_support_help") {
+                        SupportCenterQuickLinkCard(
+                            title = "권한 설정이 잘 안 되시나요?",
+                            subtitle = "접근성·오버레이·배터리 절전 해결 FAQ와 1:1 문의",
+                            actionLabel = "FAQ 보기",
+                            onClick = { showSupportCenter = true },
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
                 }
             }
         }

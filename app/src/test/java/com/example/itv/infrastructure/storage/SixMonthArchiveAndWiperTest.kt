@@ -164,6 +164,12 @@ class SixMonthArchiveAndWiperTest {
         assertTrue(
             com.example.itv.infrastructure.reward.CalendarRewardStore.PREF_NAME in LocalDataWiper.SHARED_PREF_NAMES_TO_CLEAR
         )
+        assertTrue(
+            com.example.itv.infrastructure.coaching.WeeklyMailboxStore.FILE_NAME in LocalDataWiper.SIGN_OUT_FILES_TO_DELETE
+        )
+        assertTrue(
+            com.example.itv.infrastructure.coaching.WeeklyMailboxStore.FILE_NAME in LocalDataWiper.NO_BACKUP_FILES_TO_DELETE
+        )
     }
 
     @Test

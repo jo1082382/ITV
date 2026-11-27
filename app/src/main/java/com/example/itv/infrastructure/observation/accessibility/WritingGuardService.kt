@@ -61,29 +61,36 @@ open class WritingGuardService : AccessibilityService() {
 
     /**
      * Dynamically tightens or restores AccessibilityServiceInfo in system_server:
-     * - While ITV itself is in the foreground: only listen for TYPE_WINDOW_STATE_CHANGED
-     *   and clear view-id/window-retrieval flags so Jetpack Compose inside ITV does NOT run
-     *   heavy scroll/content accessibility traversals or IPC.
-     * - While external apps are in the foreground: keep ONLY the 5 minimal event types needed
-     *   for writing protection, Reels/Shorts/Longform detection, and foreground app/category tracking.
+     * - While ITV itself is in the foreground: clear eventTypes, feedbackType, flags, and scope
+     *   packageNames to a dormant noop sentinel.
+     *   1) Clearing feedbackType (0) excludes WritingGuardService from
+     *      AccessibilityManager.getEnabledAccessibilityServiceList(FEEDBACK_ALL_MASK), which lets
+     *      Jetpack Compose's AndroidComposeViewAccessibilityDelegateCompat shut down its expensive
+     *      100ms main-thread semantics diffing & bounds-update loop inside ITV (while leaving real
+     *      screen readers like TalkBack 100% untouched).
+     *   2) Clearing eventTypes/flags and setting a non-matching packageNames filter guarantees
+     *      system_server dispatches ZERO AccessibilityEvent IPCs from ITV to this service.
+     * - While external apps are in the foreground: immediately restore the minimal 5 event types,
+     *   FEEDBACK_GENERIC, window/view-id flags, and null packageNames (all packages) needed for
+     *   writing protection, Reels/Shorts/Longform detection, and foreground app tracking.
      */
     private fun applyServiceInfo(inOwnApp: Boolean) {
         if (dormantInfoApplied == inOwnApp && serviceInfo != null) return
         try {
             val info = serviceInfo ?: return
-            if (inOwnApp) {
-                info.eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
-                info.flags = 0
-                info.notificationTimeout = OWN_APP_NOTIFICATION_TIMEOUT_MS
-            } else {
-                info.eventTypes = EXTERNAL_EVENT_TYPES
-                info.flags = EXTERNAL_FLAGS
-                info.notificationTimeout = EXTERNAL_NOTIFICATION_TIMEOUT_MS
-            }
+            WritingGuardServiceInfoPolicy.configure(info, inOwnApp = inOwnApp)
             serviceInfo = info
             dormantInfoApplied = inOwnApp
         } catch (_: Exception) {
             // Ignore transient binder errors while service is connecting/unbinding
+        }
+    }
+
+    private fun applyServiceInfoNowOrPost(inOwnApp: Boolean) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            applyServiceInfo(inOwnApp)
+        } else {
+            mainHandler.post { applyServiceInfo(inOwnApp) }
         }
     }
 
@@ -100,12 +107,12 @@ open class WritingGuardService : AccessibilityService() {
         }
         ownScreen = true
         result(true, "ITV 내부 화면 · 접근성 휴면 / 개입 보류")
-        mainHandler.post { applyServiceInfo(inOwnApp = true) }
+        applyServiceInfoNowOrPost(inOwnApp = true)
     }
 
     private fun wakeForExternalApp() {
         ownScreen = false
-        mainHandler.post { applyServiceInfo(inOwnApp = false) }
+        applyServiceInfoNowOrPost(inOwnApp = false)
         val worker = ensureWorkerHandler()
         worker.removeCallbacks(poll)
         worker.post(poll)
@@ -392,27 +399,15 @@ open class WritingGuardService : AccessibilityService() {
     override fun onDestroy() { disconnect(); super.onDestroy() }
 
     companion object {
-        private const val EXTERNAL_EVENT_TYPES =
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
-                AccessibilityEvent.TYPE_WINDOWS_CHANGED or
-                AccessibilityEvent.TYPE_VIEW_SCROLLED or
-                AccessibilityEvent.TYPE_VIEW_CLICKED or
-                AccessibilityEvent.TYPE_VIEW_FOCUSED
-
-        private const val EXTERNAL_FLAGS =
-            AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
-                AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
-
-        private const val EXTERNAL_NOTIFICATION_TIMEOUT_MS = 250L
-        private const val OWN_APP_NOTIFICATION_TIMEOUT_MS = 500L
-
         @Volatile
         var activeInstance: AccessibilityService? = null
 
         fun onAppForegroundChanged(inForeground: Boolean) {
             val service = activeInstance as? WritingGuardService ?: return
             if (inForeground) {
-                service.mainHandler.post { service.applyServiceInfo(inOwnApp = true) }
+                // Apply synchronously when on main thread so system_server updates feedbackType=0
+                // BEFORE MainActivity resumes / Compose lazily queries enabled accessibility services.
+                service.applyServiceInfoNowOrPost(inOwnApp = true)
                 service.ensureWorkerHandler().post { service.enterDormantOwnAppMode() }
             } else {
                 service.wakeForExternalApp()
@@ -427,5 +422,69 @@ open class WritingGuardService : AccessibilityService() {
                 false
             }
         }
+    }
+}
+
+/**
+ * Pure configuration snapshot for [AccessibilityServiceInfo] dynamic updates.
+ */
+internal data class WritingGuardServiceConfig(
+    val eventTypes: Int,
+    val feedbackType: Int,
+    val flags: Int,
+    val packageNames: List<String>?,
+    val notificationTimeoutMs: Long
+)
+
+/**
+ * Pure configuration policy for dynamically switching [AccessibilityServiceInfo] between
+ * zero-overhead own-app dormant mode and active external-app observation mode.
+ */
+internal object WritingGuardServiceInfoPolicy {
+    internal const val DORMANT_NOOP_PACKAGE = "com.example.itv.dormant.noop"
+
+    internal const val EXTERNAL_EVENT_TYPES =
+        AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
+            AccessibilityEvent.TYPE_WINDOWS_CHANGED or
+            AccessibilityEvent.TYPE_VIEW_SCROLLED or
+            AccessibilityEvent.TYPE_VIEW_CLICKED or
+            AccessibilityEvent.TYPE_VIEW_FOCUSED
+
+    internal const val EXTERNAL_FEEDBACK_TYPE = AccessibilityServiceInfo.FEEDBACK_GENERIC
+
+    internal const val EXTERNAL_FLAGS =
+        AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
+            AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
+
+    internal const val EXTERNAL_NOTIFICATION_TIMEOUT_MS = 250L
+    internal const val OWN_APP_NOTIFICATION_TIMEOUT_MS = 1000L
+
+    fun resolve(inOwnApp: Boolean): WritingGuardServiceConfig {
+        return if (inOwnApp) {
+            WritingGuardServiceConfig(
+                eventTypes = 0,
+                feedbackType = 0,
+                flags = 0,
+                packageNames = listOf(DORMANT_NOOP_PACKAGE),
+                notificationTimeoutMs = OWN_APP_NOTIFICATION_TIMEOUT_MS
+            )
+        } else {
+            WritingGuardServiceConfig(
+                eventTypes = EXTERNAL_EVENT_TYPES,
+                feedbackType = EXTERNAL_FEEDBACK_TYPE,
+                flags = EXTERNAL_FLAGS,
+                packageNames = null,
+                notificationTimeoutMs = EXTERNAL_NOTIFICATION_TIMEOUT_MS
+            )
+        }
+    }
+
+    fun configure(info: AccessibilityServiceInfo, inOwnApp: Boolean) {
+        val cfg = resolve(inOwnApp)
+        info.eventTypes = cfg.eventTypes
+        info.feedbackType = cfg.feedbackType
+        info.flags = cfg.flags
+        info.packageNames = cfg.packageNames?.toTypedArray()
+        info.notificationTimeout = cfg.notificationTimeoutMs
     }
 }

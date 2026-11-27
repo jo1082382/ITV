@@ -72,7 +72,6 @@ import com.example.itv.presentation.components.ItvSeasonalRoofTopAccent
 import com.example.itv.presentation.components.ItvTactileButton
 import com.example.itv.presentation.components.ItvTactileCard
 import com.example.itv.presentation.components.LocalDarkTheme
-import com.example.itv.presentation.components.LocalSeasonalAnimationController
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -122,23 +121,6 @@ internal fun TestCalendarRecordsScreen(
     val isDark = LocalDarkTheme.current
     val density = androidx.compose.ui.platform.LocalDensity.current
     val scope = rememberCoroutineScope()
-    val seasonalAnimController = LocalSeasonalAnimationController.current
-    val seasonMode = com.example.itv.infrastructure.theme.UserThemeStore.rememberSeasonMode()
-    val hasActiveSeasonalMotion = remember(seasonMode) {
-        com.example.itv.infrastructure.theme.UserThemeStore.resolveActiveSeason(seasonMode) !=
-            com.example.itv.infrastructure.theme.SeasonThemeMode.OFF
-    }
-    LaunchedEffect(listState, seasonalAnimController, hasActiveSeasonalMotion) {
-        if (seasonalAnimController == null || !hasActiveSeasonalMotion) {
-            seasonalAnimController?.scrollPaused = false
-            return@LaunchedEffect
-        }
-        snapshotFlow { listState.isScrollInProgress }
-            .collect { scrolling -> seasonalAnimController.scrollPaused = scrolling }
-    }
-    DisposableEffect(seasonalAnimController) {
-        onDispose { seasonalAnimController?.scrollPaused = false }
-    }
     val today = remember(daySyncTick) { LocalDate.now() }
 
     // Single grid-container LayoutCoordinates ref -> eliminates ALL 31 per-cell onPlaced callbacks during scroll!

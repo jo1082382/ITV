@@ -88,7 +88,19 @@ data class AmbientSnapshot(
     val bedtimeScore: Int = 0,
     val isBedtimeCandidate: Boolean = false,
     val bedtimeScoreBreakdown: String = "",
-    val hasWokenUpFromSleep: Boolean = false
+    val hasWokenUpFromSleep: Boolean = false,
+    val isLikelyShadowInLitRoom: Boolean = false,
+    val recentPeakLux: Float? = null
+)
+
+data class EffectiveDarkRoomStatus(
+    val isDark: Boolean,
+    val isLikelyShadow: Boolean,
+    val isBedtimeWindow: Boolean,
+    val isLyingDown: Boolean,
+    val lux: Float?,
+    val isOccluded: Boolean,
+    val recentPeakLux: Float?
 )
 
 class LightAndBrightnessTracker(context: Context) : SensorEventListener {
@@ -107,6 +119,7 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
     @Volatile private var currentGx: Float? = null
     @Volatile private var currentGy: Float? = null
     @Volatile private var currentGz: Float? = null
+    private val shadowGuard = com.example.itv.domain.coaching.AmbientLightShadowGuard()
     @Volatile private var facedownMonitoring = false
     @Volatile private var facedownObserved = false
     @Volatile private var facedownAccumulatedMs = 0L
@@ -304,6 +317,7 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         sampleJob?.cancel()
         sampleJob = null
 
+        shadowGuard.recordGap(android.os.SystemClock.elapsedRealtime())
         stopSensors()
         releaseSensorThread()
     }
@@ -475,6 +489,7 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         periodicJob = null
         sampleJob?.cancel()
         sampleJob = null
+        shadowGuard.recordGap(android.os.SystemClock.elapsedRealtime())
         stopSensors()
         _snapshot.value = _snapshot.value.copy(
             isSampling = false,
@@ -512,7 +527,12 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
             while (isActive && isScreenOn) {
                 delay(5 * 60 * 1000L) // 5분
                 if (isActive && isScreenOn) {
-                    triggerSampleWindow(durationMs = 3500L, reason = "5분 정기 절전 측정", force = false)
+                    val ownAppIdle = com.example.itv.infrastructure.observation.accessibility.WritingGuard.inAppForeground &&
+                        continuousPostureClients == 0 &&
+                        !facedownMonitoring
+                    if (!ownAppIdle) {
+                        triggerSampleWindow(durationMs = 3500L, reason = "5분 정기 절전 측정", force = false)
+                    }
                 }
             }
         }
@@ -582,6 +602,56 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
     @Volatile var onFacedownDetectedWhileScreenOn: (() -> Unit)? = null
 
     fun currentPosture(): com.example.itv.domain.coaching.UserPosture = _snapshot.value.posture
+
+    /**
+     * `TYPE_LIGHT`가 `REPORTING_MODE_ON_CHANGE` 특성상 정적인 어둠 속에서 새 콜백을 보내지 않더라도
+     * 현재 시점(`nowElapsedMs`) 기준으로 그림자 가드와 실질 암실 여부를 즉시 평가합니다.
+     */
+    fun evaluateEffectiveDarkRoom(
+        nowElapsedMs: Long = android.os.SystemClock.elapsedRealtime(),
+        isTestMode: Boolean = false
+    ): EffectiveDarkRoomStatus {
+        val snap = _snapshot.value
+        val lux = currentLux ?: snap.lux
+        val prox = currentProximity ?: snap.proximityDistanceCm
+        val maxRange = proximitySensor?.maximumRange ?: 5f
+        val isNearNow = prox != null && (prox < maxRange || prox == 0f)
+        val isOccluded = if (prox != null) {
+            isNearNow && (prox <= 1.0f || lux == null || lux <= 10f)
+        } else {
+            snap.isOccluded
+        }
+        val isBedtimeWindow = !snap.hasWokenUpFromSleep && (
+            snap.bedtimePhase == BedtimePhase.APPROACHING ||
+                snap.bedtimePhase == BedtimePhase.PAST_BEDTIME
+            )
+        val isLyingDown = snap.posture == com.example.itv.domain.coaching.UserPosture.LYING_DOWN
+        val assessment = shadowGuard.evaluate(
+            nowMs = nowElapsedMs,
+            currentLux = lux,
+            isOccluded = isOccluded,
+            isBedtimeWindow = isBedtimeWindow,
+            isLyingDown = isLyingDown,
+            isTestMode = isTestMode
+        )
+        val isDark = com.example.itv.domain.coaching.ContextualPreInterventionPolicy.isEffectiveDarkRoom(
+            ambientLux = lux,
+            isOccluded = isOccluded,
+            isLikelyShadow = assessment.isLikelyShadowInLitRoom,
+            isBedtimeWindow = isBedtimeWindow,
+            isLyingDown = isLyingDown,
+            isTestMode = isTestMode
+        )
+        return EffectiveDarkRoomStatus(
+            isDark = isDark,
+            isLikelyShadow = assessment.isLikelyShadowInLitRoom,
+            isBedtimeWindow = isBedtimeWindow,
+            isLyingDown = isLyingDown,
+            lux = lux,
+            isOccluded = isOccluded,
+            recentPeakLux = assessment.recentPeakLux
+        )
+    }
 
     @Volatile private var facedownOnscreenStartTime = 0L
     private var facedownTickerJob: Job? = null
@@ -731,13 +801,26 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         when (event?.sensor?.type) {
             Sensor.TYPE_LIGHT -> {
                 val prevLux = currentLux
-                currentLux = event.values.firstOrNull()
+                val nextLux = event.values.firstOrNull()
+                currentLux = nextLux
+                val prox = currentProximity
+                val maxRange = proximitySensor?.maximumRange ?: 5f
+                val isNearNow = prox != null && (prox < maxRange || prox == 0f)
+                val isOccludedNow = isNearNow && (nextLux == null || nextLux <= 10f)
+                shadowGuard.record(now, nextLux, isOccludedNow)
                 checkFacedownProgress(now)
                 immediate = prevLux == null
                 reasonForUpdate = if (isContinuous) "실시간 조도 갱신" else _snapshot.value.lastTriggerReason
             }
             Sensor.TYPE_PROXIMITY -> {
-                currentProximity = event.values.firstOrNull()
+                val nextProx = event.values.firstOrNull()
+                currentProximity = nextProx
+                val maxRange = proximitySensor?.maximumRange ?: 5f
+                val isNearNow = nextProx != null && (nextProx < maxRange || nextProx == 0f)
+                val luxNow = currentLux
+                if (isNearNow && (luxNow == null || luxNow <= 10f)) {
+                    shadowGuard.record(now, luxNow, isOccluded = true)
+                }
                 checkFacedownProgress(now)
                 immediate = true
                 reasonForUpdate = if (isContinuous) "실시간 근접 갱신" else _snapshot.value.lastTriggerReason
@@ -796,8 +879,9 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         if (old.lux == null && new.lux != null) return true
         if (old.proximityDistanceCm == null && new.proximityDistanceCm != null) return true
 
-        // 2. 가림 판정 여부 변경 (손/물체 가림 또는 가림 해제)
+        // 2. 가림/그림자 판정 여부 변경 (손/물체 가림 또는 그림자 상태 전환)
         if (old.isOccluded != new.isOccluded) return true
+        if (old.isLikelyShadowInLitRoom != new.isLikelyShadowInLitRoom) return true
 
         // 3. 근접 상태 변경 (원거리 ↔ 근접)
         if (old.isNear != new.isNear) return true
@@ -870,7 +954,6 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         val isNear = proximity != null && (proximity < maxRange || proximity == 0f)
         val isOccluded = isNear && (lux == null || lux <= 10f)
 
-        val isDarkAmbient = lux != null && lux <= com.example.itv.domain.coaching.ContextualPreInterventionPolicy.DARK_LUX_THRESHOLD
         val isBrightAmbient = lux != null && lux > 150f
         val isVeryBrightAmbient = lux != null && lux > 1000f
         val isDarkScreen = brightness != null && brightness <= com.example.itv.domain.coaching.ContextualPreInterventionPolicy.DARK_SCREEN_BRIGHTNESS_THRESHOLD
@@ -878,6 +961,7 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
 
         // 평소 추정 취침 시각 연계 계산 (이미 수면 완료 후 기상한 경우 전날 취침 경과를 초기화하고 다음 취침까지 남은 시간으로 전환)
         val nowWallMs = System.currentTimeMillis()
+        val nowElapsedForShadow = android.os.SystemClock.elapsedRealtime()
         val zone = ZoneId.systemDefault()
         val lastSleep = com.example.itv.infrastructure.sleep.SleepWakeCycleStore.getLastCompletedSleep(appContext)
 
@@ -919,6 +1003,30 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
             diffMinutes in 0..com.example.itv.domain.sleep.SleepWakeCyclePolicy.MAX_POST_BEDTIME_MINUTES -> BedtimePhase.PAST_BEDTIME
             else -> BedtimePhase.ACTIVE_HOURS
         }
+
+        val (posture, pitchRoll, postureExplain) = computePosture(
+            currentGx, currentGy, currentGz,
+            isNear, lux, isCurrentlyStationary
+        )
+        val isBedtimeTimeWindow = bedtimePhase == BedtimePhase.APPROACHING || bedtimePhase == BedtimePhase.PAST_BEDTIME
+        val isLyingDown = posture == com.example.itv.domain.coaching.UserPosture.LYING_DOWN
+        val shadowAssessment = shadowGuard.evaluate(
+            nowMs = nowElapsedForShadow,
+            currentLux = lux,
+            isOccluded = isOccluded,
+            isBedtimeWindow = isBedtimeTimeWindow,
+            isLyingDown = isLyingDown,
+            isTestMode = false
+        )
+        val isLikelyShadow = shadowAssessment.isLikelyShadowInLitRoom
+        val isDarkAmbient = com.example.itv.domain.coaching.ContextualPreInterventionPolicy.isEffectiveDarkRoom(
+            ambientLux = lux,
+            isOccluded = isOccluded,
+            isLikelyShadow = isLikelyShadow,
+            isBedtimeWindow = isBedtimeTimeWindow,
+            isLyingDown = isLyingDown,
+            isTestMode = false
+        )
 
         val bedtimeText = if (hasBedtime) "%02d:%02d".format(h, m) else "23:30(기준)"
         val bedtimeDistanceText = when {
@@ -985,7 +1093,21 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
                             "$timePrefix 불을 끈 어두운 방(조도 ${lux.toInt()} lux)에서 밝은 화면(${brightness}/255)을 계속 응시하고 있어, 눈 피로도 증가와 멜라토닌 분비 억제로 인한 수면 지연(취침 미루기) 위험이 큽니다."
                         )
                     }
-                    // 1-3. 조명 켜짐 (취침 시간대이나 실내 불을 켜두고 활동 중)
+                    // 1-3. 밝은 실내에서 머리/물체 그림자로 조도만 일시 하락
+                    isLikelyShadow -> {
+                        val peakTxt = shadowAssessment.recentPeakLux?.toInt()?.let { "${it} lux" } ?: "밝음"
+                        val state = if (bedtimePhase == BedtimePhase.PAST_BEDTIME) {
+                            UserEnvironmentState.NIGHT_ACTIVE
+                        } else {
+                            UserEnvironmentState.INDOOR_ACTIVE
+                        }
+                        Triple(
+                            state,
+                            "실내 조명·그림자 감지 (암실 오판정 방지)",
+                            "$timePrefix 현재 조도(${lux.toInt()} lux)는 낮지만 최근 3분 내 실내 조명($peakTxt)이 감지되어 머리·그늘 가림으로 판단하고 암실 개입을 보류 중입니다."
+                        )
+                    }
+                    // 1-4. 조명 켜짐 (취침 시간대이나 실내 불을 켜두고 활동 중)
                     else -> {
                         val state = if (bedtimePhase == BedtimePhase.PAST_BEDTIME) {
                             UserEnvironmentState.NIGHT_ACTIVE
@@ -1031,7 +1153,16 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
                             "$timePrefix 주변 환경이 밝고(${lux.toInt()} lux) 화면도 적정 밝기(${brightness ?: "-"} / 255)인 정상적인 주간 활동 상태입니다."
                         )
                     }
-                    // 2-3. 보통 실내 조명 환경
+                    // 2-3. 밝은 실내에서 머리/책상 그림자로 조도만 일시 하락
+                    isLikelyShadow -> {
+                        val peakTxt = shadowAssessment.recentPeakLux?.toInt()?.let { "${it} lux" } ?: "밝음"
+                        Triple(
+                            UserEnvironmentState.INDOOR_ACTIVE,
+                            "실내 일상 활동 상태 (그림자 감지 · 암실 제외)",
+                            "$timePrefix 현재 조도(${lux.toInt()} lux)는 낮지만 최근 실내 조명($peakTxt) 이력이 있어 머리·책상 그림자로 판단했습니다."
+                        )
+                    }
+                    // 2-4. 보통 실내 조명 환경
                     !isDarkAmbient -> {
                         Triple(
                             UserEnvironmentState.INDOOR_ACTIVE,
@@ -1039,7 +1170,7 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
                             "$timePrefix 실내 조명 조도(${lux.toInt()} lux) 환경에서 일반적인 화면 밝기(${brightness ?: "-"} / 255, ${if (nightMode) "다크모드 ON" else "다크모드 OFF"})로 활동 중인 상태입니다."
                         )
                     }
-                    // 2-4. 활동 시간대이나 어두운 실내 (암실 시청)
+                    // 2-5. 활동 시간대이나 어두운 실내 (암실 시청)
                     !isDarkScreen -> {
                         Triple(
                             UserEnvironmentState.INDOOR_DARK_ACTIVE,
@@ -1047,7 +1178,7 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
                             "$timePrefix 주변 조명이 어두우나(${lux.toInt()} lux) 밝은 화면(${brightness}/255)을 응시하고 있어 눈 피로도가 증가할 수 있습니다."
                         )
                     }
-                    // 2-5. 활동 시간대 어두운 실내 절전
+                    // 2-6. 활동 시간대 어두운 실내 절전
                     else -> {
                         Triple(
                             UserEnvironmentState.INDOOR_DARK_ACTIVE,
@@ -1059,13 +1190,7 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
             }
         }
 
-        val (posture, pitchRoll, postureExplain) = computePosture(
-            currentGx, currentGy, currentGz,
-            isNear, lux, isCurrentlyStationary
-        )
-
         // 배터리 소모 0을 위해 시간대가 취침 시간대(임박/경과)에 진입했을 때만 1회성 소프트 맥락 조회
-        val isBedtimeTimeWindow = bedtimePhase == BedtimePhase.APPROACHING || bedtimePhase == BedtimePhase.PAST_BEDTIME
         val isLikelyNight = isBedtimeTimeWindow
 
         var isCharging: Boolean? = null
@@ -1115,8 +1240,8 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
             else -> {}
         }
 
-        // 2) 암실/조도 (최대 30점): 불을 끈 어두운 환경이 필수
-        if (lux != null) {
+        // 2) 암실/조도 (최대 30점): 그림자가 아닌 실질 암실 환경에서만 가점
+        if (lux != null && isDarkAmbient && !isLikelyShadow) {
             when {
                 lux <= 3f -> {
                     score += 30
@@ -1126,9 +1251,9 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
                     score += 25
                     breakdownList.add("어두운방(+25)")
                 }
-                lux <= 20f -> {
-                    score += 15
-                    breakdownList.add("미약조명(+15)")
+                lux <= 12f -> {
+                    score += 18
+                    breakdownList.add("미약조명(+18)")
                 }
             }
         }
@@ -1158,8 +1283,8 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
         }
 
         val bedtimeScore = score.coerceIn(0, 100)
-        // 불을 켜고 생활 중(lux > 20f)이거나, 취침 1시간 이전(ACTIVE_HOURS)인 경우에는 절대 취침 후보로 인정하지 않음
-        val isBedtimeCandidate = isDarkAmbient && isBedtimeTimeWindow && bedtimeScore >= 60
+        // 불을 켜고 생활 중이거나 그림자 의심 상태, 또는 취침 1시간 이전(ACTIVE_HOURS)인 경우에는 절대 취침 후보로 인정하지 않음
+        val isBedtimeCandidate = isDarkAmbient && !isLikelyShadow && isBedtimeTimeWindow && bedtimeScore >= 60
         val bedtimeScoreBreakdown = if (breakdownList.isEmpty()) "점수 없음 (0점)" else breakdownList.joinToString(" · ")
 
         return AmbientSnapshot(
@@ -1196,7 +1321,9 @@ class LightAndBrightnessTracker(context: Context) : SensorEventListener {
             bedtimeScore = bedtimeScore,
             isBedtimeCandidate = isBedtimeCandidate,
             bedtimeScoreBreakdown = bedtimeScoreBreakdown,
-            hasWokenUpFromSleep = hasWokenUp
+            hasWokenUpFromSleep = hasWokenUp,
+            isLikelyShadowInLitRoom = isLikelyShadow,
+            recentPeakLux = shadowAssessment.recentPeakLux
         )
     }
 

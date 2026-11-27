@@ -21,12 +21,14 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.CanvasDrawScope
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import com.example.itv.domain.reward.MonthlyChestTier
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
@@ -275,66 +277,274 @@ internal fun RewardKeyIllustration(
     }
 }
 
+internal data class MysteryLightSpec(
+    val silhouetteRadiusFactor: Float,
+    val riseHeightFactor: Float,
+    val coreColor: Color,
+    val midColor: Color,
+    val outerColor: Color,
+    val rimColor: Color,
+    val sparklePrimary: Color,
+    val sparkleSecondary: Color,
+    val primaryRayCount: Int,
+    val secondaryRayCount: Int,
+    val rayLengthFactor: Float,
+    val rayHalfSpreadRad: Float,
+    val rayAlpha: Float,
+    val haloRadiusFactor: Float,
+    val coronaRadiusFactor: Float,
+    val haloAlpha: Float,
+    val sparkleCount: Int,
+    val moteCount: Int,
+    val ringCount: Int
+)
+
+internal fun mysteryLightSpecFor(tier: MonthlyChestTier): MysteryLightSpec = when (tier) {
+    MonthlyChestTier.BRONZE -> MysteryLightSpec(
+        silhouetteRadiusFactor = 0.110f,
+        riseHeightFactor = 0.125f,
+        coreColor = Color(0xFFFFF3C6),
+        midColor = Color(0xFFF2AA52),
+        outerColor = Color(0xFFCC722A),
+        rimColor = Color(0xFFFFE9A8),
+        sparklePrimary = Color(0xFFFFE599),
+        sparkleSecondary = Color(0xFFF6B55E),
+        primaryRayCount = 6,
+        secondaryRayCount = 0,
+        rayLengthFactor = 0.30f,
+        rayHalfSpreadRad = (9.5 * PI / 180.0).toFloat(),
+        rayAlpha = 0.44f,
+        haloRadiusFactor = 0.28f,
+        coronaRadiusFactor = 0.19f,
+        haloAlpha = 0.62f,
+        sparkleCount = 4,
+        moteCount = 4,
+        ringCount = 0
+    )
+    MonthlyChestTier.SILVER -> MysteryLightSpec(
+        silhouetteRadiusFactor = 0.148f,
+        riseHeightFactor = 0.175f,
+        coreColor = Color(0xFFFFFFFF),
+        midColor = Color(0xFFA8F6FF),
+        outerColor = Color(0xFF39CEFA),
+        rimColor = Color(0xFFE9FEFF),
+        sparklePrimary = Color(0xFFFFFFFF),
+        sparkleSecondary = Color(0xFF7CF0FF),
+        primaryRayCount = 10,
+        secondaryRayCount = 5,
+        rayLengthFactor = 0.48f,
+        rayHalfSpreadRad = (10.5 * PI / 180.0).toFloat(),
+        rayAlpha = 0.70f,
+        haloRadiusFactor = 0.44f,
+        coronaRadiusFactor = 0.27f,
+        haloAlpha = 0.80f,
+        sparkleCount = 9,
+        moteCount = 8,
+        ringCount = 1
+    )
+    MonthlyChestTier.GOLD -> MysteryLightSpec(
+        silhouetteRadiusFactor = 0.192f,
+        riseHeightFactor = 0.230f,
+        coreColor = Color(0xFFFFFFFF),
+        midColor = Color(0xFFFFF68F),
+        outerColor = Color(0xFFFFB81A),
+        rimColor = Color(0xFFFFFFFF),
+        sparklePrimary = Color(0xFFFFFFFF),
+        sparkleSecondary = Color(0xFFFFE654),
+        primaryRayCount = 16,
+        secondaryRayCount = 8,
+        rayLengthFactor = 0.66f,
+        rayHalfSpreadRad = (11.5 * PI / 180.0).toFloat(),
+        rayAlpha = 0.92f,
+        haloRadiusFactor = 0.60f,
+        coronaRadiusFactor = 0.36f,
+        haloAlpha = 0.96f,
+        sparkleCount = 16,
+        moteCount = 14,
+        ringCount = 2
+    )
+}
+
+/**
+ * Reusable Path scratch container to keep 60fps chest opening draws free of per-frame Path allocations.
+ */
+internal class ChestDrawScratch {
+    val primaryPath = Path()
+    val secondaryPath = Path()
+    val rayPath = Path()
+    val silhouettePath = Path()
+    val sparklePath = Path()
+    val shacklePath = Path()
+}
+
+private val DefaultChestDrawScratch = ChestDrawScratch()
+
+// Precomputed deterministic angular & radial tables for sparkles & rising light motes (zero per-frame List allocations)
+private val SparkleAnglesDeg = floatArrayOf(
+    -155f, -125f, -92f, -58f, -25f,
+    -172f, -140f, -108f, -74f, -40f, -10f,
+    18f, 162f, -118f, -82f, -48f
+)
+private val SparkleDistMultipliers = floatArrayOf(
+    1.28f, 1.56f, 1.44f, 1.60f, 1.32f,
+    1.78f, 1.94f, 1.86f, 1.98f, 1.82f, 1.72f,
+    1.46f, 1.48f, 2.18f, 2.24f, 2.12f
+)
+private val SparkleSizeMultipliers = floatArrayOf(
+    0.032f, 0.044f, 0.038f, 0.046f, 0.034f,
+    0.028f, 0.040f, 0.048f, 0.042f, 0.036f, 0.030f,
+    0.026f, 0.026f, 0.052f, 0.046f, 0.040f
+)
+private val MoteXOffsets = floatArrayOf(
+    -0.28f, 0.24f, -0.12f, 0.36f, -0.40f, 0.10f, -0.22f,
+    0.30f, -0.04f, 0.44f, -0.46f, 0.18f, -0.34f, 0.02f
+)
+private val MotePhaseOffsets = floatArrayOf(
+    0.05f, 0.31f, 0.58f, 0.82f, 0.17f, 0.44f, 0.71f,
+    0.93f, 0.24f, 0.51f, 0.77f, 0.11f, 0.38f, 0.65f
+)
+
+/**
+ * Exact shared world-space geometry of a monthly reward chest rendered inside [bounds].
+ * Both [drawMonthlyRewardChest] and [MonthlyChestOpeningOverlay] consume this single source of
+ * truth so the key tip, keyhole slot, padlock shackle, floor plane, and emerging silhouette align
+ * with 0.0px error at every resolution and aspect ratio.
+ */
+internal data class ChestGeometry(
+    val bounds: Rect,
+    val u: Float,
+    val cx: Float,
+    val chestLeft: Float,
+    val chestRight: Float,
+    val chestW: Float,
+    val baseTop: Float,
+    val baseBottom: Float,
+    val baseH: Float,
+    val lidH: Float,
+    val rimH: Float,
+    val lockCenter: Offset,
+    val lockWidth: Float,
+    val lockHeight: Float,
+    val keyholeCenter: Offset,
+    val keyholeRadius: Float
+)
+
+internal fun computeChestGeometry(bounds: Rect): ChestGeometry {
+    val u = minOf(bounds.width, bounds.height)
+    val cx = bounds.center.x
+    val chestW = u * 0.68f
+    val baseH = u * 0.30f
+    val lidH = u * 0.21f
+    val rimH = baseH * 0.20f
+    val chestLeft = cx - chestW * 0.5f
+    val baseBottom = bounds.top + bounds.height * 0.87f
+    val baseTop = baseBottom - baseH
+    val lockCenter = Offset(cx, baseTop + rimH * 1.18f)
+    val lockWidth = chestW * 0.295f
+    val lockHeight = u * 0.118f
+    val keyholeRadius = lockHeight * 0.145f
+    val keyholeCenter = Offset(lockCenter.x, lockCenter.y - keyholeRadius * 0.12f)
+    return ChestGeometry(
+        bounds = bounds,
+        u = u,
+        cx = cx,
+        chestLeft = chestLeft,
+        chestRight = chestLeft + chestW,
+        chestW = chestW,
+        baseTop = baseTop,
+        baseBottom = baseBottom,
+        baseH = baseH,
+        lidH = lidH,
+        rimH = rimH,
+        lockCenter = lockCenter,
+        lockWidth = lockWidth,
+        lockHeight = lockHeight,
+        keyholeCenter = keyholeCenter,
+        keyholeRadius = keyholeRadius
+    )
+}
+
 internal fun DrawScope.drawMonthlyRewardChest(
     tier: MonthlyChestTier,
     openProgress: Float,
     lockPopProgress: Float = 0f,
     glowPhase: Float = 0f,
-    dimmed: Boolean = false
+    dimmed: Boolean = false,
+    seamGlowAlpha: Float = 0f,
+    lockShakeOffsetPx: Float = 0f,
+    silhouetteRiseProgress: Float = openProgress,
+    scratch: ChestDrawScratch = DefaultChestDrawScratch,
+    bounds: Rect = Rect(0f, 0f, size.width, size.height),
+    shackleUnlockProgress: Float = 0f
 ) {
     val palette = paletteForChest(tier)
-    val w = size.width
-    val h = size.height
-    val u = minOf(w, h)
-    val strokeW = (u * 0.028f).coerceIn(1.3f, 4.2f)
+    val lightSpec = mysteryLightSpecFor(tier)
+    val geo = computeChestGeometry(bounds)
+    val u = geo.u
+    val cx = geo.cx
+    val chestW = geo.chestW
+    val baseH = geo.baseH
+    val lidH = geo.lidH
+    val rimH = geo.rimH
+    val chestLeft = geo.chestLeft
+    val baseBottom = geo.baseBottom
+    val baseTop = geo.baseTop
+    val strokeW = (u * 0.027f).coerceIn(1.3f, 4.2f)
     val contentAlpha = if (dimmed) 0.58f else 1f
 
-    val chestW = u * 0.68f
-    val baseH = u * 0.30f
-    val lidH = u * 0.21f
-    val chestLeft = (w - chestW) * 0.5f
-    val baseBottom = h * 0.87f
-    val baseTop = baseBottom - baseH
-    val cx = w * 0.5f
-
-    // 1. Soft floor shadow
-    drawOval(
-        color = Color(0xFF2B231E).copy(alpha = 0.16f * contentAlpha),
-        topLeft = Offset(chestLeft - chestW * 0.06f, baseBottom - u * 0.04f),
-        size = Size(chestW * 1.12f, u * 0.11f)
+    val clampedOpen = openProgress.coerceIn(0f, 1f)
+    val clampedRise = silhouetteRiseProgress.coerceIn(0f, 1f)
+    val clampedShackle = shackleUnlockProgress.coerceIn(0f, 1f)
+    val pulse = 0.94f + 0.06f * sin(glowPhase * 2f * PI.toFloat())
+    val floatBob = sin(glowPhase * 2f * PI.toFloat()) * u * 0.014f * clampedRise
+    // Silhouette starts tucked down INSIDE the dark chest cavity at rise=0, then ascends smoothly!
+    val silhouetteCenter = Offset(
+        x = cx,
+        y = baseTop + u * 0.045f - u * (0.055f + lightSpec.riseHeightFactor) * clampedRise + floatBob
     )
 
-    // 2. Radiant treasure glow behind/inside when opening
-    if (openProgress > 0.04f) {
-        val pulse = 0.94f + 0.06f * sin(glowPhase * 2f * PI.toFloat())
-        val glowRadius = u * (0.34f + 0.16f * openProgress) * pulse
-        val glowCenter = Offset(cx, baseTop - u * 0.04f)
-        drawCircle(
-            brush = Brush.radialGradient(
-                colors = listOf(
-                    palette.glowInner.copy(alpha = (0.88f * openProgress * contentAlpha).coerceIn(0f, 1f)),
-                    palette.glowInner.copy(alpha = (0.40f * openProgress * contentAlpha).coerceIn(0f, 1f)),
-                    palette.glowOuter
-                ),
-                center = glowCenter,
-                radius = glowRadius
-            ),
-            radius = glowRadius,
-            center = glowCenter
+    // =========================================================================
+    // LAYER 1 (DEEPEST BACK): Ground shadow & wide background volumetric rays
+    // =========================================================================
+    drawOval(
+        color = Color(0xFF2B231E).copy(alpha = 0.18f * contentAlpha),
+        topLeft = Offset(chestLeft - chestW * 0.07f, baseBottom - u * 0.042f),
+        size = Size(chestW * 1.14f, u * 0.115f)
+    )
+
+    if (clampedOpen > 0.04f) {
+        val lightStrength = (clampedOpen * 0.40f + clampedRise * 0.60f).coerceIn(0f, 1f) * contentAlpha
+        drawMysteryBackRaysAndHalo(
+            spec = lightSpec,
+            origin = silhouetteCenter,
+            u = u,
+            strength = lightStrength,
+            glowPhase = glowPhase,
+            pulse = pulse,
+            scratch = scratch
         )
     }
 
-    // 3. Open Lid (back-tilted perspective) & Treasure Interior
-    val lidLift = openProgress * (u * 0.20f)
-    if (openProgress > 0.02f) {
-        // Raised inner lid back wall
-        val openLidTop = baseTop - lidH * (0.72f + 0.58f * openProgress)
-        val openLidBottom = baseTop + u * 0.02f
-        val lidInset = chestW * 0.04f * openProgress
-        val openLidPath = Path().apply {
+    // =========================================================================
+    // LAYER 2 (BEHIND INTERIOR): Single continuous hinged lid — rear-swing phase (open >= 0.28)
+    // =========================================================================
+    val lidPivotSplit = 0.28f
+    if (clampedOpen >= lidPivotSplit) {
+        val backT = ((clampedOpen - lidPivotSplit) / (1f - lidPivotSplit)).coerceIn(0f, 1f)
+        val openLidTop = baseTop - lidH * (0.14f + 1.12f * backT)
+        val openLidBottom = baseTop + u * 0.015f
+        val flareX = chestW * 0.032f * backT
+        val lidInset = chestW * 0.025f * backT
+        val openLidPath = scratch.primaryPath.apply {
+            rewind()
             moveTo(chestLeft + lidInset, openLidBottom)
-            lineTo(chestLeft - chestW * 0.03f * openProgress, openLidTop + lidH * 0.32f)
-            quadraticTo(cx, openLidTop - lidH * 0.20f, chestLeft + chestW + chestW * 0.03f * openProgress, openLidTop + lidH * 0.32f)
+            lineTo(chestLeft - flareX, openLidTop + lidH * 0.30f * backT)
+            quadraticTo(
+                cx,
+                openLidTop - lidH * 0.22f * backT,
+                chestLeft + chestW + flareX,
+                openLidTop + lidH * 0.30f * backT
+            )
             lineTo(chestLeft + chestW - lidInset, openLidBottom)
             close()
         }
@@ -347,23 +557,40 @@ internal fun DrawScope.drawMonthlyRewardChest(
             ),
             alpha = contentAlpha
         )
-        // Inner cavity lining
-        val innerCavity = Path().apply {
-            moveTo(chestLeft + chestW * 0.08f, baseTop + u * 0.01f)
-            lineTo(chestLeft + chestW * 0.06f, openLidTop + lidH * 0.52f)
-            quadraticTo(cx, openLidTop + lidH * 0.18f, chestLeft + chestW * 0.94f, openLidTop + lidH * 0.52f)
-            lineTo(chestLeft + chestW * 0.92f, baseTop + u * 0.01f)
-            close()
+
+        // Inner underside of the swung-back lid bathed in reflected light from the mystery object!
+        if (backT > 0.06f) {
+            val innerCavity = scratch.secondaryPath.apply {
+                rewind()
+                moveTo(chestLeft + chestW * 0.07f, baseTop + u * 0.008f)
+                lineTo(chestLeft + chestW * 0.04f, openLidTop + lidH * 0.44f * backT)
+                quadraticTo(
+                    cx,
+                    openLidTop + lidH * 0.14f * backT,
+                    chestLeft + chestW * 0.96f,
+                    openLidTop + lidH * 0.44f * backT
+                )
+                lineTo(chestLeft + chestW * 0.93f, baseTop + u * 0.008f)
+                close()
+            }
+            drawPath(
+                path = innerCavity,
+                brush = Brush.verticalGradient(
+                    colors = listOf(
+                        Color(0xFF3A2215).copy(alpha = 0.66f * backT * contentAlpha),
+                        lightSpec.midColor.copy(alpha = 0.44f * backT * contentAlpha)
+                    ),
+                    startY = openLidTop + lidH * 0.16f * backT,
+                    endY = baseTop + u * 0.015f
+                )
+            )
         }
-        drawPath(
-            path = innerCavity,
-            color = Color(0xFF3E2618).copy(alpha = 0.62f * openProgress * contentAlpha)
-        )
-        // Rim band on raised lid
+
+        // Metallic lid rim band + crisp outline
         drawPath(
             path = openLidPath,
             color = palette.trimMid.copy(alpha = contentAlpha),
-            style = Stroke(width = strokeW * 1.9f, join = StrokeJoin.Round)
+            style = Stroke(width = strokeW * 1.85f, join = StrokeJoin.Round)
         )
         drawPath(
             path = openLidPath,
@@ -371,40 +598,81 @@ internal fun DrawScope.drawMonthlyRewardChest(
             style = Stroke(width = strokeW, join = StrokeJoin.Round)
         )
 
-        // Gold chest crown sitting atop the opened lid!
+        // Gold chest crown riding smoothly atop the swung-back lid crest
         if (tier == MonthlyChestTier.GOLD) {
             drawMiniCrown(
-                center = Offset(cx, openLidTop + lidH * 0.04f),
+                center = Offset(cx, openLidTop + lidH * 0.02f * backT),
                 crownW = chestW * 0.29f,
-                crownH = u * 0.13f,
+                crownH = u * 0.13f * (0.42f + 0.58f * backT),
                 strokeW = strokeW * 0.85f,
                 alpha = contentAlpha
             )
         }
-
-        // Dark chest interior mouth
-        drawRoundRect(
-            color = Color(0xFF3A2416).copy(alpha = 0.90f * contentAlpha),
-            topLeft = Offset(chestLeft + chestW * 0.04f, baseTop - u * 0.03f),
-            size = Size(chestW * 0.92f, u * 0.09f),
-            cornerRadius = CornerRadius(u * 0.03f, u * 0.03f)
-        )
-
-        // Tier-specific treasures bursting out of the open chest!
-        drawChestTreasures(
-            tier = tier,
-            cx = cx,
-            mouthY = baseTop,
-            chestW = chestW,
-            u = u,
-            openProgress = openProgress,
-            glowPhase = glowPhase,
-            strokeW = strokeW * 0.82f,
-            alpha = contentAlpha
-        )
     }
 
-    // 4. Chest Lower Base Box
+    // =========================================================================
+    // LAYER 3 (INSIDE CHEST CAVITY): Dark hollow interior + clipped light pillar + rising silhouette
+    // Clipped strictly above the front rim (`baseTop + 0.022*u`) so the mystery object physically
+    // rises FROM INSIDE the chest behind the front wooden/metallic wall!
+    // =========================================================================
+    if (clampedOpen > 0.02f) {
+        val mouthOpenFactor = (clampedOpen / 0.35f).coerceIn(0f, 1f)
+        // Dark hollow cavity rim
+        drawRoundRect(
+            color = Color(0xFF1F120C).copy(alpha = 0.94f * mouthOpenFactor * contentAlpha),
+            topLeft = Offset(chestLeft + chestW * 0.045f, baseTop - u * 0.028f * mouthOpenFactor),
+            size = Size(chestW * 0.91f, u * 0.082f),
+            cornerRadius = CornerRadius(u * 0.028f, u * 0.028f)
+        )
+
+        clipRect(
+            left = 0f,
+            top = 0f,
+            right = size.width,
+            bottom = baseTop + u * 0.020f
+        ) {
+            // Upward volumetric light pillar pouring straight out of the open chest mouth
+            val pillarTopY = silhouetteCenter.y - u * lightSpec.rayLengthFactor * 0.68f
+            val pillarSpreadTop = chestW * (0.70f + lightSpec.haloRadiusFactor * 1.15f)
+            val pillarPath = scratch.rayPath.apply {
+                rewind()
+                moveTo(chestLeft + chestW * 0.08f, baseTop + u * 0.022f)
+                lineTo(cx - pillarSpreadTop * 0.5f, pillarTopY)
+                lineTo(cx + pillarSpreadTop * 0.5f, pillarTopY)
+                lineTo(chestLeft + chestW * 0.92f, baseTop + u * 0.022f)
+                close()
+            }
+            drawPath(
+                path = pillarPath,
+                brush = Brush.verticalGradient(
+                    colors = listOf(
+                        Color.Transparent,
+                        lightSpec.midColor.copy(alpha = (0.36f * clampedOpen * contentAlpha).coerceIn(0f, 1f)),
+                        lightSpec.coreColor.copy(alpha = (0.80f * clampedOpen * contentAlpha).coerceIn(0f, 1f))
+                    ),
+                    startY = pillarTopY,
+                    endY = baseTop + u * 0.022f
+                )
+            )
+
+            // Enigmatic Black Silhouette Object + Tight Blazing Backlit Corona rising out of the interior!
+            if (clampedRise > 0.01f) {
+                drawMysterySilhouetteObject(
+                    spec = lightSpec,
+                    center = silhouetteCenter,
+                    u = u,
+                    riseProgress = clampedRise,
+                    pulse = pulse,
+                    contentAlpha = contentAlpha,
+                    scratch = scratch
+                )
+            }
+        }
+    }
+
+    // =========================================================================
+    // LAYER 4 (CHEST FRONT BOX): Solid front wall enclosing the chest interior & silhouette base
+    // =========================================================================
     val baseRect = Rect(chestLeft, baseTop, chestLeft + chestW, baseBottom)
     val baseCorner = CornerRadius(u * 0.055f, u * 0.055f)
     drawRoundRect(
@@ -422,7 +690,6 @@ internal fun DrawScope.drawMonthlyRewardChest(
     // Material texture details on base
     when (tier) {
         MonthlyChestTier.BRONZE -> {
-            // Horizontal wooden plank lines
             for (i in 1..2) {
                 val py = baseTop + baseH * (i / 3f)
                 drawLine(
@@ -434,7 +701,6 @@ internal fun DrawScope.drawMonthlyRewardChest(
             }
         }
         MonthlyChestTier.SILVER -> {
-            // Cute subtle paw embosses on lower corners
             drawTinyPawPrint(
                 center = Offset(chestLeft + chestW * 0.21f, baseTop + baseH * 0.62f),
                 radius = u * 0.036f,
@@ -447,12 +713,13 @@ internal fun DrawScope.drawMonthlyRewardChest(
             )
         }
         MonthlyChestTier.GOLD -> {
-            // Royal gold filigree curved wing accents on front panel
-            val leftFiligree = Path().apply {
+            val leftFiligree = scratch.primaryPath.apply {
+                rewind()
                 moveTo(chestLeft + chestW * 0.14f, baseBottom - baseH * 0.24f)
                 quadraticTo(chestLeft + chestW * 0.28f, baseTop + baseH * 0.34f, cx - chestW * 0.12f, baseTop + baseH * 0.64f)
             }
-            val rightFiligree = Path().apply {
+            val rightFiligree = scratch.secondaryPath.apply {
+                rewind()
                 moveTo(chestLeft + chestW * 0.86f, baseBottom - baseH * 0.24f)
                 quadraticTo(chestLeft + chestW * 0.72f, baseTop + baseH * 0.34f, cx + chestW * 0.12f, baseTop + baseH * 0.64f)
             }
@@ -463,8 +730,6 @@ internal fun DrawScope.drawMonthlyRewardChest(
 
     // Metallic rim & vertical corner bands on lower box
     val bandW = chestW * 0.11f
-    val rimH = baseH * 0.20f
-    // Top rim bar
     drawRoundRect(
         brush = Brush.verticalGradient(
             colors = listOf(palette.trimLight, palette.trimMid, palette.trimDark),
@@ -476,7 +741,6 @@ internal fun DrawScope.drawMonthlyRewardChest(
         cornerRadius = CornerRadius(u * 0.02f, u * 0.02f),
         alpha = contentAlpha
     )
-    // Left & right vertical metal corner straps
     drawRoundRect(
         brush = Brush.horizontalGradient(
             colors = listOf(palette.trimLight, palette.trimMid, palette.trimDark),
@@ -499,7 +763,6 @@ internal fun DrawScope.drawMonthlyRewardChest(
         cornerRadius = CornerRadius(u * 0.03f, u * 0.03f),
         alpha = contentAlpha
     )
-    // Bottom horizontal metal trim
     val bottomTrimH = baseH * 0.16f
     drawRoundRect(
         brush = Brush.verticalGradient(
@@ -513,25 +776,17 @@ internal fun DrawScope.drawMonthlyRewardChest(
         alpha = contentAlpha
     )
 
-    // Corner rivets or gems (Bronze = rivets, Silver = teal gems, Gold = sapphire gems)
-    val cornerOffsets = listOf(
-        Offset(chestLeft + bandW * 0.52f, baseBottom - bottomTrimH * 0.58f),
-        Offset(chestLeft + chestW - bandW * 0.52f, baseBottom - bottomTrimH * 0.58f)
-    )
-    cornerOffsets.forEach { pos ->
-        if (tier == MonthlyChestTier.BRONZE) {
-            drawCircle(color = palette.trimLight.copy(alpha = contentAlpha), radius = u * 0.017f, center = pos)
-            drawCircle(color = ChestInkOutline.copy(alpha = contentAlpha), radius = u * 0.017f, center = pos, style = Stroke(strokeW * 0.65f))
-        } else {
-            drawFacetedGem(
-                center = pos,
-                radius = u * 0.025f,
-                color = palette.gemColor,
-                highlight = palette.gemHighlight,
-                strokeW = strokeW * 0.65f,
-                alpha = contentAlpha
-            )
-        }
+    // Corner rivets or gems
+    val leftCornerPos = Offset(chestLeft + bandW * 0.52f, baseBottom - bottomTrimH * 0.58f)
+    val rightCornerPos = Offset(chestLeft + chestW - bandW * 0.52f, baseBottom - bottomTrimH * 0.58f)
+    if (tier == MonthlyChestTier.BRONZE) {
+        drawCircle(color = palette.trimLight.copy(alpha = contentAlpha), radius = u * 0.017f, center = leftCornerPos)
+        drawCircle(color = ChestInkOutline.copy(alpha = contentAlpha), radius = u * 0.017f, center = leftCornerPos, style = Stroke(strokeW * 0.65f))
+        drawCircle(color = palette.trimLight.copy(alpha = contentAlpha), radius = u * 0.017f, center = rightCornerPos)
+        drawCircle(color = ChestInkOutline.copy(alpha = contentAlpha), radius = u * 0.017f, center = rightCornerPos, style = Stroke(strokeW * 0.65f))
+    } else {
+        drawFacetedGem(leftCornerPos, u * 0.025f, palette.gemColor, palette.gemHighlight, strokeW * 0.65f, contentAlpha)
+        drawFacetedGem(rightCornerPos, u * 0.025f, palette.gemColor, palette.gemHighlight, strokeW * 0.65f, contentAlpha)
     }
 
     // Crisp outline around base box
@@ -549,15 +804,45 @@ internal fun DrawScope.drawMonthlyRewardChest(
         strokeWidth = strokeW * 0.78f
     )
 
-    // 5. Closed Arched Lid (fades out cleanly as openProgress crosses 0 -> 0.30)
-    if (openProgress < 0.32f) {
-        val closedAlpha = ((1f - openProgress / 0.32f) * contentAlpha).coerceIn(0f, 1f)
-        val lidTop = baseTop - lidH - lidLift * 0.25f
-        val lidPath = Path().apply {
-            moveTo(chestLeft - chestW * 0.02f, baseTop + u * 0.012f)
-            lineTo(chestLeft - chestW * 0.02f, lidTop + lidH * 0.45f)
-            quadraticTo(cx, lidTop - lidH * 0.26f, chestLeft + chestW + chestW * 0.02f, lidTop + lidH * 0.45f)
-            lineTo(chestLeft + chestW + chestW * 0.02f, baseTop + u * 0.012f)
+    // Center metallic latch staple mounted directly on the front rim (physically holds the padlock!)
+    val stapleW = chestW * 0.13f
+    val stapleH = rimH * 1.18f
+    val stapleLeft = cx - stapleW * 0.5f
+    val stapleTop = baseTop - rimH * 0.14f
+    drawRoundRect(
+        brush = Brush.verticalGradient(
+            colors = listOf(palette.trimLight, palette.trimDark),
+            startY = stapleTop,
+            endY = stapleTop + stapleH
+        ),
+        topLeft = Offset(stapleLeft, stapleTop),
+        size = Size(stapleW, stapleH),
+        cornerRadius = CornerRadius(u * 0.016f, u * 0.016f),
+        alpha = contentAlpha
+    )
+    drawRoundRect(
+        color = ChestInkOutline.copy(alpha = contentAlpha),
+        topLeft = Offset(stapleLeft, stapleTop),
+        size = Size(stapleW, stapleH),
+        cornerRadius = CornerRadius(u * 0.016f, u * 0.016f),
+        style = Stroke(width = strokeW * 0.78f)
+    )
+
+    // =========================================================================
+    // LAYER 5 (SINGLE HINGED LID — FRONT LIFT PHASE): openProgress < 0.28
+    // Smoothly foreshortens & lifts off the rim before seamlessly handing off to Layer 2!
+    // =========================================================================
+    if (clampedOpen < lidPivotSplit) {
+        val liftT = (clampedOpen / lidPivotSplit).coerceIn(0f, 1f)
+        val frontLipY = baseTop + u * 0.012f - liftT * u * 0.055f
+        val effectiveLidH = lidH * (1f - liftT * 0.80f)
+        val lidTop = frontLipY - effectiveLidH
+        val lidPath = scratch.primaryPath.apply {
+            rewind()
+            moveTo(chestLeft - chestW * 0.02f, frontLipY)
+            lineTo(chestLeft - chestW * 0.02f, lidTop + effectiveLidH * 0.45f)
+            quadraticTo(cx, lidTop - effectiveLidH * 0.26f, chestLeft + chestW + chestW * 0.02f, lidTop + effectiveLidH * 0.45f)
+            lineTo(chestLeft + chestW + chestW * 0.02f, frontLipY)
             close()
         }
         drawPath(
@@ -565,109 +850,430 @@ internal fun DrawScope.drawMonthlyRewardChest(
             brush = Brush.verticalGradient(
                 colors = listOf(palette.lidTop, palette.lidBottom),
                 startY = lidTop,
-                endY = baseTop
+                endY = frontLipY
             ),
-            alpha = closedAlpha
+            alpha = contentAlpha
         )
-        // Specular highlight across curved top
-        val glossPath = Path().apply {
-            moveTo(chestLeft + chestW * 0.14f, lidTop + lidH * 0.34f)
-            quadraticTo(cx, lidTop + lidH * 0.06f, chestLeft + chestW * 0.86f, lidTop + lidH * 0.34f)
+        val glossPath = scratch.secondaryPath.apply {
+            rewind()
+            moveTo(chestLeft + chestW * 0.14f, lidTop + effectiveLidH * 0.34f)
+            quadraticTo(cx, lidTop + effectiveLidH * 0.06f, chestLeft + chestW * 0.86f, lidTop + effectiveLidH * 0.34f)
         }
         drawPath(
             path = glossPath,
-            color = Color.White.copy(alpha = 0.24f * closedAlpha),
+            color = Color.White.copy(alpha = 0.24f * contentAlpha),
             style = Stroke(width = strokeW * 1.4f, cap = StrokeCap.Round)
         )
-        // Left & right curved lid metal straps
-        val leftStrap = Path().apply {
-            moveTo(chestLeft + bandW * 0.15f, baseTop + u * 0.01f)
-            lineTo(chestLeft + bandW * 0.15f, lidTop + lidH * 0.38f)
-            quadraticTo(chestLeft + bandW * 0.65f, lidTop + lidH * 0.14f, chestLeft + bandW * 1.15f, lidTop + lidH * 0.16f)
-            lineTo(chestLeft + bandW * 1.15f, baseTop + u * 0.01f)
+        val leftStrap = scratch.rayPath.apply {
+            rewind()
+            moveTo(chestLeft + bandW * 0.15f, frontLipY)
+            lineTo(chestLeft + bandW * 0.15f, lidTop + effectiveLidH * 0.38f)
+            quadraticTo(chestLeft + bandW * 0.65f, lidTop + effectiveLidH * 0.14f, chestLeft + bandW * 1.15f, lidTop + effectiveLidH * 0.16f)
+            lineTo(chestLeft + bandW * 1.15f, frontLipY)
             close()
         }
-        val rightStrap = Path().apply {
-            moveTo(chestLeft + chestW - bandW * 0.15f, baseTop + u * 0.01f)
-            lineTo(chestLeft + chestW - bandW * 0.15f, lidTop + lidH * 0.38f)
-            quadraticTo(chestLeft + chestW - bandW * 0.65f, lidTop + lidH * 0.14f, chestLeft + chestW - bandW * 1.15f, lidTop + lidH * 0.16f)
-            lineTo(chestLeft + chestW - bandW * 1.15f, baseTop + u * 0.01f)
-            close()
-        }
-        drawPath(leftStrap, color = palette.trimMid.copy(alpha = closedAlpha))
-        drawPath(rightStrap, color = palette.trimMid.copy(alpha = closedAlpha))
-        drawPath(leftStrap, color = ChestInkOutline.copy(alpha = closedAlpha), style = Stroke(strokeW * 0.72f))
-        drawPath(rightStrap, color = ChestInkOutline.copy(alpha = closedAlpha), style = Stroke(strokeW * 0.72f))
+        drawPath(leftStrap, color = palette.trimMid.copy(alpha = contentAlpha))
+        drawPath(leftStrap, color = ChestInkOutline.copy(alpha = contentAlpha), style = Stroke(strokeW * 0.72f))
 
-        // Lid outline
+        val rightStrap = scratch.rayPath.apply {
+            rewind()
+            moveTo(chestLeft + chestW - bandW * 0.15f, frontLipY)
+            lineTo(chestLeft + chestW - bandW * 0.15f, lidTop + effectiveLidH * 0.38f)
+            quadraticTo(chestLeft + chestW - bandW * 0.65f, lidTop + effectiveLidH * 0.14f, chestLeft + chestW - bandW * 1.15f, lidTop + effectiveLidH * 0.16f)
+            lineTo(chestLeft + chestW - bandW * 1.15f, frontLipY)
+            close()
+        }
+        drawPath(rightStrap, color = palette.trimMid.copy(alpha = contentAlpha))
+        drawPath(rightStrap, color = ChestInkOutline.copy(alpha = contentAlpha), style = Stroke(strokeW * 0.72f))
+
         drawPath(
             path = lidPath,
-            color = ChestInkOutline.copy(alpha = closedAlpha),
+            color = ChestInkOutline.copy(alpha = contentAlpha),
             style = Stroke(width = strokeW, join = StrokeJoin.Round)
         )
 
-        // Gold chest crown on top of closed lid!
         if (tier == MonthlyChestTier.GOLD) {
             drawMiniCrown(
-                center = Offset(cx, lidTop + lidH * 0.01f),
+                center = Offset(cx, lidTop + effectiveLidH * 0.01f),
                 crownW = chestW * 0.30f,
-                crownH = u * 0.135f,
+                crownH = u * 0.135f * (1f - liftT * 0.58f),
                 strokeW = strokeW * 0.85f,
-                alpha = closedAlpha
+                alpha = contentAlpha
+            )
+        }
+
+        // Radiant light leaking out of the closed/cracking chest seam right before bursting open!
+        val seamStrength = maxOf(seamGlowAlpha, liftT * 0.95f).coerceIn(0f, 1f)
+        if (seamStrength > 0.01f) {
+            val sAlpha = seamStrength * contentAlpha
+            val seamGlowR = chestW * 0.56f
+            val seamY = (frontLipY + baseTop) * 0.5f
+            drawOval(
+                brush = Brush.radialGradient(
+                    colors = listOf(
+                        lightSpec.coreColor.copy(alpha = 0.94f * sAlpha),
+                        lightSpec.midColor.copy(alpha = 0.48f * sAlpha),
+                        Color.Transparent
+                    ),
+                    center = Offset(cx, seamY),
+                    radius = seamGlowR
+                ),
+                topLeft = Offset(cx - seamGlowR, seamY - u * 0.06f),
+                size = Size(seamGlowR * 2f, u * 0.13f)
+            )
+            drawLine(
+                color = lightSpec.coreColor.copy(alpha = 0.96f * sAlpha),
+                start = Offset(chestLeft + chestW * 0.04f, seamY),
+                end = Offset(chestLeft + chestW * 0.96f, seamY),
+                strokeWidth = strokeW * (1.7f + liftT * 1.4f),
+                cap = StrokeCap.Round
             )
         }
     }
 
-    // 6. Signature Bone-Shaped Padlock (뼈다귀 자물쇠) on center front latch!
-    val lockAlpha = ((1f - lockPopProgress * 0.9f) * contentAlpha).coerceIn(0f, 1f)
+    // =========================================================================
+    // LAYER 6 (FRONT LATCH): Bone-Shaped Padlock at exact geo.lockCenter / geo.keyholeCenter!
+    // =========================================================================
+    val lockAlpha = ((1f - lockPopProgress * 1.05f) * contentAlpha).coerceIn(0f, 1f)
     if (lockAlpha > 0.02f) {
-        val lockCenterY = baseTop + rimH * 1.12f - lockPopProgress * u * 0.12f
-        val lockRot = lockPopProgress * 22f
-        val shackleOpenOffset = if (openProgress > 0.05f || lockPopProgress > 0.1f) u * 0.025f else 0f
+        val popArcX = lockPopProgress * u * 0.14f
+        val popArcY = -sin(lockPopProgress * PI.toFloat()) * u * 0.16f + lockPopProgress * lockPopProgress * u * 0.18f
+        val lockCenterX = geo.lockCenter.x + lockShakeOffsetPx + popArcX
+        val lockCenterY = geo.lockCenter.y + popArcY
+        val lockRot = lockPopProgress * 32f + lockShakeOffsetPx * 0.62f
+        val shackleOpenOffset = u * (
+            clampedShackle * 0.036f +
+                lockPopProgress * 0.026f +
+                (if (clampedOpen > 0.05f && clampedShackle < 0.01f) 0.026f else 0f)
+            )
         withTransform({
-            rotate(degrees = lockRot, pivot = Offset(cx, lockCenterY))
+            rotate(degrees = lockRot, pivot = Offset(lockCenterX, lockCenterY))
         }) {
             drawBonePadlock(
-                center = Offset(cx, lockCenterY),
-                width = chestW * 0.29f,
-                height = u * 0.115f,
+                center = Offset(lockCenterX, lockCenterY),
+                width = geo.lockWidth,
+                height = geo.lockHeight,
                 shackleLift = shackleOpenOffset,
                 palette = palette,
-                hasPinkGem = tier == MonthlyChestTier.GOLD,
+                isRoyalGold = tier == MonthlyChestTier.GOLD,
                 strokeW = strokeW * 0.88f,
-                alpha = lockAlpha
+                alpha = lockAlpha,
+                scratch = scratch
             )
         }
     }
 
-    // 7. Opened Gold Chest celebratory ribbon bow on bottom-right corner & Bronze toy ball
-    if (openProgress > 0.45f) {
-        val extraAlpha = (((openProgress - 0.45f) / 0.55f) * contentAlpha).coerceIn(0f, 1f)
-        if (tier == MonthlyChestTier.BRONZE) {
-            // Cute blue & orange dog ball resting beside opened bronze chest
-            val ballCenter = Offset(chestLeft + chestW * 0.98f, baseBottom - u * 0.03f)
-            val ballR = u * 0.062f
-            drawCircle(color = Color(0xFF2F69B2).copy(alpha = extraAlpha), radius = ballR, center = ballCenter)
-            drawArc(
-                color = Color(0xFFF39C38).copy(alpha = extraAlpha),
-                startAngle = -35f,
-                sweepAngle = 140f,
-                useCenter = false,
-                topLeft = Offset(ballCenter.x - ballR * 0.72f, ballCenter.y - ballR * 0.72f),
-                size = Size(ballR * 1.44f, ballR * 1.44f),
-                style = Stroke(width = ballR * 0.40f, cap = StrokeCap.Round)
-            )
-            drawCircle(color = ChestInkOutline.copy(alpha = extraAlpha), radius = ballR, center = ballCenter, style = Stroke(strokeW * 0.75f))
-        } else if (tier == MonthlyChestTier.GOLD) {
-            // Golden ribbon bow on right front corner
-            drawGoldRibbonBow(
-                center = Offset(chestLeft + chestW * 0.90f, baseBottom - baseH * 0.25f),
-                sizePx = u * 0.12f,
-                strokeW = strokeW * 0.72f,
-                alpha = extraAlpha
+    // =========================================================================
+    // LAYER 7 (FOREGROUND GLARE): Light spill over rim, aura rings, sparkles & rising motes
+    // =========================================================================
+    if (clampedRise > 0.02f) {
+        drawMysteryForegroundLightEffects(
+            spec = lightSpec,
+            silhouetteCenter = silhouetteCenter,
+            mouthY = baseTop,
+            chestW = chestW,
+            u = u,
+            riseProgress = clampedRise,
+            glowPhase = glowPhase,
+            pulse = pulse,
+            contentAlpha = contentAlpha,
+            scratch = scratch
+        )
+    }
+}
+
+private fun DrawScope.drawMysteryBackRaysAndHalo(
+    spec: MysteryLightSpec,
+    origin: Offset,
+    u: Float,
+    strength: Float,
+    glowPhase: Float,
+    pulse: Float,
+    scratch: ChestDrawScratch
+) {
+    // 1) Wide soft outer bloom halo
+    val haloR = u * spec.haloRadiusFactor * (0.65f + 0.35f * strength) * pulse
+    drawCircle(
+        brush = Brush.radialGradient(
+            colors = listOf(
+                spec.coreColor.copy(alpha = (spec.haloAlpha * strength).coerceIn(0f, 1f)),
+                spec.midColor.copy(alpha = (spec.haloAlpha * 0.56f * strength).coerceIn(0f, 1f)),
+                spec.outerColor.copy(alpha = (spec.haloAlpha * 0.22f * strength).coerceIn(0f, 1f)),
+                Color.Transparent
+            ),
+            center = origin,
+            radius = haloR.coerceAtLeast(1f)
+        ),
+        radius = haloR,
+        center = origin
+    )
+
+    // 2) Primary volumetric rotating god-rays radiating outward from the mystery silhouette!
+    val primaryLen = u * spec.rayLengthFactor * (0.45f + 0.55f * strength) * pulse
+    val baseRot = glowPhase * 2f * PI.toFloat() * 0.25f
+    val rayStep = (2.0 * PI / spec.primaryRayCount).toFloat()
+    val rayBrush = Brush.radialGradient(
+        colors = listOf(
+            spec.coreColor.copy(alpha = (spec.rayAlpha * strength).coerceIn(0f, 1f)),
+            spec.midColor.copy(alpha = (spec.rayAlpha * 0.52f * strength).coerceIn(0f, 1f)),
+            spec.outerColor.copy(alpha = (spec.rayAlpha * 0.12f * strength).coerceIn(0f, 1f)),
+            Color.Transparent
+        ),
+        center = origin,
+        radius = primaryLen.coerceAtLeast(1f)
+    )
+
+    val rayPath = scratch.rayPath
+    for (i in 0 until spec.primaryRayCount) {
+        val angle = baseRot + i * rayStep
+        val lengthMod = if (i % 2 == 0) 1.0f else 0.78f
+        val rLen = primaryLen * lengthMod
+        val spread = spec.rayHalfSpreadRad * (if (i % 2 == 0) 1.0f else 0.72f)
+        val a1 = angle - spread
+        val a2 = angle + spread
+        val innerR = u * spec.silhouetteRadiusFactor * 0.42f
+        rayPath.rewind()
+        rayPath.moveTo(origin.x + cos(a1) * innerR, origin.y + sin(a1) * innerR)
+        rayPath.lineTo(origin.x + cos(a1) * rLen, origin.y + sin(a1) * rLen)
+        rayPath.lineTo(origin.x + cos(a2) * rLen, origin.y + sin(a2) * rLen)
+        rayPath.lineTo(origin.x + cos(a2) * innerR, origin.y + sin(a2) * innerR)
+        rayPath.close()
+        drawPath(path = rayPath, brush = rayBrush)
+    }
+
+    // 3) Counter-rotating sharp secondary starlight rays for Silver & Gold!
+    if (spec.secondaryRayCount > 0) {
+        val secLen = primaryLen * 1.16f
+        val secRot = -glowPhase * 2f * PI.toFloat() * 0.18f + 0.32f
+        val secStep = (2.0 * PI / spec.secondaryRayCount).toFloat()
+        val secBrush = Brush.radialGradient(
+            colors = listOf(
+                spec.coreColor.copy(alpha = (spec.rayAlpha * 0.72f * strength).coerceIn(0f, 1f)),
+                spec.midColor.copy(alpha = (spec.rayAlpha * 0.28f * strength).coerceIn(0f, 1f)),
+                Color.Transparent
+            ),
+            center = origin,
+            radius = secLen.coerceAtLeast(1f)
+        )
+        val secSpread = spec.rayHalfSpreadRad * 0.48f
+        for (i in 0 until spec.secondaryRayCount) {
+            val angle = secRot + i * secStep
+            val a1 = angle - secSpread
+            val a2 = angle + secSpread
+            rayPath.rewind()
+            rayPath.moveTo(origin.x, origin.y)
+            rayPath.lineTo(origin.x + cos(a1) * secLen, origin.y + sin(a1) * secLen)
+            rayPath.lineTo(origin.x + cos(a2) * secLen, origin.y + sin(a2) * secLen)
+            rayPath.close()
+            drawPath(path = rayPath, brush = secBrush)
+        }
+    }
+}
+
+private fun DrawScope.drawMysterySilhouetteObject(
+    spec: MysteryLightSpec,
+    center: Offset,
+    u: Float,
+    riseProgress: Float,
+    pulse: Float,
+    contentAlpha: Float,
+    scratch: ChestDrawScratch
+) {
+    val scaleFactor = (0.36f + 0.64f * riseProgress).coerceIn(0.2f, 1.08f)
+    val r = u * spec.silhouetteRadiusFactor * scaleFactor
+    val objAlpha = (riseProgress * 1.35f).coerceIn(0f, 1f) * contentAlpha
+
+    // 1) Intense tight eclipse corona directly behind the black object so light pours off its contour!
+    val coronaR = u * spec.coronaRadiusFactor * scaleFactor * pulse
+    drawCircle(
+        brush = Brush.radialGradient(
+            colors = listOf(
+                spec.coreColor.copy(alpha = (0.98f * objAlpha).coerceIn(0f, 1f)),
+                spec.midColor.copy(alpha = (0.72f * objAlpha).coerceIn(0f, 1f)),
+                spec.outerColor.copy(alpha = (0.24f * objAlpha).coerceIn(0f, 1f)),
+                Color.Transparent
+            ),
+            center = center,
+            radius = coronaR.coerceAtLeast(1f)
+        ),
+        radius = coronaR,
+        center = center
+    )
+
+    // 2) Sculpted enigmatic dark mystery silhouette object (zero concrete item details revealed!)
+    val path = scratch.silhouettePath
+    buildMysterySilhouettePath(path, center, r)
+
+    // Soft outer glowing halo stroke wrapping tightly around the silhouette edge
+    val outerRimW = (r * 0.24f).coerceIn(2.2f, 10f)
+    drawPath(
+        path = path,
+        color = spec.midColor.copy(alpha = (0.68f * objAlpha).coerceIn(0f, 1f)),
+        style = Stroke(width = outerRimW, join = StrokeJoin.Round, cap = StrokeCap.Round)
+    )
+
+    // Solid pitch-black silhouette interior (mysterious, unreadable contents!)
+    drawPath(
+        path = path,
+        brush = Brush.radialGradient(
+            colors = listOf(
+                Color(0xFF171522).copy(alpha = objAlpha),
+                Color(0xFF0A0910).copy(alpha = objAlpha),
+                Color(0xFF050408).copy(alpha = objAlpha)
+            ),
+            center = Offset(center.x, center.y - r * 0.16f),
+            radius = (r * 1.25f).coerceAtLeast(1f)
+        )
+    )
+
+    // Crisp luminous backlit rim hugging the dark silhouette contour
+    val innerRimW = (r * 0.085f).coerceIn(1.2f, 3.8f)
+    drawPath(
+        path = path,
+        color = spec.rimColor.copy(alpha = (0.94f * objAlpha).coerceIn(0f, 1f)),
+        style = Stroke(width = innerRimW, join = StrokeJoin.Round, cap = StrokeCap.Round)
+    )
+}
+
+/**
+ * Enigmatic shrouded mystery artifact silhouette: symmetrical domed crest, soft organic shoulders,
+ * subtly tapered lower body — unmistakably a mysterious solid treasure object without spoiling contents.
+ */
+private fun buildMysterySilhouettePath(path: Path, center: Offset, r: Float) {
+    val cx = center.x
+    val cy = center.y
+    path.rewind()
+    path.moveTo(cx, cy - r * 1.06f)
+    // Upper-right mystical dome & shoulder
+    path.cubicTo(
+        cx + r * 0.42f, cy - r * 1.02f,
+        cx + r * 0.88f, cy - r * 0.62f,
+        cx + r * 0.86f, cy - r * 0.14f
+    )
+    // Right waist & rounded lower relic curve
+    path.cubicTo(
+        cx + r * 0.84f, cy + r * 0.28f,
+        cx + r * 0.64f, cy + r * 0.72f,
+        cx + r * 0.32f, cy + r * 0.90f
+    )
+    // Smooth bottom keel
+    path.quadraticTo(
+        cx, cy + r * 1.02f,
+        cx - r * 0.32f, cy + r * 0.90f
+    )
+    // Left lower relic curve & waist
+    path.cubicTo(
+        cx - r * 0.64f, cy + r * 0.72f,
+        cx - r * 0.84f, cy + r * 0.28f,
+        cx - r * 0.86f, cy - r * 0.14f
+    )
+    // Upper-left shoulder & mystical dome back to apex
+    path.cubicTo(
+        cx - r * 0.88f, cy - r * 0.62f,
+        cx - r * 0.42f, cy - r * 1.02f,
+        cx, cy - r * 1.06f
+    )
+    path.close()
+}
+
+private fun DrawScope.drawMysteryForegroundLightEffects(
+    spec: MysteryLightSpec,
+    silhouetteCenter: Offset,
+    mouthY: Float,
+    chestW: Float,
+    u: Float,
+    riseProgress: Float,
+    glowPhase: Float,
+    pulse: Float,
+    contentAlpha: Float,
+    scratch: ChestDrawScratch
+) {
+    val fxAlpha = (riseProgress * contentAlpha).coerceIn(0f, 1f)
+
+    // 1) Soft luminous rim spill over the chest opening
+    val spillR = chestW * 0.52f * pulse
+    drawOval(
+        brush = Brush.radialGradient(
+            colors = listOf(
+                spec.coreColor.copy(alpha = (0.48f * fxAlpha).coerceIn(0f, 1f)),
+                spec.midColor.copy(alpha = (0.22f * fxAlpha).coerceIn(0f, 1f)),
+                Color.Transparent
+            ),
+            center = Offset(silhouetteCenter.x, mouthY),
+            radius = spillR.coerceAtLeast(1f)
+        ),
+        topLeft = Offset(silhouetteCenter.x - spillR, mouthY - u * 0.08f),
+        size = Size(spillR * 2f, u * 0.16f)
+    )
+
+    // 2) Expanding pulsing light aura rings emanating from the black silhouette (Silver: 1, Gold: 2)
+    for (ringIdx in 0 until spec.ringCount) {
+        val ringPhase = (glowPhase + ringIdx * 0.5f) % 1f
+        val ringR = u * (spec.silhouetteRadiusFactor * 0.95f + ringPhase * spec.haloRadiusFactor * 0.72f)
+        val ringAlpha = ((1f - ringPhase) * 0.58f * fxAlpha).coerceIn(0f, 1f)
+        if (ringAlpha > 0.02f) {
+            drawCircle(
+                color = (if (ringIdx == 0) spec.coreColor else spec.midColor).copy(alpha = ringAlpha),
+                radius = ringR,
+                center = silhouetteCenter,
+                style = Stroke(width = (u * 0.012f * (1f - ringPhase * 0.55f)).coerceAtLeast(1f))
             )
         }
     }
+
+    // 3) Rising luminous light motes drifting up from the chest & silhouette
+    val moteTotal = spec.moteCount.coerceAtMost(MoteXOffsets.size)
+    for (i in 0 until moteTotal) {
+        val p = (glowPhase + MotePhaseOffsets[i]) % 1f
+        val mx = silhouetteCenter.x + MoteXOffsets[i] * chestW * (0.75f + 0.35f * p)
+        val my = mouthY - p * u * (spec.riseHeightFactor + spec.rayLengthFactor * 0.58f)
+        val mAlpha = (sin(p * PI.toFloat()) * 0.85f * fxAlpha).coerceIn(0f, 1f)
+        val mRadius = u * (0.010f + (i % 3) * 0.0045f) * (1f - p * 0.35f)
+        if (mAlpha > 0.02f) {
+            drawCircle(
+                color = (if (i % 2 == 0) spec.sparklePrimary else spec.sparkleSecondary).copy(alpha = mAlpha),
+                radius = mRadius,
+                center = Offset(mx, my)
+            )
+        }
+    }
+
+    // 4) Crisp twinkling 4-point star sparkles radiating around the black silhouette
+    val sparkleTotal = spec.sparkleCount.coerceAtMost(SparkleAnglesDeg.size)
+    val baseOrbitR = u * spec.silhouetteRadiusFactor
+    for (i in 0 until sparkleTotal) {
+        val twinkle = 0.38f + 0.62f * abs(sin((glowPhase * 2f * PI + i * 0.95).toFloat()))
+        val angleRad = SparkleAnglesDeg[i] * (PI / 180.0)
+        val dist = baseOrbitR * SparkleDistMultipliers[i] * (0.94f + 0.08f * twinkle)
+        val sx = silhouetteCenter.x + (cos(angleRad) * dist).toFloat()
+        val sy = silhouetteCenter.y + (sin(angleRad) * dist).toFloat()
+        val sr = u * SparkleSizeMultipliers[i] * (0.62f + 0.52f * twinkle)
+        val col = if (i % 2 == 0) spec.sparklePrimary else spec.sparkleSecondary
+        drawFourPointSparkleFast(
+            path = scratch.sparklePath,
+            center = Offset(sx, sy),
+            radius = sr,
+            color = col,
+            alpha = (twinkle * fxAlpha).coerceIn(0f, 1f)
+        )
+    }
+}
+
+private fun DrawScope.drawFourPointSparkleFast(
+    path: Path,
+    center: Offset,
+    radius: Float,
+    color: Color,
+    alpha: Float
+) {
+    path.rewind()
+    path.moveTo(center.x, center.y - radius)
+    path.quadraticTo(center.x, center.y, center.x + radius, center.y)
+    path.quadraticTo(center.x, center.y, center.x, center.y + radius)
+    path.quadraticTo(center.x, center.y, center.x - radius, center.y)
+    path.quadraticTo(center.x, center.y, center.x, center.y - radius)
+    path.close()
+    drawPath(path, color = color.copy(alpha = alpha))
 }
 
 private fun DrawScope.drawBonePadlock(
@@ -676,16 +1282,18 @@ private fun DrawScope.drawBonePadlock(
     height: Float,
     shackleLift: Float,
     palette: ChestPalette,
-    hasPinkGem: Boolean,
+    isRoyalGold: Boolean,
     strokeW: Float,
-    alpha: Float
+    alpha: Float,
+    scratch: ChestDrawScratch
 ) {
     val shackleW = width * 0.44f
     val shackleH = height * 0.95f
     val shackleTop = center.y - height * 0.45f - shackleH * 0.72f - shackleLift
 
     // Padlock shackle arch
-    val shacklePath = Path().apply {
+    val shacklePath = scratch.shacklePath.apply {
+        rewind()
         moveTo(center.x - shackleW * 0.5f, center.y - height * 0.20f)
         lineTo(center.x - shackleW * 0.5f, shackleTop + shackleW * 0.5f)
         arcTo(
@@ -699,37 +1307,37 @@ private fun DrawScope.drawBonePadlock(
     drawPath(shacklePath, color = ChestInkOutline.copy(alpha = alpha), style = Stroke(width = strokeW * 2.5f, cap = StrokeCap.Round))
     drawPath(shacklePath, color = palette.trimLight.copy(alpha = alpha), style = Stroke(width = strokeW * 1.35f, cap = StrokeCap.Round))
 
-    // Cute Dog-Bone Lock Body!
+    // Cute Dog-Bone Lock Body
     val knobR = height * 0.44f
     val barHalfW = width * 0.34f
     val barHalfH = height * 0.32f
-    val knobs = listOf(
-        Offset(center.x - barHalfW, center.y - knobR * 0.48f),
-        Offset(center.x - barHalfW, center.y + knobR * 0.48f),
-        Offset(center.x + barHalfW, center.y - knobR * 0.48f),
-        Offset(center.x + barHalfW, center.y + knobR * 0.48f)
-    )
+    val k1 = Offset(center.x - barHalfW, center.y - knobR * 0.48f)
+    val k2 = Offset(center.x - barHalfW, center.y + knobR * 0.48f)
+    val k3 = Offset(center.x + barHalfW, center.y - knobR * 0.48f)
+    val k4 = Offset(center.x + barHalfW, center.y + knobR * 0.48f)
 
-    // Outline shadow pass first so the merged bone silhouette looks seamless
-    knobs.forEach { k ->
-        drawCircle(color = ChestInkOutline.copy(alpha = alpha), radius = knobR + strokeW * 0.9f, center = k)
-    }
+    val outlineR = knobR + strokeW * 0.9f
+    val outlineCol = ChestInkOutline.copy(alpha = alpha)
+    drawCircle(color = outlineCol, radius = outlineR, center = k1)
+    drawCircle(color = outlineCol, radius = outlineR, center = k2)
+    drawCircle(color = outlineCol, radius = outlineR, center = k3)
+    drawCircle(color = outlineCol, radius = outlineR, center = k4)
     drawRoundRect(
-        color = ChestInkOutline.copy(alpha = alpha),
+        color = outlineCol,
         topLeft = Offset(center.x - barHalfW - strokeW * 0.4f, center.y - barHalfH - strokeW * 0.9f),
         size = Size((barHalfW + strokeW * 0.4f) * 2f, (barHalfH + strokeW * 0.9f) * 2f),
         cornerRadius = CornerRadius(barHalfH, barHalfH)
     )
 
-    // Fill pass
     val fillBrush = Brush.verticalGradient(
         colors = listOf(palette.lockLight, palette.lockDark),
         startY = center.y - height * 0.6f,
         endY = center.y + height * 0.6f
     )
-    knobs.forEach { k ->
-        drawCircle(brush = fillBrush, radius = knobR, center = k, alpha = alpha)
-    }
+    drawCircle(brush = fillBrush, radius = knobR, center = k1, alpha = alpha)
+    drawCircle(brush = fillBrush, radius = knobR, center = k2, alpha = alpha)
+    drawCircle(brush = fillBrush, radius = knobR, center = k3, alpha = alpha)
+    drawCircle(brush = fillBrush, radius = knobR, center = k4, alpha = alpha)
     drawRoundRect(
         brush = fillBrush,
         topLeft = Offset(center.x - barHalfW, center.y - barHalfH),
@@ -738,212 +1346,39 @@ private fun DrawScope.drawBonePadlock(
         alpha = alpha
     )
 
-    // Center keyhole (or pink royal gem + keyhole on Gold chest!)
-    if (hasPinkGem) {
-        drawFacetedGem(
-            center = center,
-            radius = height * 0.29f,
-            color = Color(0xFFF0508E),
-            highlight = Color(0xFFFFC1DA),
-            strokeW = strokeW * 0.62f,
-            alpha = alpha
+    // Royal Gold pink ruby halo ring around the keyhole so ALL 3 tiers show a clear keyhole!
+    if (isRoyalGold) {
+        drawCircle(
+            color = Color(0xFFF0508E).copy(alpha = alpha),
+            radius = height * 0.27f,
+            center = center
         )
-    } else {
-        val khR = height * 0.14f
-        drawCircle(color = ChestInkOutline.copy(alpha = alpha), radius = khR, center = Offset(center.x, center.y - khR * 0.45f))
-        val khSlot = Path().apply {
-            moveTo(center.x - khR * 0.55f, center.y)
-            lineTo(center.x + khR * 0.55f, center.y)
-            lineTo(center.x + khR * 0.85f, center.y + khR * 1.45f)
-            lineTo(center.x - khR * 0.85f, center.y + khR * 1.45f)
-            close()
-        }
-        drawPath(khSlot, color = ChestInkOutline.copy(alpha = alpha))
+        drawCircle(
+            color = ChestInkOutline.copy(alpha = alpha),
+            radius = height * 0.27f,
+            center = center,
+            style = Stroke(width = strokeW * 0.55f)
+        )
     }
-}
 
-private fun DrawScope.drawChestTreasures(
-    tier: MonthlyChestTier,
-    cx: Float,
-    mouthY: Float,
-    chestW: Float,
-    u: Float,
-    openProgress: Float,
-    glowPhase: Float,
-    strokeW: Float,
-    alpha: Float
-) {
-    val popY = (1f - openProgress) * u * 0.08f
-    val baseY = mouthY - u * 0.02f + popY
-
-    when (tier) {
-        MonthlyChestTier.BRONZE -> {
-            // Gold coins bed
-            for (i in -2..2) {
-                val coinCenter = Offset(cx + i * chestW * 0.13f, baseY + u * 0.01f)
-                drawOval(
-                    color = Color(0xFFF4BC3C).copy(alpha = alpha),
-                    topLeft = Offset(coinCenter.x - u * 0.048f, coinCenter.y - u * 0.025f),
-                    size = Size(u * 0.096f, u * 0.050f)
-                )
-                drawOval(
-                    color = ChestInkOutline.copy(alpha = alpha),
-                    topLeft = Offset(coinCenter.x - u * 0.048f, coinCenter.y - u * 0.025f),
-                    size = Size(u * 0.096f, u * 0.050f),
-                    style = Stroke(strokeW * 0.7f)
-                )
-            }
-            // Two cream dog bones peeking out
-            drawMiniDogBone(
-                center = Offset(cx - chestW * 0.18f, baseY - u * 0.05f),
-                length = chestW * 0.34f,
-                rotationDeg = -28f,
-                fillLight = Color(0xFFFFF1DC),
-                fillDark = Color(0xFFE7C59B),
-                strokeW = strokeW,
-                alpha = alpha
-            )
-            drawMiniDogBone(
-                center = Offset(cx + chestW * 0.17f, baseY - u * 0.04f),
-                length = chestW * 0.30f,
-                rotationDeg = 22f,
-                fillLight = Color(0xFFFFF1DC),
-                fillDark = Color(0xFFE7C59B),
-                strokeW = strokeW,
-                alpha = alpha
-            )
-            // Purple ball peeking inside right
-            val ballCenter = Offset(cx + chestW * 0.05f, baseY - u * 0.025f)
-            drawCircle(color = Color(0xFF8348B5).copy(alpha = alpha), radius = u * 0.052f, center = ballCenter)
-            drawCircle(color = ChestInkOutline.copy(alpha = alpha), radius = u * 0.052f, center = ballCenter, style = Stroke(strokeW * 0.75f))
-        }
-        MonthlyChestTier.SILVER -> {
-            // Silver coins
-            for (i in -2..2) {
-                val coinCenter = Offset(cx + i * chestW * 0.14f, baseY + u * 0.01f)
-                drawOval(
-                    color = Color(0xFFDCE7EE).copy(alpha = alpha),
-                    topLeft = Offset(coinCenter.x - u * 0.046f, coinCenter.y - u * 0.024f),
-                    size = Size(u * 0.092f, u * 0.048f)
-                )
-                drawOval(
-                    color = ChestInkOutline.copy(alpha = alpha),
-                    topLeft = Offset(coinCenter.x - u * 0.046f, coinCenter.y - u * 0.024f),
-                    size = Size(u * 0.092f, u * 0.048f),
-                    style = Stroke(strokeW * 0.7f)
-                )
-            }
-            // Silver bone on left
-            drawMiniDogBone(
-                center = Offset(cx - chestW * 0.19f, baseY - u * 0.055f),
-                length = chestW * 0.32f,
-                rotationDeg = -32f,
-                fillLight = Color(0xFFF6FBFF),
-                fillDark = Color(0xFFB3C7D4),
-                strokeW = strokeW,
-                alpha = alpha
-            )
-            // Silver 5-point star in center
-            drawFivePointStar(
-                center = Offset(cx, baseY - u * 0.06f),
-                outerR = u * 0.072f,
-                innerR = u * 0.032f,
-                fillColor = Color(0xFFE7F3F9),
-                strokeW = strokeW * 0.85f,
-                alpha = alpha
-            )
-            // Sparkling cyan diamond on right
-            drawFacetedGem(
-                center = Offset(cx + chestW * 0.18f, baseY - u * 0.045f),
-                radius = u * 0.068f,
-                color = Color(0xFF42DCFF),
-                highlight = Color(0xFFD6FAFF),
-                strokeW = strokeW * 0.85f,
-                alpha = alpha
-            )
-            // Floating cyan sparkles
-            val bob = sin(glowPhase * 2f * PI.toFloat()) * u * 0.018f
-            drawFourPointSparkle(Offset(cx - chestW * 0.34f, baseY - u * 0.15f + bob), u * 0.036f, Color(0xFF7AF2FF), alpha)
-            drawFourPointSparkle(Offset(cx + chestW * 0.32f, baseY - u * 0.18f - bob), u * 0.042f, Color(0xFFB8FAFF), alpha)
-        }
-        MonthlyChestTier.GOLD -> {
-            // Piles of radiant gold coins
-            for (i in -2..2) {
-                val coinCenter = Offset(cx + i * chestW * 0.14f, baseY + u * 0.008f)
-                drawOval(
-                    color = Color(0xFFFFD447).copy(alpha = alpha),
-                    topLeft = Offset(coinCenter.x - u * 0.052f, coinCenter.y - u * 0.026f),
-                    size = Size(u * 0.104f, u * 0.052f)
-                )
-                drawOval(
-                    color = ChestInkOutline.copy(alpha = alpha),
-                    topLeft = Offset(coinCenter.x - u * 0.052f, coinCenter.y - u * 0.026f),
-                    size = Size(u * 0.104f, u * 0.052f),
-                    style = Stroke(strokeW * 0.7f)
-                )
-            }
-            // Mini gold crown peeking on left
-            drawMiniCrown(
-                center = Offset(cx - chestW * 0.18f, baseY - u * 0.055f),
-                crownW = chestW * 0.28f,
-                crownH = u * 0.12f,
-                strokeW = strokeW * 0.85f,
-                alpha = alpha
-            )
-            // Jewel-studded golden bone peeking center-right
-            drawMiniDogBone(
-                center = Offset(cx + chestW * 0.06f, baseY - u * 0.065f),
-                length = chestW * 0.35f,
-                rotationDeg = -22f,
-                fillLight = Color(0xFFFFF39A),
-                fillDark = Color(0xFFE39E14),
-                strokeW = strokeW,
-                alpha = alpha
-            )
-            drawFacetedGem(
-                center = Offset(cx + chestW * 0.06f, baseY - u * 0.065f),
-                radius = u * 0.024f,
-                color = Color(0xFFF04886),
-                highlight = Color(0xFFFFC5DC),
-                strokeW = strokeW * 0.55f,
-                alpha = alpha
-            )
-            // Festive flying stars & confetti burst!
-            val bob = sin(glowPhase * 2f * PI.toFloat()) * u * 0.02f
-            drawFivePointStar(
-                center = Offset(cx - chestW * 0.42f, baseY - u * 0.22f + bob),
-                outerR = u * 0.048f,
-                innerR = u * 0.022f,
-                fillColor = Color(0xFFFFD84A),
-                strokeW = strokeW * 0.65f,
-                alpha = alpha
-            )
-            drawFivePointStar(
-                center = Offset(cx + chestW * 0.42f, baseY - u * 0.20f - bob),
-                outerR = u * 0.044f,
-                innerR = u * 0.020f,
-                fillColor = Color(0xFFFF88B7),
-                strokeW = strokeW * 0.65f,
-                alpha = alpha
-            )
-            drawFourPointSparkle(Offset(cx, baseY - u * 0.24f - bob), u * 0.045f, Color(0xFFFFF3A1), alpha)
-            // Mini celebratory firework streamers
-            drawLine(
-                color = Color(0xFFFF8A2B).copy(alpha = 0.88f * alpha),
-                start = Offset(cx - chestW * 0.26f, baseY - u * 0.12f),
-                end = Offset(cx - chestW * 0.46f, baseY - u * 0.27f),
-                strokeWidth = strokeW * 1.1f,
-                cap = StrokeCap.Round
-            )
-            drawLine(
-                color = Color(0xFF47B5FF).copy(alpha = 0.88f * alpha),
-                start = Offset(cx + chestW * 0.26f, baseY - u * 0.12f),
-                end = Offset(cx + chestW * 0.46f, baseY - u * 0.26f),
-                strokeWidth = strokeW * 1.1f,
-                cap = StrokeCap.Round
-            )
-        }
+    // Center Keyhole (crisp metallic recess + clear dark slot aligned 0.0px to geo.keyholeCenter!)
+    val khR = height * (if (isRoyalGold) 0.132f else 0.150f)
+    val khCircleCenter = Offset(center.x, center.y - khR * 0.36f)
+    drawCircle(
+        color = palette.trimLight.copy(alpha = 0.65f * alpha),
+        radius = khR * 1.24f,
+        center = khCircleCenter
+    )
+    drawCircle(color = outlineCol, radius = khR, center = khCircleCenter)
+    val khSlot = scratch.primaryPath.apply {
+        rewind()
+        moveTo(center.x - khR * 0.56f, center.y - khR * 0.05f)
+        lineTo(center.x + khR * 0.56f, center.y - khR * 0.05f)
+        lineTo(center.x + khR * 0.88f, center.y + khR * 1.48f)
+        lineTo(center.x - khR * 0.88f, center.y + khR * 1.48f)
+        close()
     }
+    drawPath(khSlot, color = outlineCol)
 }
 
 /**
@@ -1224,50 +1659,6 @@ private fun DrawScope.drawMiniCrown(
     )
 }
 
-private fun DrawScope.drawMiniDogBone(
-    center: Offset,
-    length: Float,
-    rotationDeg: Float,
-    fillLight: Color,
-    fillDark: Color,
-    strokeW: Float,
-    alpha: Float
-) {
-    val halfW = length * 0.34f
-    val halfH = length * 0.14f
-    val knobR = length * 0.16f
-    withTransform({
-        rotate(degrees = rotationDeg, pivot = center)
-    }) {
-        val knobs = listOf(
-            Offset(center.x - halfW, center.y - knobR * 0.55f),
-            Offset(center.x - halfW, center.y + knobR * 0.55f),
-            Offset(center.x + halfW, center.y - knobR * 0.55f),
-            Offset(center.x + halfW, center.y + knobR * 0.55f)
-        )
-        knobs.forEach { k -> drawCircle(color = ChestInkOutline.copy(alpha = alpha), radius = knobR + strokeW * 0.85f, center = k) }
-        drawRoundRect(
-            color = ChestInkOutline.copy(alpha = alpha),
-            topLeft = Offset(center.x - halfW, center.y - halfH - strokeW * 0.85f),
-            size = Size(halfW * 2f, (halfH + strokeW * 0.85f) * 2f),
-            cornerRadius = CornerRadius(halfH, halfH)
-        )
-        val brush = Brush.verticalGradient(
-            colors = listOf(fillLight, fillDark),
-            startY = center.y - knobR * 1.5f,
-            endY = center.y + knobR * 1.5f
-        )
-        knobs.forEach { k -> drawCircle(brush = brush, radius = knobR, center = k, alpha = alpha) }
-        drawRoundRect(
-            brush = brush,
-            topLeft = Offset(center.x - halfW, center.y - halfH),
-            size = Size(halfW * 2f, halfH * 2f),
-            cornerRadius = CornerRadius(halfH, halfH),
-            alpha = alpha
-        )
-    }
-}
-
 private fun DrawScope.drawFacetedGem(
     center: Offset,
     radius: Float,
@@ -1315,28 +1706,6 @@ private fun DrawScope.drawTinyPawPrint(center: Offset, radius: Float, color: Col
     }
 }
 
-private fun DrawScope.drawFivePointStar(
-    center: Offset,
-    outerR: Float,
-    innerR: Float,
-    fillColor: Color,
-    strokeW: Float,
-    alpha: Float
-) {
-    val path = Path().apply {
-        for (i in 0 until 10) {
-            val r = if (i % 2 == 0) outerR else innerR
-            val angle = (-90.0 + i * 36.0) * PI / 180.0
-            val px = center.x + (cos(angle) * r).toFloat()
-            val py = center.y + (sin(angle) * r).toFloat()
-            if (i == 0) moveTo(px, py) else lineTo(px, py)
-        }
-        close()
-    }
-    drawPath(path, color = fillColor.copy(alpha = alpha))
-    drawPath(path, color = ChestInkOutline.copy(alpha = alpha), style = Stroke(width = strokeW, join = StrokeJoin.Round))
-}
-
 internal fun DrawScope.drawFourPointSparkle(
     center: Offset,
     radius: Float,
@@ -1352,41 +1721,4 @@ internal fun DrawScope.drawFourPointSparkle(
         close()
     }
     drawPath(path, color = color.copy(alpha = alpha))
-}
-
-private fun DrawScope.drawGoldRibbonBow(
-    center: Offset,
-    sizePx: Float,
-    strokeW: Float,
-    alpha: Float
-) {
-    val wingW = sizePx * 0.62f
-    val wingH = sizePx * 0.42f
-    val leftWing = Path().apply {
-        moveTo(center.x, center.y)
-        quadraticTo(center.x - wingW, center.y - wingH, center.x - wingW * 0.85f, center.y + wingH * 0.55f)
-        close()
-    }
-    val rightWing = Path().apply {
-        moveTo(center.x, center.y)
-        quadraticTo(center.x + wingW, center.y - wingH, center.x + wingW * 0.85f, center.y + wingH * 0.55f)
-        close()
-    }
-    val tail = Path().apply {
-        moveTo(center.x - sizePx * 0.10f, center.y + sizePx * 0.08f)
-        lineTo(center.x - sizePx * 0.36f, center.y + sizePx * 0.72f)
-        lineTo(center.x - sizePx * 0.08f, center.y + sizePx * 0.56f)
-        lineTo(center.x + sizePx * 0.24f, center.y + sizePx * 0.76f)
-        lineTo(center.x + sizePx * 0.14f, center.y + sizePx * 0.08f)
-        close()
-    }
-    val gold = Color(0xFFFFD64B).copy(alpha = alpha)
-    drawPath(tail, color = Color(0xFFE7A922).copy(alpha = alpha))
-    drawPath(tail, color = ChestInkOutline.copy(alpha = alpha), style = Stroke(strokeW, join = StrokeJoin.Round))
-    drawPath(leftWing, color = gold)
-    drawPath(leftWing, color = ChestInkOutline.copy(alpha = alpha), style = Stroke(strokeW, join = StrokeJoin.Round))
-    drawPath(rightWing, color = gold)
-    drawPath(rightWing, color = ChestInkOutline.copy(alpha = alpha), style = Stroke(strokeW, join = StrokeJoin.Round))
-    drawCircle(color = Color(0xFFFFEE85).copy(alpha = alpha), radius = sizePx * 0.18f, center = center)
-    drawCircle(color = ChestInkOutline.copy(alpha = alpha), radius = sizePx * 0.18f, center = center, style = Stroke(strokeW))
 }

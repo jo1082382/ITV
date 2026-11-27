@@ -667,6 +667,38 @@ object JevCandidatePolicy {
         responseAgeMs in 0..settings.resultTtlSeconds * 1000L
 }
 
+/**
+ * HUD와 앱 내 Jev 테스트 창에서 확률·기준선·보정량(% / %p)을 동일한 0.1% 단위로
+ * 반올림 및 포맷하기 위한 공통 유틸리티.
+ */
+object JevPercentFormat {
+    /** 0.0..1.0 비율을 0.1% 단위 정수로 변환합니다 (예: 0.695 -> 695, -0.005 -> -5). */
+    fun toTenthsPct(ratio: Double): Int = kotlin.math.round(ratio * 1000.0).toInt()
+
+    /** 0.0..100.0 백분율을 0.1% 단위 정수로 변환합니다 (예: 69.5 -> 695, -0.5 -> -5). */
+    fun pctToTenths(percent: Double): Int = kotlin.math.round(percent * 10.0).toInt()
+
+    /** 0.1% 단위 정수를 문자열로 포맷합니다. [trimWholeZero]가 true면 `.0`을 생략합니다(예: 700 -> "70", 695 -> "69.5"). */
+    fun formatTenths(tenths: Int, trimWholeZero: Boolean = true): String {
+        val sign = if (tenths < 0) "-" else ""
+        val absVal = kotlin.math.abs(tenths)
+        val whole = absVal / 10
+        val frac = absVal % 10
+        return if (trimWholeZero && frac == 0) "$sign$whole" else "$sign$whole.$frac"
+    }
+
+    /** 0.0..1.0 비율을 `%` 기호 없이 포맷합니다 (예: 0.695 -> "69.5", 0.70 -> "70"). */
+    fun formatRatioPct(ratio: Double, trimWholeZero: Boolean = true): String =
+        formatTenths(toTenthsPct(ratio), trimWholeZero = trimWholeZero)
+
+    /** 부호가 포함된 0.1%p 보정/격차 문자열을 반환합니다 (예: +5 -> "+0.5%p", -10 -> "-1%p", 0 -> "0%p"). */
+    fun formatSignedDeltaTenths(tenths: Int, trimWholeZero: Boolean = true): String = when {
+        tenths > 0 -> "+${formatTenths(tenths, trimWholeZero = trimWholeZero)}%p"
+        tenths < 0 -> "${formatTenths(tenths, trimWholeZero = trimWholeZero)}%p"
+        else -> "0%p"
+    }
+}
+
 /** No interpolation across unknown observations. Session boundary is governed by standard timeout and rest rules. */
 class JevSessionTracker(private val newId: () -> String) {
     companion object {

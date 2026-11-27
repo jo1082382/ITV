@@ -38,6 +38,7 @@ import androidx.lifecycle.lifecycleScope
 import com.example.itv.composition.AuthComposition
 import com.example.itv.composition.CoachingAccess
 import com.example.itv.data.local.ItvDatabase
+import com.example.itv.infrastructure.coaching.MailboxNavigationBus
 import com.example.itv.infrastructure.consent.FileConsentStore
 import com.example.itv.infrastructure.observation.accessibility.WritingGuard
 import com.example.itv.presentation.auth.LoginScreen
@@ -54,6 +55,7 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         const val EXTRA_FORCE_ONBOARDING = "com.team.itv.EXTRA_FORCE_ONBOARDING"
+        const val EXTRA_OPEN_MAILBOX = "com.team.itv.EXTRA_OPEN_MAILBOX"
     }
 
     private var forceOnboardingState by mutableStateOf(false)
@@ -69,6 +71,10 @@ class MainActivity : ComponentActivity() {
         if (intent.getBooleanExtra(EXTRA_FORCE_ONBOARDING, false)) {
             forceOnboardingState = true
         }
+        if (intent.getBooleanExtra(EXTRA_OPEN_MAILBOX, false)) {
+            intent.removeExtra(EXTRA_OPEN_MAILBOX)
+            MailboxNavigationBus.requestOpenMailbox()
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -77,6 +83,10 @@ class MainActivity : ComponentActivity() {
 
         if (intent.getBooleanExtra(EXTRA_FORCE_ONBOARDING, false)) {
             forceOnboardingState = true
+        }
+        if (intent.getBooleanExtra(EXTRA_OPEN_MAILBOX, false)) {
+            intent.removeExtra(EXTRA_OPEN_MAILBOX)
+            MailboxNavigationBus.requestOpenMailbox()
         }
 
         val viewModel = ViewModelProvider(this,

@@ -13,6 +13,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
@@ -35,6 +36,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.example.itv.infrastructure.theme.SeasonThemeMode
 import com.example.itv.infrastructure.theme.UserThemeStore
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlin.math.PI
 import kotlin.math.abs
@@ -44,31 +46,70 @@ import kotlin.math.sin
 /**
  * 스크롤 중이거나 오버레이/드로어가 열려 있을 때 계절 배경·전경 파티클 애니메이션을
  * 0fps로 일시정지시켜 메인 스레드와 GPU를 스크롤 렌더링에 100% 양보하는 컨트롤러.
+ *
+ * 단일 공유 시계([clockMs])를 보유하므로 배경/전경/캐릭터 무대가 모두 하나의 타이머만 공유하고,
+ * 스크롤 시작·종료 시 Compose 재구성이나 `repeatOnLifecycle` 재구독이 0회 발생합니다.
  */
 class SeasonalAnimationController {
     var scrollPaused by mutableStateOf(false)
     var overlayPaused by mutableStateOf(false)
     val isPaused: Boolean get() = scrollPaused || overlayPaused
+    internal val clockMs = mutableLongStateOf(0L)
 }
 
 val LocalSeasonalAnimationController = compositionLocalOf<SeasonalAnimationController?> { null }
 
 /**
- * 풀스크린 계절 파티클을 60~120fps 무한 Choreographer 콜백 대신 저전력 20fps(50ms)로 스로틀링하고,
- * 스크롤 중 또는 Activity 비활성(ON_PAUSE/ON_STOP) 시 0fps로 즉시 정지시키는 공유 시계.
+ * [SeasonalAnimationController.clockMs]를 구동하는 단일 공유 시계 드라이버.
+ * `snapshotFlow { !controller.isPaused }`로 일시정지/재개를 처리해 스크롤 터치·플링 시작 시
+ * 단 한 번의 Composable 재구성도 유발하지 않습니다.
+ */
+@Composable
+fun SeasonalClockDriver(
+    controller: SeasonalAnimationController,
+    active: Boolean,
+    frameIntervalMs: Long = 66L
+) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(controller, lifecycleOwner, active, frameIntervalMs) {
+        if (!active) return@LaunchedEffect
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            while (isActive) {
+                if (controller.isPaused) {
+                    snapshotFlow { controller.isPaused }.first { !it }
+                }
+                var lastWall = android.os.SystemClock.uptimeMillis()
+                while (isActive && !controller.isPaused) {
+                    delay(frameIntervalMs)
+                    if (controller.isPaused) break
+                    val now = android.os.SystemClock.uptimeMillis()
+                    val dt = (now - lastWall).coerceIn(0L, 250L)
+                    lastWall = now
+                    controller.clockMs.longValue += dt
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 풀스크린 계절 파티클 시계를 반환합니다.
+ * [LocalSeasonalAnimationController]가 제공되면 단일 공유 시계([SeasonalAnimationController.clockMs])를
+ * 그대로 반환해 중복 코루틴·타이머와 스크롤 시 재구성을 완전히 제거합니다.
  * State<Long>을 반환하므로 Draw 단계(onDrawBehind)에서만 읽어 Compose 재구성을 전혀 유발하지 않습니다.
  */
 @Composable
 internal fun rememberThrottledSeasonalTimeMs(
-    frameIntervalMs: Long = 50L
+    frameIntervalMs: Long = 66L
 ): State<Long> {
     val controller = LocalSeasonalAnimationController.current
-    val paused = controller?.isPaused == true
+    if (controller != null) {
+        return controller.clockMs
+    }
     val lifecycleOwner = LocalLifecycleOwner.current
     val timeMs = remember { mutableLongStateOf(0L) }
 
-    LaunchedEffect(lifecycleOwner, paused, frameIntervalMs) {
-        if (paused) return@LaunchedEffect
+    LaunchedEffect(lifecycleOwner, frameIntervalMs) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             var lastWall = android.os.SystemClock.uptimeMillis()
             while (isActive) {

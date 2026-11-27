@@ -10,6 +10,7 @@ import androidx.work.WorkerParameters
 import com.example.itv.composition.queryNightReport
 import com.example.itv.composition.queryUsageReport
 import com.example.itv.infrastructure.coaching.CoachingConsentStore
+import com.example.itv.infrastructure.coaching.WeeklyMailboxStore
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.time.LocalDate
@@ -19,7 +20,7 @@ import kotlin.time.Duration.Companion.seconds
 /**
  * Lightweight once-daily background worker that snapshots daily phone usage, 24-hour hourly
  * distributions, top apps, shortform stats, and sleep records into the 6-month on-device archive
- * ([MonthlyUsageArchiveStore]).
+ * ([MonthlyUsageArchiveStore]), and delivers Monday's weekly life-coach letter to [WeeklyMailboxStore].
  *
  * Works for BOTH guest and social-logged-in users without requiring network access or opening
  * the app / individual calendar dates, ensuring full 6-month history survives Android OS pruning.
@@ -35,8 +36,8 @@ class DailyArchiveSyncWorker(
         if (!File(ctx.noBackupFilesDir, "login_completed_v1").exists()) return Result.success()
 
         runCatching {
+            val today = LocalDate.now()
             val synced = withTimeoutOrNull(10.seconds) {
-                val today = LocalDate.now()
                 val todayRep = runCatching { ctx.queryUsageReport(1, today) }.getOrNull()
                 val nightRep = runCatching { queryNightReport(ctx, 7) }.getOrNull()
                 MonthlyUsageArchiveStore.syncDailySnapshot(
@@ -53,6 +54,8 @@ class DailyArchiveSyncWorker(
                     minIntervalMs = 0L
                 )
             }
+            // Deliver Monday's weekly coach letter right after archiving the completed week
+            WeeklyMailboxStore.ensureMondayLettersDelivered(ctx, today)
         }.onFailure { err ->
             Log.w(TAG, "Daily archive sync skipped: ${err.message}")
         }

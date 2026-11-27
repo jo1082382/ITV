@@ -526,6 +526,25 @@ internal class CoachingOverlayFactory(private val context: Context, private val 
             speechWidth, WindowManager.LayoutParams.WRAP_CONTENT,
             speechX, speechY, false
         )
+        val gentleBubbleBg = s.speech.background as? com.example.itv.presentation.character.PuppyBubbleDrawable
+        if (isLandscape) {
+            // 가로 모드에서는 말풍선이 강아지 왼쪽에 배치되므로 본체 위치는 유지하고 꼬리만 오른쪽 강아지 머리 방향으로 정렬
+            s.speech.setPadding(dp(18), dp(14), dp(30), dp(14))
+            val dogHeadY = s.homeY + dogSize * 0.32f
+            gentleBubbleBg?.pointTowardRight(0.55f)
+            s.speech.addOnLayoutChangeListener { _, _, top, _, bottom, _, _, _, _ ->
+                val bubbleH = bottom - top
+                if (bubbleH > 0) {
+                    val vFrac = ((dogHeadY - speechY) / bubbleH.toFloat()).coerceIn(0.18f, 0.82f)
+                    gentleBubbleBg?.pointTowardRight(vFrac)
+                }
+            }
+        } else {
+            // 세로 모드에서는 말풍선 본체 위치는 유지하고 꼬리만 우측 강아지 머리 중심에 맞춤
+            val dogHeadX = s.homeX + dogSize * 0.5f
+            val hFrac = ((dogHeadX - speechX) / speechWidth.toFloat()).coerceIn(0.12f, 0.88f)
+            gentleBubbleBg?.pointToward(hFrac, belowBubble = true)
+        }
         add(s.speech, s.speechParams!!)
 
         // 구석에서 천천히 걸어와서 가만히 서는 애니메이션 (GPU translationX 전용 · updateViewLayout 0회)
